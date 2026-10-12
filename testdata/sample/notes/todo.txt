@@ -1,0 +1,2 @@
+- ship netgrep
+- keep the index incremental

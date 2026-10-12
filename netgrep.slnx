@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/Netgrep/Netgrep.csproj" />
+  <Project Path="tests/Netgrep.Tests/Netgrep.Tests.csproj" />
+</Solution>
