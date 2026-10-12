@@ -43,13 +43,13 @@ internal static class Indexer
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                stats.SkippedUnreadable++;
+                stats.IncrementSkippedUnreadable();
                 continue;
             }
 
             if (info.Length > TextFiles.MaxFileBytes)
             {
-                stats.SkippedTooLarge++;
+                stats.IncrementSkippedTooLarge();
                 continue;
             }
 
@@ -69,13 +69,13 @@ internal static class Indexer
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                stats.SkippedUnreadable++;
+                stats.IncrementSkippedUnreadable();
                 continue;
             }
 
             if (TextFiles.IsBinary(bytes))
             {
-                stats.SkippedBinary++;
+                stats.IncrementSkippedBinary();
                 continue;
             }
 

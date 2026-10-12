@@ -20,11 +20,7 @@ internal static class MachineOutput
         switch (format)
         {
             case OutputFormat.Text:
-                foreach (var match in matches)
-                {
-                    Console.WriteLine($"{match.Path}:{match.Line}:{match.Column}:{match.LineText}");
-                }
-
+                WriteText(matches);
                 break;
             case OutputFormat.Ndjson:
                 foreach (var match in matches)
@@ -124,7 +120,121 @@ internal static class MachineOutput
         writer.WriteNumber("column", match.Column);
         writer.WriteString("text", match.Text);
         writer.WriteString("lineText", match.LineText);
+        if (match.Before != null || match.After != null)
+        {
+            WriteContext(writer, "before", match.Before);
+            WriteContext(writer, "after", match.After);
+        }
+
         writer.WriteEndObject();
+    }
+
+    private static void WriteContext(Utf8JsonWriter writer, string name, IReadOnlyList<ContextLine>? lines)
+    {
+        writer.WriteStartArray(name);
+        if (lines != null)
+        {
+            foreach (var line in lines)
+            {
+                writer.WriteStartObject();
+                writer.WriteNumber("line", line.Line);
+                writer.WriteString("text", line.Text);
+                writer.WriteEndObject();
+            }
+        }
+
+        writer.WriteEndArray();
+    }
+
+    private static void WriteText(IReadOnlyList<SearchMatch> matches)
+    {
+        var matchLines = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+        foreach (var match in matches)
+        {
+            if (match.Before == null && match.After == null)
+            {
+                continue;
+            }
+
+            if (!matchLines.TryGetValue(match.Path, out var lines))
+            {
+                lines = [];
+                matchLines[match.Path] = lines;
+            }
+
+            lines.Add(match.Line);
+        }
+
+        string? path = null;
+        HashSet<int>? fileMatches = null;
+        var lastLine = 0;
+        var printed = false;
+        foreach (var match in matches)
+        {
+            if (match.Before == null && match.After == null)
+            {
+                Console.WriteLine($"{match.Path}:{match.Line}:{match.Column}:{match.LineText}");
+                continue;
+            }
+
+            if (!string.Equals(path, match.Path, StringComparison.Ordinal))
+            {
+                path = match.Path;
+                fileMatches = matchLines[match.Path];
+                lastLine = 0;
+                printed = false;
+            }
+
+            var before = match.Before ?? [];
+            var upcoming = NextVisible(before, fileMatches, match.Line);
+            if (printed && upcoming > lastLine + 1)
+            {
+                Console.WriteLine("--");
+            }
+
+            foreach (var line in before)
+            {
+                if (line.Line <= lastLine || fileMatches!.Contains(line.Line))
+                {
+                    continue;
+                }
+
+                Console.WriteLine($"{match.Path}-{line.Line}-{line.Text}");
+                lastLine = line.Line;
+                printed = true;
+            }
+
+            Console.WriteLine($"{match.Path}:{match.Line}:{match.Column}:{match.LineText}");
+            if (match.Line > lastLine)
+            {
+                lastLine = match.Line;
+            }
+
+            printed = true;
+            foreach (var line in match.After ?? [])
+            {
+                if (line.Line <= lastLine || fileMatches!.Contains(line.Line))
+                {
+                    continue;
+                }
+
+                Console.WriteLine($"{match.Path}-{line.Line}-{line.Text}");
+                lastLine = line.Line;
+            }
+        }
+    }
+
+    private static int NextVisible(IReadOnlyList<ContextLine> before, HashSet<int>? matchLines, int matchLine)
+    {
+        foreach (var line in before)
+        {
+            if (matchLines == null || !matchLines.Contains(line.Line))
+            {
+                return line.Line;
+            }
+        }
+
+        return matchLine;
     }
 
     private static string IndexJson(IndexResult result)
