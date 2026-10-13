@@ -4,13 +4,26 @@ internal readonly record struct WalkedFile(string FullPath, string RelativePath)
 
 internal sealed class WalkStats
 {
-    public int SkippedIgnored { get; set; }
+    private int _skippedIgnored;
+    private int _skippedBinary;
+    private int _skippedTooLarge;
+    private int _skippedUnreadable;
 
-    public int SkippedBinary { get; set; }
+    public int SkippedIgnored => Volatile.Read(ref _skippedIgnored);
 
-    public int SkippedTooLarge { get; set; }
+    public int SkippedBinary => Volatile.Read(ref _skippedBinary);
 
-    public int SkippedUnreadable { get; set; }
+    public int SkippedTooLarge => Volatile.Read(ref _skippedTooLarge);
+
+    public int SkippedUnreadable => Volatile.Read(ref _skippedUnreadable);
+
+    public void IncrementSkippedIgnored() => Interlocked.Increment(ref _skippedIgnored);
+
+    public void IncrementSkippedBinary() => Interlocked.Increment(ref _skippedBinary);
+
+    public void IncrementSkippedTooLarge() => Interlocked.Increment(ref _skippedTooLarge);
+
+    public void IncrementSkippedUnreadable() => Interlocked.Increment(ref _skippedUnreadable);
 }
 
 internal static class TreeWalker
@@ -35,7 +48,7 @@ internal static class TreeWalker
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                stats.SkippedUnreadable++;
+                stats.IncrementSkippedUnreadable();
                 continue;
             }
 
@@ -50,7 +63,7 @@ internal static class TreeWalker
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
-                    stats.SkippedUnreadable++;
+                    stats.IncrementSkippedUnreadable();
                     continue;
                 }
 
@@ -81,7 +94,7 @@ internal static class TreeWalker
 
                 if (ignores.IsIgnored(scopeRelative, false))
                 {
-                    stats.SkippedIgnored++;
+                    stats.IncrementSkippedIgnored();
                     continue;
                 }
 

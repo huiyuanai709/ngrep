@@ -52,6 +52,25 @@ internal static class LineMap
         return starts.ToArray();
     }
 
+    /// <summary>
+    /// Real lines in <paramref name="text"/>. A trailing newline does not create an extra empty line.
+    /// An empty file has zero lines.
+    /// </summary>
+    public static int LineCount(string text, int[] lineStarts)
+    {
+        if (text.Length == 0 || lineStarts.Length == 0)
+        {
+            return 0;
+        }
+
+        if (text[^1] == '\n')
+        {
+            return lineStarts.Length - 1;
+        }
+
+        return lineStarts.Length;
+    }
+
     public static (int Line, int Column) Map(int[] lineStarts, int index)
     {
         if (lineStarts.Length == 0)
