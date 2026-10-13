@@ -23,10 +23,13 @@ internal sealed class MatchPlan
 
     public required PathFilter Filter { get; init; }
 
+    public LiteralQuery? Literals { get; init; }
+
+    public bool ApplyGitIgnore { get; init; } = true;
+
     public bool WantsContext => Before > 0 || After > 0;
 
-    public bool CanUseTrigrams =>
-        !Invert && !Regex && Patterns.All(static pattern => pattern.Length >= Indexing.Trigrams.Length);
+    public bool CanUseTrigrams => !Invert && Literals is { TrigramSafe: true };
 
     public static MatchPlan Create(SearchQuery query)
     {
@@ -63,12 +66,34 @@ internal sealed class MatchPlan
             Before = query.BeforeContext,
             After = query.AfterContext,
             Filter = PathFilter.Create(query.Globs, query.Types, query.TypeNots, query.TypeAdds),
+            Literals = LiteralQuery.FromPatterns(patterns, query.Regex),
+            ApplyGitIgnore = !query.NoIgnore && !query.NoIgnoreVcs,
         };
     }
 
     public static void Collect(string text, string relativePath, MatchPlan plan, List<SearchMatch> matches)
     {
         var starts = LineMap.Build(text);
+        var lineCount = LineMap.LineCount(text, starts);
+        if (plan.Invert)
+        {
+            var matchingLines = new HashSet<int>();
+            MarkMatchingLines(text, starts, plan, matchingLines);
+            for (var line = 1; line <= lineCount; line++)
+            {
+                if (matchingLines.Contains(line))
+                {
+                    continue;
+                }
+
+                var lineText = LineMap.LineText(text, starts, line);
+                var (before, after) = Context(text, starts, lineCount, line, plan);
+                matches.Add(new SearchMatch(relativePath, line, 1, lineText, lineText, before, after));
+            }
+
+            return;
+        }
+
         var hits = new List<Hit>();
         if (plan.Regex)
         {
@@ -106,30 +131,6 @@ internal sealed class MatchPlan
         });
 
         var deduped = Dedup(hits);
-        var lineCount = LineMap.LineCount(text, starts);
-        if (plan.Invert)
-        {
-            var matchingLines = new HashSet<int>();
-            foreach (var hit in deduped)
-            {
-                matchingLines.Add(LineMap.Map(starts, hit.Index).Line);
-            }
-
-            for (var line = 1; line <= lineCount; line++)
-            {
-                if (matchingLines.Contains(line))
-                {
-                    continue;
-                }
-
-                var lineText = LineMap.LineText(text, starts, line);
-                var (before, after) = Context(text, starts, lineCount, line, plan);
-                matches.Add(new SearchMatch(relativePath, line, 1, lineText, lineText, before, after));
-            }
-
-            return;
-        }
-
         foreach (var hit in deduped)
         {
             var (line, column) = LineMap.Map(starts, hit.Index);
@@ -173,6 +174,92 @@ internal sealed class MatchPlan
         }
 
         return patterns;
+    }
+
+    private static void MarkMatchingLines(string text, int[] starts, MatchPlan plan, HashSet<int> lines)
+    {
+        if (plan.Regex)
+        {
+            foreach (var regex in plan.Regexes!)
+            {
+                MarkRegex(text, starts, regex, plan.Word, lines);
+            }
+
+            return;
+        }
+
+        var comparison = plan.IgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        foreach (var pattern in plan.Patterns)
+        {
+            MarkLiteral(text, starts, pattern, comparison, plan.Word, lines);
+        }
+    }
+
+    private static void MarkLiteral(string text, int[] starts, string pattern, StringComparison comparison, bool word, HashSet<int> lines)
+    {
+        if (pattern.Length == 0 || pattern.Length > text.Length)
+        {
+            return;
+        }
+
+        var from = 0;
+        while (from <= text.Length - pattern.Length)
+        {
+            var idx = text.IndexOf(pattern, from, comparison);
+            if (idx < 0)
+            {
+                return;
+            }
+
+            if (!word || WordBoundary.At(text, idx, pattern.Length))
+            {
+                lines.Add(LineMap.Map(starts, idx).Line);
+                var newline = text.IndexOf('\n', idx);
+                if (newline < 0)
+                {
+                    return;
+                }
+
+                from = newline + 1;
+                continue;
+            }
+
+            from = idx + 1;
+        }
+    }
+
+    private static void MarkRegex(string text, int[] starts, Regex regex, bool word, HashSet<int> lines)
+    {
+        var from = 0;
+        while (from <= text.Length)
+        {
+            var match = regex.Match(text, from);
+            if (!match.Success)
+            {
+                return;
+            }
+
+            if (!word || WordBoundary.At(text, match.Index, match.Length))
+            {
+                lines.Add(LineMap.Map(starts, match.Index).Line);
+                if (match.Index >= text.Length)
+                {
+                    return;
+                }
+
+                var newline = text.IndexOf('\n', match.Index);
+                if (newline < 0)
+                {
+                    return;
+                }
+
+                from = newline + 1;
+                continue;
+            }
+
+            var next = match.Index + Math.Max(1, match.Length);
+            from = next <= from ? from + 1 : next;
+        }
     }
 
     private static void CollectLiteral(string text, string pattern, StringComparison comparison, bool word, List<Hit> hits)

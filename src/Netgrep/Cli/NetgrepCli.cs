@@ -85,7 +85,7 @@ internal static class NetgrepCli
         };
         var regex = new Option<bool>("--regex")
         {
-            Description = "Treat patterns as regular expressions. Regex search reads candidate files and does not trigram-filter.",
+            Description = "Treat patterns as regular expressions. Required literals are trigram-filtered when extraction is safe.",
         };
         var scan = new Option<bool>("--scan")
         {
@@ -93,7 +93,7 @@ internal static class NetgrepCli
         };
         var glob = new Option<string[]>("-g", "--glob")
         {
-            Description = "Include or exclude files. Repeatable. A leading ! excludes (like ripgrep). The last matching glob wins. Globs do not re-include gitignored files.",
+            Description = "Include or exclude files. Repeatable. A leading ! excludes (like ripgrep). The last matching glob wins. Globs filter after .gitignore and do not re-include ignored files.",
             Arity = ArgumentArity.ZeroOrMore,
         };
         var type = new Option<string[]>("-t", "--type")
@@ -138,7 +138,15 @@ internal static class NetgrepCli
         };
         var invert = new Option<bool>("-v", "--invert-match")
         {
-            Description = "Print lines that do not match. Reads every candidate file (no trigram filter).",
+            Description = "Print lines that do not match. Does not trigram-filter; reads candidates in parallel and stops each matching line at the first hit.",
+        };
+        var noIgnore = new Option<bool>("--no-ignore")
+        {
+            Description = "Do not respect .gitignore. Globs still filter. .git and .netgrep stay skipped. Scans, because the index omits ignored files.",
+        };
+        var noIgnoreVcs = new Option<bool>("--no-ignore-vcs")
+        {
+            Description = "Do not respect VCS ignore files. netgrep only reads .gitignore, so this matches --no-ignore. Scans instead of using the index.",
         };
         var threads = new Option<int>("-j", "--threads")
         {
@@ -161,6 +169,8 @@ internal static class NetgrepCli
         searchCommand.Options.Add(regexp);
         searchCommand.Options.Add(word);
         searchCommand.Options.Add(invert);
+        searchCommand.Options.Add(noIgnore);
+        searchCommand.Options.Add(noIgnoreVcs);
         searchCommand.Options.Add(threads);
         searchCommand.SetAction(result =>
         {
@@ -200,6 +210,8 @@ internal static class NetgrepCli
                     context,
                     word,
                     invert,
+                    noIgnore,
+                    noIgnoreVcs,
                     threads,
                     cts.Token);
             }
@@ -270,6 +282,8 @@ internal static class NetgrepCli
         Option<int> context,
         Option<bool> word,
         Option<bool> invert,
+        Option<bool> noIgnore,
+        Option<bool> noIgnoreVcs,
         Option<int> threads,
         CancellationToken cancellationToken)
     {
@@ -304,6 +318,8 @@ internal static class NetgrepCli
             ForceScan = result.GetValue(scan),
             WordRegexp = result.GetValue(word),
             InvertMatch = result.GetValue(invert),
+            NoIgnore = result.GetValue(noIgnore),
+            NoIgnoreVcs = result.GetValue(noIgnoreVcs),
             BeforeContext = beforeCount,
             AfterContext = afterCount,
             Globs = Values(result, glob),
