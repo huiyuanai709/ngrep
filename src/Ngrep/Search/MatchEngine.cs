@@ -51,11 +51,24 @@ internal sealed class MatchPlan
 
     public bool CanUseTrigrams => !Invert && Literals is { TrigramSafe: true };
 
+    /// <summary>Regex literals are confirmed per line. Absolute anchors and cross-line matches stay on the full string.</summary>
+    public bool UseLinePrefilter { get; init; }
+
     public static MatchPlan Create(SearchQuery query)
     {
         var patterns = Combine(query);
+        var regex = query.Regex;
+        if (regex && !query.IgnoreCase && VerbatimPattern.TryAll(patterns, out var literals))
+        {
+            // The interpreter would match these spans exactly. Searching them as literals
+            // keeps the byte engine on the hot path. Ignore-case stays on the regex
+            // engine so Unicode case folding does not change.
+            patterns = literals;
+            regex = false;
+        }
+
         Regex[]? regexes = null;
-        if (query.Regex)
+        if (regex)
         {
             // Interpreter only. RegexOptions.Compiled is not AOT-safe for a user pattern.
             // Multiline makes ^ and $ line anchors, matching grep. Singleline is dotall.
@@ -78,31 +91,35 @@ internal sealed class MatchPlan
             }
         }
 
+        var literalsQuery = LiteralQuery.FromPatterns(patterns, regex);
+
         if (query.BeforeContext < 0 || query.AfterContext < 0)
         {
             throw new ArgumentException("Context length must be >= 0.");
         }
 
+        var crosses = query.Multiline || query.MultilineDotAll;
         return new MatchPlan
         {
             Patterns = patterns,
             Regexes = regexes,
-            Regex = query.Regex,
+            Regex = regex,
             IgnoreCase = query.IgnoreCase,
             Word = query.WordRegexp,
             Invert = query.InvertMatch,
             Before = query.BeforeContext,
             After = query.AfterContext,
             Filter = PathFilter.Create(query.Globs, query.Types, query.TypeNots, query.TypeAdds),
-            Literals = LiteralQuery.FromPatterns(patterns, query.Regex),
+            Literals = literalsQuery,
             ApplyGitIgnore = !query.NoIgnore && !query.NoIgnoreVcs,
             Report = query.Report,
-            Multiline = query.Multiline || query.MultilineDotAll,
+            Multiline = crosses,
             MultilineDotAll = query.MultilineDotAll,
             IncludeHidden = query.IncludeHidden,
             CollectAll = query.Stats,
             LineRegexp = query.LineRegexp,
             NoMessages = query.NoMessages,
+            UseLinePrefilter = regex && !crosses && literalsQuery is { HasLinePrefilter: true } && !HasAbsoluteAnchor(patterns),
         };
     }
 
@@ -111,6 +128,30 @@ internal sealed class MatchPlan
     /// so <c>\A</c> and <c>\z</c> mean that line and not the file.
     /// </summary>
     private static string AnchorWholeLine(string pattern) => @"\A(?:" + pattern + @")\z";
+
+    private static bool HasAbsoluteAnchor(string[] patterns)
+    {
+        foreach (var pattern in patterns)
+        {
+            for (var i = 0; i < pattern.Length - 1; i++)
+            {
+                if (pattern[i] != '\\')
+                {
+                    continue;
+                }
+
+                var next = pattern[i + 1];
+                if (next is 'A' or 'z' or 'Z' or 'G')
+                {
+                    return true;
+                }
+
+                i++;
+            }
+        }
+
+        return false;
+    }
 
     public static bool HasMatch(string text, MatchPlan plan)
     {
@@ -180,6 +221,12 @@ internal sealed class MatchPlan
                 AddHit(text, starts, lineCount, relativePath, plan, first, matches);
             }
 
+            return;
+        }
+
+        if (plan.UseLinePrefilter)
+        {
+            CollectPrefiltered(text, starts, lineCount, relativePath, plan, matches);
             return;
         }
 
@@ -359,6 +406,11 @@ internal sealed class MatchPlan
             return FirstWholeLine(text, plan);
         }
 
+        if (plan.UseLinePrefilter)
+        {
+            return FirstPrefiltered(text, plan);
+        }
+
         Hit? best = null;
         if (plan.Regex)
         {
@@ -383,6 +435,157 @@ internal sealed class MatchPlan
         }
 
         return best;
+    }
+
+    private static void CollectPrefiltered(string text, int[] starts, int lineCount, string relativePath, MatchPlan plan, List<SearchMatch> matches)
+    {
+        var hits = new List<Hit>();
+        ForCandidateLines(text, starts, lineCount, plan, (start, slice) =>
+        {
+            for (var i = 0; i < plan.Regexes!.Length; i++)
+            {
+                if (plan.Patterns[i].Length == 0)
+                {
+                    continue;
+                }
+
+                foreach (Match match in plan.Regexes[i].Matches(slice))
+                {
+                    if (!match.Success)
+                    {
+                        continue;
+                    }
+
+                    var index = start + match.Index;
+                    if (plan.Word && !WordBoundary.At(text, index, match.Length))
+                    {
+                        continue;
+                    }
+
+                    hits.Add(new Hit(index, match.Length, match.Value));
+                }
+            }
+        });
+
+        hits.Sort(static (left, right) =>
+        {
+            var index = left.Index.CompareTo(right.Index);
+            return index != 0 ? index : left.Length.CompareTo(right.Length);
+        });
+        foreach (var hit in Dedup(hits))
+        {
+            AddHit(text, starts, lineCount, relativePath, plan, hit, matches);
+        }
+    }
+
+    private static Hit? FirstPrefiltered(string text, MatchPlan plan)
+    {
+        var starts = LineMap.Build(text);
+        var lineCount = LineMap.LineCount(text, starts);
+        Hit? found = null;
+        ForCandidateLines(text, starts, lineCount, plan, (start, slice) =>
+        {
+            if (found != null)
+            {
+                return;
+            }
+
+            var bestRel = int.MaxValue;
+            for (var i = 0; i < plan.Regexes!.Length; i++)
+            {
+                if (plan.Patterns[i].Length == 0)
+                {
+                    continue;
+                }
+
+                var from = 0;
+                while (from <= slice.Length && from < bestRel)
+                {
+                    var match = plan.Regexes[i].Match(slice, from);
+                    if (!match.Success || match.Index >= bestRel)
+                    {
+                        break;
+                    }
+
+                    var index = start + match.Index;
+                    if (!plan.Word || WordBoundary.At(text, index, match.Length))
+                    {
+                        found = new Hit(index, match.Length, match.Value);
+                        bestRel = match.Index;
+                        break;
+                    }
+
+                    var next = match.Index + Math.Max(1, match.Length);
+                    from = next <= from ? from + 1 : next;
+                }
+            }
+        });
+        return found;
+    }
+
+    private static void MarkPrefiltered(string text, int[] starts, MatchPlan plan, HashSet<int> lines)
+    {
+        var lineCount = LineMap.LineCount(text, starts);
+        ForCandidateLines(text, starts, lineCount, plan, (start, slice) =>
+        {
+            if (SliceHits(text, slice, start, plan))
+            {
+                lines.Add(LineMap.Map(starts, start).Line);
+            }
+        });
+    }
+
+    private static bool SliceHits(string text, string slice, int start, MatchPlan plan)
+    {
+        foreach (var regex in plan.Regexes!)
+        {
+            var from = 0;
+            while (from <= slice.Length)
+            {
+                var match = regex.Match(slice, from);
+                if (!match.Success)
+                {
+                    break;
+                }
+
+                if (!plan.Word || WordBoundary.At(text, start + match.Index, match.Length))
+                {
+                    return true;
+                }
+
+                var next = match.Index + Math.Max(1, match.Length);
+                from = next <= from ? from + 1 : next;
+            }
+        }
+
+        return false;
+    }
+
+    private static void ForCandidateLines(string text, int[] starts, int lineCount, MatchPlan plan, Action<int, string> body)
+    {
+        if (lineCount <= 0 || plan.Literals == null)
+        {
+            return;
+        }
+
+        var candidates = new bool[lineCount];
+        plan.Literals.MarkLines(text, starts, lineCount, plan.IgnoreCase, candidates);
+        for (var line = 1; line <= lineCount; line++)
+        {
+            if (!candidates[line - 1])
+            {
+                continue;
+            }
+
+            var start = starts[line - 1];
+            var end = line < starts.Length ? starts[line] - 1 : text.Length;
+            if (end < start)
+            {
+                end = start;
+            }
+
+            body(start, text.Substring(start, end - start));
+        }
     }
 
     private static void ConsiderFirstLiteral(string text, string pattern, StringComparison comparison, bool word, ref Hit? best)
@@ -489,6 +692,12 @@ internal sealed class MatchPlan
 
         if (plan.Regex)
         {
+            if (plan.UseLinePrefilter)
+            {
+                MarkPrefiltered(text, starts, plan, lines);
+                return;
+            }
+
             foreach (var regex in plan.Regexes!)
             {
                 MarkRegex(text, starts, regex, plan, lines);
@@ -822,4 +1031,70 @@ internal static class WordBoundary
         var right = index < text.Length && IsWord(text[index]);
         return left != right;
     }
+}
+
+/// <summary>
+/// A regex with no metacharacters (escapes of those metacharacters are unescaped).
+/// Case-sensitive search then matches the same spans as the interpreter.
+/// </summary>
+internal static class VerbatimPattern
+{
+    public static bool TryAll(string[] patterns, out string[] literals)
+    {
+        literals = new string[patterns.Length];
+        for (var i = 0; i < patterns.Length; i++)
+        {
+            if (!TryOne(patterns[i], out literals[i]))
+            {
+                literals = [];
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public static bool TryOne(string pattern, out string literal)
+    {
+        var built = new System.Text.StringBuilder(pattern.Length);
+        for (var i = 0; i < pattern.Length; i++)
+        {
+            var ch = pattern[i];
+            if (ch == '\\')
+            {
+                if (i + 1 >= pattern.Length || !IsEscapedLiteral(pattern[i + 1]))
+                {
+                    literal = "";
+                    return false;
+                }
+
+                built.Append(pattern[++i]);
+                continue;
+            }
+
+            if (IsMeta(ch))
+            {
+                literal = "";
+                return false;
+            }
+
+            built.Append(ch);
+        }
+
+        literal = built.ToString();
+        // A newline inside a regex is a cross-line match. Without -U those spans are
+        // discarded, so this is not the same as a literal search.
+        if (literal.IndexOf('\n') >= 0 || literal.IndexOf('\r') >= 0)
+        {
+            literal = "";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsMeta(char value) =>
+        value is '.' or '|' or '(' or ')' or '[' or ']' or '{' or '}' or '^' or '$' or '*' or '+' or '?';
+
+    private static bool IsEscapedLiteral(char value) => IsMeta(value) || value == '\\';
 }

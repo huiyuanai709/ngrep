@@ -19,26 +19,216 @@ internal sealed class LiteralQuery
     private readonly ByteClause[] _byteClauses;
     private readonly SimdLiteralScanner? _anySensitive;
     private readonly SimdLiteralScanner? _anyInsensitive;
+    private readonly SimdLiteralScanner[]? _eachSensitive;
+    private readonly SimdLiteralScanner[]? _eachInsensitive;
+    private readonly int[]? _orLengths;
 
     private LiteralQuery(Clause[] clauses)
     {
         _clauses = clauses;
         TrigramSafe = clauses.Length > 0 && clauses.All(static clause => clause.HasTrigram);
+        HasLinePrefilter = clauses.Length > 0 && clauses.All(static clause => clause.HasSelectiveAscii);
         if (TryOrNeedles(clauses, out var orNeedles))
         {
             _byteClauses = [];
             _anySensitive = SimdLiteralScanner.Create(orNeedles, ignoreCase: false);
             _anyInsensitive = SimdLiteralScanner.Create(orNeedles, ignoreCase: true);
+            _orLengths = new int[orNeedles.Count];
+            for (var i = 0; i < orNeedles.Count; i++)
+            {
+                _orLengths[i] = orNeedles[i].Length;
+            }
+
+            if (orNeedles.Count > 1)
+            {
+                var sensitive = new SimdLiteralScanner[orNeedles.Count];
+                var insensitive = new SimdLiteralScanner[orNeedles.Count];
+                for (var i = 0; i < orNeedles.Count; i++)
+                {
+                    sensitive[i] = SimdLiteralScanner.Create([orNeedles[i]], ignoreCase: false);
+                    insensitive[i] = SimdLiteralScanner.Create([orNeedles[i]], ignoreCase: true);
+                }
+
+                _eachSensitive = sensitive;
+                _eachInsensitive = insensitive;
+            }
+            else
+            {
+                _eachSensitive = null;
+                _eachInsensitive = null;
+            }
         }
         else
         {
             _byteClauses = CompileClauses(clauses);
             _anySensitive = null;
             _anyInsensitive = null;
+            _eachSensitive = null;
+            _eachInsensitive = null;
+            _orLengths = null;
         }
     }
 
     public bool TrigramSafe { get; }
+
+    /// <summary>
+    /// Every alternative has an ASCII literal of at least two bytes, so a line
+    /// that lacks it cannot match. Length-1 literals are too common to use this way.
+    /// </summary>
+    public bool HasLinePrefilter { get; }
+
+    /// <summary>
+    /// OR of ASCII needles (a literal query, or <c>foo|bar</c>). <paramref name="each"/>
+    /// is null when there is a single needle and <paramref name="any"/> is that scan.
+    /// </summary>
+    public bool TryAsciiOr(bool ignoreCase, out SimdLiteralScanner any, out SimdLiteralScanner[]? each, out int[] lengths)
+    {
+        if (_anySensitive == null || _orLengths == null || _orLengths.Length == 0)
+        {
+            any = null!;
+            each = null;
+            lengths = [];
+            return false;
+        }
+
+        foreach (var length in _orLengths)
+        {
+            if (length == 0)
+            {
+                any = null!;
+                each = null;
+                lengths = [];
+                return false;
+            }
+        }
+
+        any = ignoreCase ? _anyInsensitive! : _anySensitive;
+        each = ignoreCase ? _eachInsensitive : _eachSensitive;
+        lengths = _orLengths;
+        return true;
+    }
+
+    /// <summary>Marks lines that contain every selective literal of some clause.</summary>
+    public void MarkLines(string text, int[] starts, int lineCount, bool ignoreCase, bool[] lines)
+    {
+        Array.Clear(lines, 0, lineCount);
+        if (lineCount == 0)
+        {
+            return;
+        }
+
+        var comparison = ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var single = true;
+        foreach (var clause in _clauses)
+        {
+            if (SelectiveParts(clause) != 1)
+            {
+                single = false;
+                break;
+            }
+        }
+
+        if (single)
+        {
+            foreach (var clause in _clauses)
+            {
+                foreach (var part in clause.Parts)
+                {
+                    if (part.Length >= 2 && IsAsciiText(part))
+                    {
+                        OrLines(text, starts, lineCount, part, comparison, lines);
+                    }
+                }
+            }
+
+            return;
+        }
+
+        foreach (var clause in _clauses)
+        {
+            bool[]? acc = null;
+            foreach (var part in clause.Parts)
+            {
+                if (part.Length < 2 || !IsAsciiText(part))
+                {
+                    continue;
+                }
+
+                var present = new bool[lineCount];
+                OrLines(text, starts, lineCount, part, comparison, present);
+                if (acc == null)
+                {
+                    acc = present;
+                    continue;
+                }
+
+                for (var i = 0; i < lineCount; i++)
+                {
+                    acc[i] &= present[i];
+                }
+            }
+
+            if (acc == null)
+            {
+                Array.Fill(lines, true, 0, lineCount);
+                return;
+            }
+
+            for (var i = 0; i < lineCount; i++)
+            {
+                lines[i] |= acc[i];
+            }
+        }
+    }
+
+    private static int SelectiveParts(Clause clause)
+    {
+        var count = 0;
+        foreach (var part in clause.Parts)
+        {
+            if (part.Length >= 2 && IsAsciiText(part))
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private static void OrLines(string text, int[] starts, int lineCount, string part, StringComparison comparison, bool[] lines)
+    {
+        var from = 0;
+        while (from < text.Length)
+        {
+            var idx = text.IndexOf(part, from, comparison);
+            if (idx < 0)
+            {
+                return;
+            }
+
+            var line = LineMap.Map(starts, idx).Line;
+            if ((uint)(line - 1) < (uint)lineCount)
+            {
+                lines[line - 1] = true;
+            }
+
+            var newline = text.IndexOf('\n', idx);
+            from = newline < 0 ? text.Length : newline + 1;
+        }
+    }
+
+    private static bool IsAsciiText(string text)
+    {
+        foreach (var ch in text)
+        {
+            if (ch > 0x7F)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     public string[][] Parts => _clauses.Select(static clause => clause.Parts).ToArray();
 
@@ -438,6 +628,23 @@ internal sealed class LiteralQuery
                 foreach (var part in Parts)
                 {
                     if (part.Length >= Trigrams.Length)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+        }
+
+        /// <summary>An ASCII piece of at least two characters can reject a line on its own.</summary>
+        public bool HasSelectiveAscii
+        {
+            get
+            {
+                foreach (var part in Parts)
+                {
+                    if (part.Length >= 2 && IsAsciiText(part))
                     {
                         return true;
                     }

@@ -12,15 +12,7 @@ internal static class TextFiles
     public static bool IsBinary(ReadOnlySpan<byte> bytes)
     {
         var n = Math.Min(bytes.Length, BinaryProbeLength);
-        for (var i = 0; i < n; i++)
-        {
-            if (bytes[i] == 0)
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return bytes[..n].Contains((byte)0);
     }
 
     public static string Decode(ReadOnlySpan<byte> bytes)
@@ -36,7 +28,15 @@ internal static class TextFiles
     public static string Sha256Hex(ReadOnlySpan<byte> bytes) =>
         Convert.ToHexStringLower(SHA256.HashData(bytes));
 
-    public static PooledBytes Read(string path)
+    public static PooledBytes Read(string path) => Read(path, stop: null);
+
+    /// <summary>
+    /// <paramref name="stop"/> is consulted after each chunk, once the leading bytes
+    /// have passed the NUL probe. Returning true ends the read before EOF. A miss
+    /// still reads the whole file. The span passed to <paramref name="stop"/> is the
+    /// prefix read so far; <c>endOfFile</c> is true on the last chunk.
+    /// </summary>
+    public static PooledBytes Read(string path, ReadStop? stop)
     {
         try
         {
@@ -62,18 +62,34 @@ internal static class TextFiles
             try
             {
                 var offset = 0;
+                var checkedBinary = false;
                 while (offset < length)
                 {
-                    var read = stream.Read(buffer, offset, length - offset);
+                    var want = Math.Min(1 << 16, length - offset);
+                    var read = stream.Read(buffer, offset, want);
                     if (read == 0)
                     {
                         break;
                     }
 
                     offset += read;
+                    if (!checkedBinary && (offset >= BinaryProbeLength || offset >= length))
+                    {
+                        checkedBinary = true;
+                        if (IsBinary(buffer.AsSpan(0, offset)))
+                        {
+                            ArrayPool<byte>.Shared.Return(buffer);
+                            return PooledBytes.Binary();
+                        }
+                    }
+
+                    if (stop != null && checkedBinary && stop(buffer.AsSpan(0, offset), offset >= length))
+                    {
+                        return PooledBytes.Ok(buffer, offset);
+                    }
                 }
 
-                if (IsBinary(buffer.AsSpan(0, offset)))
+                if (!checkedBinary && IsBinary(buffer.AsSpan(0, offset)))
                 {
                     ArrayPool<byte>.Shared.Return(buffer);
                     return PooledBytes.Binary();
@@ -93,6 +109,8 @@ internal static class TextFiles
         }
     }
 }
+
+internal delegate bool ReadStop(ReadOnlySpan<byte> contents, bool endOfFile);
 
 internal enum ReadKind
 {

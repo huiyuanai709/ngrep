@@ -379,8 +379,11 @@ internal static class Searcher
         SearchTally tally,
         bool errorIfUnreadable = false)
     {
+        var stop = ByteConfirm.Arm(plan);
         string text;
-        using (var read = TextFiles.Read(file.FullPath))
+        try
+        {
+        using (var read = stop == null ? TextFiles.Read(file.FullPath) : TextFiles.Read(file.FullPath, stop))
         {
             switch (read.Kind)
             {
@@ -400,6 +403,17 @@ internal static class Searcher
                     return;
             }
 
+            if (ByteConfirm.TryHandle(read.Span, file.RelativePath, plan, matches, out var byteMatched))
+            {
+                tally.File(byteMatched);
+                if (!byteMatched)
+                {
+                    filesWithoutMatch?.Add(file.RelativePath);
+                }
+
+                return;
+            }
+
             if (!plan.Invert && plan.Literals != null && plan.Literals.Misses(read.Span, plan.IgnoreCase))
             {
                 tally.File(matched: false);
@@ -408,6 +422,11 @@ internal static class Searcher
             }
 
             text = TextFiles.Decode(read.Span);
+        }
+        }
+        finally
+        {
+            ByteConfirm.Disarm();
         }
 
         if (plan.Report == ReportMode.FilesWithoutMatch && !plan.CollectAll)
