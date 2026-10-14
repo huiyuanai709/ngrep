@@ -144,13 +144,24 @@ PublishAot is on in `src/Ngrep/Ngrep.csproj`, along with invariant globalization
 
 ```bash
 dotnet publish src/Ngrep/Ngrep.csproj -c Release -r linux-x64
+dotnet publish src/Ngrep/Ngrep.csproj -c Release -r linux-x64 /p:IlcInstructionSet=x86-64-v3
+dotnet publish src/Ngrep/Ngrep.csproj -c Release -r linux-x64 /p:IlcInstructionSet=x86-64-v4
 ```
+
+`IlcInstructionSet` is a CPU requirement, not a runtime light-up. Native AOT folds `Avx2.IsSupported` and `Avx512BW.IsSupported` for the set you pick, so the binary uses that set or it does not start. Leave the property unset for the default, which is x86-64-v2: the literal scan stays on SSE2 (`pcmpeqb`) and the binary runs on a CPU without AVX2 or AVX-512. `x86-64-v3` requires AVX2 (and the rest of v3: AVX, BMI1, BMI2, F16C, FMA, LZCNT, MOVBE) and emits AVX2 with no AVX-512. `x86-64-v4` requires AVX-512F, AVX-512BW, AVX-512CD, AVX-512DQ, and AVX-512VL. That binary will not run on a CPU without AVX-512. The project file does not set `IlcInstructionSet`, so a plain `dotnet publish` stays on the v2 baseline. Do not pass `native`; that target is not used here.
 
 That publish uses Satori GC (`PublishWithSatoriGC` 11.0.0-satori.38196422592.1). Satori applies only to the self-contained Native AOT publish. `dotnet test` and `dotnet run` stay on the stock JIT GC. Pass `/p:UseSatoriGC=false` to publish with the stock GC instead. `ServerGarbageCollection` stays false.
 
-The native binary is `src/Ngrep/bin/Release/net11.0/linux-x64/publish/ngrep`. `dotnet build` / `dotnet run` stay on the JIT, which is the right loop for development.
+The native binary is `src/Ngrep/bin/Release/net11.0/linux-x64/publish/ngrep` unless `-o` is set. `dotnet build` / `dotnet run` stay on the JIT, which is the right loop for development. The same `/p:IlcInstructionSet` values apply to `win-x64` and `osx-x64`. `osx-arm64` is arm64; do not pass an x86-64 instruction set for it.
 
-To cut a release, set `<Version>` in `src/Ngrep/Ngrep.csproj` and push a tag `vX.Y.Z` with that same number (`v0.2.0` for version `0.2.0`). [`.github/workflows/release.yml`](.github/workflows/release.yml) builds Native AOT binaries and uploads `ngrep-linux-x64`, `ngrep-win-x64.exe`, `ngrep-osx-arm64`, and `ngrep-osx-x64` (when the macOS runner has an x64 toolchain) to the GitHub Release for that tag. Only the two newest releases are kept. After each publish the workflow deletes every older release and its tag. The workflow can also be run by hand with a version; it creates the tag when the tag is missing.
+To cut a release, set `<Version>` in `src/Ngrep/Ngrep.csproj` and push a tag `vX.Y.Z` with that same number (`v0.2.0` for version `0.2.0`). [`.github/workflows/release.yml`](.github/workflows/release.yml) builds Native AOT binaries and uploads one baseline plus, on x64, an AVX2 asset and an AVX-512 asset. Only the two newest releases are kept. After each publish the workflow deletes every older release and its tag. The workflow can also be run by hand with a version; it creates the tag when the tag is missing.
+
+| Asset | CPU |
+| --- | --- |
+| `ngrep-linux-x64`, `ngrep-win-x64.exe`, `ngrep-osx-x64` | x86-64-v2. No AVX2 or AVX-512 required. `ngrep-osx-x64` is uploaded only when the macOS runner can cross-compile x64. |
+| `ngrep-linux-x64-avx2`, `ngrep-win-x64-avx2.exe`, `ngrep-osx-x64-avx2` | Requires AVX2 (`x86-64-v3`). Will not run without it. |
+| `ngrep-linux-x64-avx512`, `ngrep-win-x64-avx512.exe`, `ngrep-osx-x64-avx512` | Requires AVX-512 (`x86-64-v4`). Will not run without it. |
+| `ngrep-osx-arm64` | Apple silicon. No AVX2 or AVX-512 asset is built. |
 
 `dotnet publish -c Release -r linux-x64` completed on this machine with the .NET 11 RC SDK and no trimmer warnings. The result is a stripped ELF (~4.5 MB) that is dynamically linked against the system libc, not a fully static musl binary. `index` and `search --format ndjson` were run from that binary.
 
@@ -158,7 +169,7 @@ Confirmation reads candidate files on a pool of workers. Bytes come from `ArrayP
 
 Still short of ripgrep:
 
-- User regexes run on the interpreter. `RegexOptions.Compiled` is not used, because the pattern is data and Native AOT cannot compile it. There is no regex DFA. The SIMD layer is a literal prefilter, not ripgrep's Teddy: it does not pack every pattern byte into one fingerprint, and a file that contains the literal is still decoded and matched in full. Rejecting a file that lacks the literal is the case that gets faster. `dotnet test` and `dotnet run` dispatch at runtime (`Avx512BW`, then `Avx2`, then SSE2 / Vector128, then scalar). Default `dotnet publish -c Release -r linux-x64` does not. Native AOT's baseline is x86-64-v2, and it does not keep AVX2 or AVX-512 as optional light-up, so those `IsSupported` checks fold off and the native binary keeps the SSE2 scan (`pcmpeqb`, no `%ymm` or `%zmm`). That binary does not fault on a CPU without AVX-512. `/p:IlcInstructionSet=x86-64-v3` emits AVX2 and still no AVX-512. `/p:IlcInstructionSet=x86-64-v4` emits AVX-512 and will not run without it, so the project does not set that.
+- User regexes run on the interpreter. `RegexOptions.Compiled` is not used, because the pattern is data and Native AOT cannot compile it. There is no regex DFA. The SIMD layer is a literal prefilter, not ripgrep's Teddy: it does not pack every pattern byte into one fingerprint, and a file that contains the literal is still decoded and matched in full. Rejecting a file that lacks the literal is the case that gets faster. `dotnet test` and `dotnet run` dispatch at runtime (`Avx512BW`, then `Avx2`, then SSE2 / Vector128, then scalar). Default `dotnet publish -c Release -r linux-x64` does not. Native AOT's baseline is x86-64-v2, and it does not keep AVX2 or AVX-512 as optional light-up, so those `IsSupported` checks fold off and the native binary keeps the SSE2 scan (`pcmpeqb`, no `%ymm` or `%zmm`). That binary does not fault on a CPU without AVX-512. `/p:IlcInstructionSet=x86-64-v3` emits AVX2, still no AVX-512, and requires AVX2. `/p:IlcInstructionSet=x86-64-v4` emits AVX-512 and will not run without it. The project leaves the property unset. The release workflow publishes the v3 and v4 binaries as separate assets.
 - Trigrams are three characters. A short alternative, a pattern that can match without a literal, lookaround, and backreferences still read every candidate. `-v` does too: a file that lacks the pattern is a hit, so postings cannot drop it. `--files-without-match` records those drops as paths without reading them when the prefilter is safe.
 - `-g` does not re-include a gitignored path or a hidden path. `--no-ignore` / `--no-ignore-vcs` opt out of `.gitignore` only. `--hidden` is separate. A gitignore whitelist does not un-hide a dotfile. Hidden means a name starting with `.`, not the Windows hidden attribute.
 - An empty `-f` pattern matches each line once. Ripgrep's empty regex also reports a zero-width match at every offset (`-o` prints one empty match per byte). There is no `RIPGREP_CONFIG_PATH`.
