@@ -179,7 +179,9 @@ jobs:
             local out="build-out/${suffix:-baseline}"
             local args=(src/Ngrep/Ngrep.csproj -c Release -r "$RID" -o "$out")
             if [ -n "$isa" ]; then
-              args+=("/p:IlcInstructionSet=${isa}")
+              # Dash form. Git Bash on windows-latest rewrites a leading /p: into a path,
+              # and MSBuild then reports a second project.
+              args+=("-p:IlcInstructionSet=${isa}")
             fi
             dotnet publish "${args[@]}"
 
