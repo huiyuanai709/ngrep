@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.IO.MemoryMappedFiles;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
@@ -9,6 +10,9 @@ internal static class TextFiles
 {
     public const int BinaryProbeLength = 8192;
     public const long MaxFileBytes = 32L * 1024L * 1024L;
+
+    /// <summary>At this size a warm file is cheaper to map than to copy into a pooled buffer.</summary>
+    public const int MmapThreshold = 256 * 1024;
 
     public static bool IsBinary(ReadOnlySpan<byte> bytes)
     {
@@ -85,6 +89,8 @@ internal static class TextFiles
         int ReadAt(byte[] buffer, int offset, int count, long position);
 
         long GetLength();
+
+        bool TryMap(int length, ReadStop? stop, out PooledBytes mapped);
     }
 
     private struct LinuxBytes : IFileBytes
@@ -97,6 +103,12 @@ internal static class TextFiles
             LinuxFile.ReadAt(_fd, buffer, offset, count, position);
 
         public long GetLength() => LinuxFile.GetLength(_fd);
+
+        public bool TryMap(int length, ReadStop? stop, out PooledBytes mapped)
+        {
+            using var handle = new SafeFileHandle((IntPtr)_fd, ownsHandle: false);
+            return TextFiles.TryMap(handle, length, stop, out mapped);
+        }
     }
 
     private struct HandleBytes : IFileBytes
@@ -109,6 +121,9 @@ internal static class TextFiles
             RandomAccess.Read(_handle, buffer.AsSpan(offset, count), position);
 
         public long GetLength() => RandomAccess.GetLength(_handle);
+
+        public bool TryMap(int length, ReadStop? stop, out PooledBytes mapped) =>
+            TextFiles.TryMap(_handle, length, stop, out mapped);
     }
 
     /// <summary>
@@ -147,6 +162,13 @@ internal static class TextFiles
                     if (lengthLong <= offset)
                     {
                         break;
+                    }
+
+                    if (lengthLong >= MmapThreshold
+                        && lengthLong <= int.MaxValue
+                        && source.TryMap((int)lengthLong, stop, out var mapped))
+                    {
+                        return mapped;
                     }
 
                     var target = stop == null
@@ -283,6 +305,59 @@ internal static class TextFiles
     }
 
     internal static void ReleaseScratch() => t_held = false;
+
+    private static bool TryMap(SafeFileHandle handle, int length, ReadStop? stop, out PooledBytes mapped)
+    {
+        MemoryMappedFile? file = null;
+        MemoryMappedViewAccessor? view = null;
+        var acquired = false;
+        try
+        {
+            file = MemoryMappedFile.CreateFromFile(
+                handle,
+                mapName: null,
+                capacity: length,
+                access: MemoryMappedFileAccess.Read,
+                inheritability: HandleInheritability.None,
+                leaveOpen: true);
+            view = file.CreateViewAccessor(0, length, MemoryMappedFileAccess.Read);
+            unsafe
+            {
+                byte* pointer = null;
+                view.SafeMemoryMappedViewHandle.AcquirePointer(ref pointer);
+                acquired = true;
+                var span = new ReadOnlySpan<byte>(pointer, length);
+                if (IsBinary(span))
+                {
+                    view.SafeMemoryMappedViewHandle.ReleasePointer();
+                    acquired = false;
+                    view.Dispose();
+                    file.Dispose();
+                    mapped = PooledBytes.Binary();
+                    return true;
+                }
+
+                stop?.Invoke(span, true);
+                mapped = PooledBytes.Mapped(file, view, pointer, length);
+                file = null;
+                view = null;
+                acquired = false;
+                return true;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            if (acquired && view != null)
+            {
+                view.SafeMemoryMappedViewHandle.ReleasePointer();
+            }
+
+            view?.Dispose();
+            file?.Dispose();
+            mapped = null!;
+            return false;
+        }
+    }
 }
 
 internal delegate bool ReadStop(ReadOnlySpan<byte> contents, bool endOfFile);
@@ -299,6 +374,10 @@ internal sealed class PooledBytes : IDisposable
 {
     private byte[]? _buffer;
     private readonly bool _scratch;
+    private MemoryMappedFile? _map;
+    private MemoryMappedViewAccessor? _view;
+    private unsafe byte* _pointer;
+    private int _held;
 
     private PooledBytes(ReadKind kind, byte[]? buffer, int length, bool scratch)
     {
@@ -312,9 +391,40 @@ internal sealed class PooledBytes : IDisposable
 
     public int Length { get; }
 
-    public ReadOnlySpan<byte> Span => _buffer == null ? [] : _buffer.AsSpan(0, Length);
+    public ReadOnlySpan<byte> Span
+    {
+        get
+        {
+            if (_buffer != null)
+            {
+                return _buffer.AsSpan(0, Length);
+            }
+
+            unsafe
+            {
+                if (_pointer == null || _held == 0)
+                {
+                    return [];
+                }
+
+                return new ReadOnlySpan<byte>(_pointer, Length);
+            }
+        }
+    }
 
     public static PooledBytes Ok(byte[]? buffer, int length, bool scratch = false) => new(ReadKind.Ok, buffer, length, scratch);
+
+    public static unsafe PooledBytes Mapped(MemoryMappedFile map, MemoryMappedViewAccessor view, byte* pointer, int length)
+    {
+        var pooled = new PooledBytes(ReadKind.Ok, null, length, scratch: false)
+        {
+            _map = map,
+            _view = view,
+            _pointer = pointer,
+            _held = 1,
+        };
+        return pooled;
+    }
 
     public static PooledBytes TooLarge() => new(ReadKind.TooLarge, null, 0, false);
 
@@ -325,18 +435,31 @@ internal sealed class PooledBytes : IDisposable
     public void Dispose()
     {
         var buffer = Interlocked.Exchange(ref _buffer, null);
-        if (buffer == null)
+        if (buffer != null)
         {
-            return;
+            if (_scratch)
+            {
+                TextFiles.ReleaseScratch();
+            }
+            else
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
 
-        if (_scratch)
+        if (Interlocked.Exchange(ref _held, 0) == 1 && _view != null)
         {
-            TextFiles.ReleaseScratch();
-            return;
+            _view.SafeMemoryMappedViewHandle.ReleasePointer();
+            unsafe
+            {
+                _pointer = null;
+            }
         }
 
-        ArrayPool<byte>.Shared.Return(buffer);
+        _view?.Dispose();
+        _view = null;
+        _map?.Dispose();
+        _map = null;
     }
 }
 

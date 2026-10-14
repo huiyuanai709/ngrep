@@ -27,6 +27,8 @@ try
     var listed = Time(largeRoot, "EARLY", regex: false, filesWithMatches: true);
     var largeMiss = Time(largeRoot, "unlikely-token-zz", regex: false);
     var largeConfirm = Time(largeRoot, "NEEDLE", regex: false);
+    var largeRegex = Time(largeRoot, "NEEDLE[0-9]", regex: true);
+    var classMiss = Time(largeRoot, "[abc]{8}", regex: true);
 
     Console.WriteLine($"small_files={files} bytes_each={smallBytes} total_mib={files * (long)smallBytes / (1024 * 1024)}");
     Print("literal_miss", miss);
@@ -35,6 +37,8 @@ try
     Console.WriteLine($"large_files={largeCount} bytes_each={largeBytes}");
     Print("large_miss", largeMiss);
     Print("large_confirm", largeConfirm);
+    Print("large_regex", largeRegex);
+    Print("regex_class_miss", classMiss);
     Print("files_with_matches", listed);
 
     var tiny = Path.Combine(root, "tiny");
@@ -63,6 +67,9 @@ try
         var rgTinyU = TimeRg(rg, tiny, ["-F", "--no-ignore", "-uu", "--no-heading", "unlikely-token-zz", tiny]);
         var rgQuiet = TimeRg(rg, tiny, ["-F", "-q", "NEEDLE", tiny]);
         var rgFiles = TimeRg(rg, tiny, ["-F", "-l", "token", tiny]);
+        var rgLargeMiss = TimeRg(rg, largeRoot, ["-F", "--no-ignore", "-uu", "unlikely-token-zz", largeRoot]);
+        var rgLargeRegex = TimeRg(rg, largeRoot, ["--no-ignore", "-uu", "NEEDLE[0-9]", largeRoot]);
+        var rgClass = TimeRg(rg, largeRoot, ["--no-ignore", "-uu", "[abc]{8}", largeRoot]);
         Console.WriteLine($"rg={rg}");
         Console.WriteLine($"rg_tiny_ignore_miss_ms={rgTiny:F1}");
         Console.WriteLine($"rg_tiny_noignore_miss_ms={rgTinyU:F1}");
@@ -72,6 +79,9 @@ try
         Console.WriteLine($"rg_literal_confirm_ms={rgConfirm:F1}");
         Console.WriteLine($"rg_regex_ms={rgRegex:F1}");
         Console.WriteLine($"rg_files_with_matches_ms={rgList:F1}");
+        Console.WriteLine($"rg_large_miss_ms={rgLargeMiss:F1}");
+        Console.WriteLine($"rg_large_regex_ms={rgLargeRegex:F1}");
+        Console.WriteLine($"rg_regex_class_miss_ms={rgClass:F1}");
     }
 
     Console.WriteLine("hyperfine example (after `dotnet publish -c Release -r linux-x64`):");
@@ -163,8 +173,10 @@ static void Warm(string root, string pattern) =>
 
 static (double Ms, int Files, int Matches) Time(string root, string pattern, bool regex, bool filesWithMatches = false)
 {
+    var query = Query(root, pattern, regex, filesWithMatches);
+    Searcher.Search(query);
     var clock = Stopwatch.StartNew();
-    var outcome = Searcher.Search(Query(root, pattern, regex, filesWithMatches));
+    var outcome = Searcher.Search(query);
     clock.Stop();
     return (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.Matches.Count);
 }

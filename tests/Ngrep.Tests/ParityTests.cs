@@ -309,6 +309,8 @@ public class ParityTests
         var dot = MatchPlan.Create(new SearchQuery { Pattern = "foo.bar", Path = tree.Root, Regex = true, MultilineDotAll = true });
         Assert.All(plain.Regexes!, regex => Assert.False(regex.Options.HasFlag(RegexOptions.Compiled)));
         Assert.All(dot.Regexes!, regex => Assert.False(regex.Options.HasFlag(RegexOptions.Compiled)));
+        Assert.True(plain.NonBacktracking);
+        Assert.All(plain.Regexes!, regex => Assert.True(regex.Options.HasFlag(RegexOptions.NonBacktracking)));
         Assert.True(plain.Regexes![0].Options.HasFlag(RegexOptions.Multiline));
         Assert.False(plain.Regexes[0].Options.HasFlag(RegexOptions.Singleline));
         Assert.False(multi.Regexes![0].Options.HasFlag(RegexOptions.Singleline));

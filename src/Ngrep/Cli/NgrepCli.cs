@@ -94,7 +94,11 @@ internal static class NgrepCli
         };
         var fixedStrings = new Option<bool>("--fixed-strings", "-F")
         {
-            Description = "Treat patterns as literal text. This is the default. Mutually exclusive with -E/--extended-regexp/--regex (exit 2).",
+            Description = "Treat patterns as literal text. This is the default. Mutually exclusive with -E/--regex and -P/--pcre (exit 2).",
+        };
+        var pcre = new Option<bool>("--pcre", "-P")
+        {
+            Description = "Backtracking .NET regex interpreter. Supports backreferences, lookaround, and atomic groups. Implies --regex. The default -E engine is non-backtracking and linear. Mutually exclusive with -F.",
         };
         var scan = new Option<bool>("--scan")
         {
@@ -210,7 +214,7 @@ internal static class NgrepCli
         };
         var multiline = new Option<bool>("--multiline", "-U")
         {
-            Description = "Let a regex match span lines. ^ and $ are line anchors either way. '.' does not match a newline unless --multiline-dotall. No RegexOptions.Compiled.",
+            Description = "Let a regex match span lines. ^ and $ are line anchors either way. '.' does not match a newline unless --multiline-dotall. The default engine is non-backtracking. -P selects the backtracking interpreter. No RegexOptions.Compiled.",
         };
         var multilineDotAll = new Option<bool>("--multiline-dotall")
         {
@@ -233,6 +237,7 @@ internal static class NgrepCli
         searchCommand.Arguments.Add(positionals);
         searchCommand.Options.Add(ignoreCase);
         searchCommand.Options.Add(regex);
+        searchCommand.Options.Add(pcre);
         searchCommand.Options.Add(fixedStrings);
         searchCommand.Options.Add(scan);
         searchCommand.Options.Add(glob);
@@ -292,6 +297,7 @@ internal static class NgrepCli
                     index,
                     ignoreCase,
                     regex,
+                    pcre,
                     scan,
                     glob,
                     type,
@@ -379,6 +385,7 @@ internal static class NgrepCli
         Option<string> index,
         Option<bool> ignoreCase,
         Option<bool> regex,
+        Option<bool> pcre,
         Option<bool> scan,
         Option<string[]> glob,
         Option<string[]> type,
@@ -423,9 +430,9 @@ internal static class NgrepCli
         }
 
         var bound = SearchSyntax.Bind(result, typeList: false);
-        if (result.GetValue(regex) && result.GetValue(fixedStrings))
+        if (result.GetValue(fixedStrings) && (result.GetValue(regex) || result.GetValue(pcre)))
         {
-            throw new ArgumentException("-E/--extended-regexp/--regex and -F/--fixed-strings are mutually exclusive.");
+            throw new ArgumentException("-E/--regex, -P/--pcre, and -F/--fixed-strings are mutually exclusive.");
         }
 
         var patterns = LoadPatterns(bound);
@@ -450,7 +457,8 @@ internal static class NgrepCli
                 Path = bound.Path,
                 IndexDirectory = result.GetValue(index),
                 IgnoreCase = result.GetValue(ignoreCase),
-                Regex = result.GetValue(regex),
+                Regex = result.GetValue(regex) || result.GetValue(pcre),
+                Backtracking = result.GetValue(pcre),
                 ForceScan = result.GetValue(scan),
                 WordRegexp = result.GetValue(word),
                 InvertMatch = result.GetValue(invert),

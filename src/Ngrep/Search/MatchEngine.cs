@@ -44,6 +44,12 @@ internal sealed class MatchPlan
 
     public bool NoMessages { get; init; }
 
+    /// <summary>Default <c>-E</c> engine. False when <c>-P</c> selects the backtracking interpreter.</summary>
+    public bool NonBacktracking { get; init; }
+
+    /// <summary>ASCII byte automata for patterns the linear compiler recognized. Null when any pattern opted out.</summary>
+    public ByteProgram[]? BytePrograms { get; init; }
+
     public bool StopAtFirst =>
         (Report == ReportMode.FilesWithMatches || Report == ReportMode.Quiet) && !CollectAll;
 
@@ -69,11 +75,19 @@ internal sealed class MatchPlan
         }
 
         Regex[]? regexes = null;
+        ByteProgram[]? bytePrograms = null;
+        var nonBacktracking = false;
         if (regex)
         {
-            // Interpreter only. RegexOptions.Compiled is not AOT-safe for a user pattern.
-            // Multiline makes ^ and $ line anchors, matching grep. Singleline is dotall.
+            // Compiled is not AOT-safe for a user pattern. NonBacktracking builds a linear
+            // automaton in memory and does not emit IL. -P keeps the backtracking interpreter.
             var options = RegexOptions.CultureInvariant | RegexOptions.Multiline;
+            if (!query.Backtracking)
+            {
+                options |= RegexOptions.NonBacktracking;
+                nonBacktracking = true;
+            }
+
             if (query.IgnoreCase)
             {
                 options |= RegexOptions.IgnoreCase;
@@ -85,10 +99,36 @@ internal sealed class MatchPlan
             }
 
             regexes = new Regex[patterns.Length];
+            var programs = new ByteProgram[patterns.Length];
+            var allBytes = !query.Backtracking && !query.LineRegexp;
+            var byteOptions = new ByteAutomaton.Options(query.IgnoreCase, query.MultilineDotAll);
             for (var i = 0; i < patterns.Length; i++)
             {
                 var source = query.LineRegexp ? AnchorWholeLine(patterns[i]) : patterns[i];
-                regexes[i] = new Regex(source, options, TimeSpan.FromSeconds(5));
+                try
+                {
+                    regexes[i] = new Regex(source, options, TimeSpan.FromSeconds(5));
+                }
+                catch (NotSupportedException ex) when (nonBacktracking)
+                {
+                    throw new ArgumentException(
+                        $"'{patterns[i]}' is not supported by the non-backtracking engine ({ex.Message}). Use -P/--pcre for backreferences, lookaround, and atomic groups.",
+                        ex);
+                }
+
+                if (allBytes && ByteAutomaton.TryCompile(patterns[i], byteOptions, out var program))
+                {
+                    programs[i] = program;
+                }
+                else
+                {
+                    allBytes = false;
+                }
+            }
+
+            if (allBytes)
+            {
+                bytePrograms = programs;
             }
         }
 
@@ -120,6 +160,8 @@ internal sealed class MatchPlan
             CollectAll = query.Stats,
             LineRegexp = query.LineRegexp,
             NoMessages = query.NoMessages,
+            NonBacktracking = nonBacktracking,
+            BytePrograms = bytePrograms,
             UseLinePrefilter = regex && !crosses && literalsQuery is { HasLinePrefilter: true } && !HasAbsoluteAnchor(patterns),
         };
     }
@@ -179,6 +221,63 @@ internal sealed class MatchPlan
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Runs a linear byte automaton on an ASCII file. False when the pattern was not compiled,
+    /// the file is not ASCII, or the match needs the string engine (context, <c>-x</c>, <c>-w</c>, <c>-v</c>).
+    /// </summary>
+    public static bool TryCollectAutomaton(
+        ReadOnlySpan<byte> bytes,
+        string relativePath,
+        MatchPlan plan,
+        List<SearchMatch> matches,
+        out bool matched)
+    {
+        matched = false;
+        if (plan.BytePrograms == null || plan.Invert || plan.LineRegexp || plan.WantsContext || plan.Word)
+        {
+            return false;
+        }
+
+        if (!Ascii.IsValid(bytes))
+        {
+            return false;
+        }
+
+        var countOnly = plan.Report == ReportMode.FilesWithoutMatch && !plan.CollectAll;
+        var hits = countOnly ? null : new List<Hit>();
+        foreach (var program in plan.BytePrograms)
+        {
+            var found = new List<ByteMatch>();
+            program.Collect(bytes, plan.CrossesLines, plan.StopAtFirst || countOnly, found);
+            foreach (var candidate in found)
+            {
+                if (countOnly)
+                {
+                    matched = true;
+                    return true;
+                }
+
+                var value = Encoding.ASCII.GetString(bytes.Slice(candidate.Index, candidate.Length));
+                hits!.Add(new Hit(candidate.Index, candidate.Length, value));
+                if (plan.StopAtFirst)
+                {
+                    EmitByteHits(bytes, relativePath, hits, matches);
+                    matched = true;
+                    return true;
+                }
+            }
+        }
+
+        if (countOnly)
+        {
+            return true;
+        }
+
+        EmitByteHits(bytes, relativePath, hits!, matches);
+        matched = hits!.Count > 0;
+        return true;
     }
 
     /// <summary>
