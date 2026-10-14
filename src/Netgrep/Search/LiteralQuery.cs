@@ -1,4 +1,5 @@
 using Netgrep.Indexing;
+using Netgrep.Text;
 
 namespace Netgrep.Search;
 
@@ -15,11 +16,26 @@ internal sealed class LiteralQuery
     private const int MaxClauses = 64;
 
     private readonly Clause[] _clauses;
+    private readonly ByteClause[] _byteClauses;
+    private readonly SimdLiteralScanner? _anySensitive;
+    private readonly SimdLiteralScanner? _anyInsensitive;
 
     private LiteralQuery(Clause[] clauses)
     {
         _clauses = clauses;
         TrigramSafe = clauses.Length > 0 && clauses.All(static clause => clause.HasTrigram);
+        if (TryOrNeedles(clauses, out var orNeedles))
+        {
+            _byteClauses = [];
+            _anySensitive = SimdLiteralScanner.Create(orNeedles, ignoreCase: false);
+            _anyInsensitive = SimdLiteralScanner.Create(orNeedles, ignoreCase: true);
+        }
+        else
+        {
+            _byteClauses = CompileClauses(clauses);
+            _anySensitive = null;
+            _anyInsensitive = null;
+        }
     }
 
     public bool TrigramSafe { get; }
@@ -106,6 +122,7 @@ internal sealed class LiteralQuery
 
     /// <summary>
     /// True when the bytes cannot satisfy any clause. Non-ASCII parts are not rejected here.
+    /// ASCII parts are a SIMD candidate scan; a hit still means the file must be decoded.
     /// </summary>
     public bool Misses(ReadOnlySpan<byte> utf8, bool ignoreCase)
     {
@@ -114,7 +131,13 @@ internal sealed class LiteralQuery
             utf8 = utf8[3..];
         }
 
-        foreach (var clause in _clauses)
+        if (_anySensitive != null)
+        {
+            var scanner = ignoreCase ? _anyInsensitive! : _anySensitive;
+            return scanner.IndexOfAny(utf8) < 0;
+        }
+
+        foreach (var clause in _byteClauses)
         {
             if (ClauseHits(utf8, clause, ignoreCase))
             {
@@ -125,26 +148,27 @@ internal sealed class LiteralQuery
         return true;
     }
 
-    private static bool ClauseHits(ReadOnlySpan<byte> utf8, Clause clause, bool ignoreCase)
+    private static bool ClauseHits(ReadOnlySpan<byte> utf8, ByteClause clause, bool ignoreCase)
     {
-        if (clause.Parts.Length == 0)
+        if (clause.Always)
         {
             return true;
         }
 
         foreach (var part in clause.Parts)
         {
-            if (part.Length == 0)
+            if (part.Kind == ByteKind.Empty)
             {
                 continue;
             }
 
-            if (!IsAscii(part))
+            if (part.Kind == ByteKind.NonAscii)
             {
                 return true;
             }
 
-            if (!ContainsAscii(utf8, part, ignoreCase))
+            var scanner = ignoreCase ? part.Insensitive : part.Sensitive;
+            if (scanner!.IndexOfAny(utf8) < 0)
             {
                 return false;
             }
@@ -153,90 +177,139 @@ internal sealed class LiteralQuery
         return true;
     }
 
-    private static bool IsAscii(string text)
+    private static bool TryOrNeedles(Clause[] clauses, out List<byte[]> needles)
     {
-        foreach (var ch in text)
+        needles = [];
+        if (clauses.Length == 0)
         {
-            if (ch > 0x7F)
+            return false;
+        }
+
+        foreach (var clause in clauses)
+        {
+            if (clause.Parts.Length != 1 || !TryAscii(clause.Parts[0], out var bytes))
             {
                 return false;
             }
+
+            needles.Add(bytes);
         }
 
         return true;
     }
 
-    private static bool ContainsAscii(ReadOnlySpan<byte> haystack, string needle, bool ignoreCase)
+    private static ByteClause[] CompileClauses(Clause[] clauses)
     {
-        if (needle.Length == 0 || needle.Length > haystack.Length)
+        var compiled = new ByteClause[clauses.Length];
+        for (var c = 0; c < clauses.Length; c++)
         {
-            return needle.Length == 0;
-        }
-
-        if (!ignoreCase || !HasAsciiLetter(needle))
-        {
-            Span<byte> raw = needle.Length <= 128 ? stackalloc byte[needle.Length] : new byte[needle.Length];
-            for (var i = 0; i < needle.Length; i++)
+            var parts = clauses[c].Parts;
+            if (parts.Length == 0)
             {
-                raw[i] = (byte)needle[i];
+                compiled[c] = ByteClause.AlwaysHit;
+                continue;
             }
 
-            return haystack.IndexOf(raw) >= 0;
-        }
-
-        var last = haystack.Length - needle.Length;
-        for (var i = 0; i <= last; i++)
-        {
-            var matched = true;
-            for (var j = 0; j < needle.Length; j++)
+            var allAscii = true;
+            var byteParts = new List<BytePart>(parts.Length);
+            foreach (var part in parts)
             {
-                if (!AsciiEqual(haystack[i + j], (byte)needle[j]))
+                if (part.Length == 0)
                 {
-                    matched = false;
-                    break;
+                    continue;
                 }
+
+                if (!TryAscii(part, out var bytes))
+                {
+                    allAscii = false;
+                    byteParts.Add(BytePart.NonAsciiPart);
+                    continue;
+                }
+
+                byteParts.Add(BytePart.Ascii(
+                    SimdLiteralScanner.Create([bytes], ignoreCase: false),
+                    SimdLiteralScanner.Create([bytes], ignoreCase: true),
+                    bytes.Length));
             }
 
-            if (matched)
+            if (allAscii && byteParts.Count > 1)
             {
-                return true;
+                byteParts.Sort(static (left, right) => right.Length.CompareTo(left.Length));
             }
+
+            compiled[c] = new ByteClause(false, byteParts.ToArray());
         }
 
-        return false;
+        return compiled;
     }
 
-    private static bool HasAsciiLetter(string text)
+    private static bool TryAscii(string text, out byte[] bytes)
     {
-        foreach (var ch in text)
+        bytes = [];
+        if (text.Length == 0)
         {
-            if (ch is >= 'A' and <= 'Z' or >= 'a' and <= 'z')
-            {
-                return true;
-            }
+            return false;
         }
 
-        return false;
+        var raw = new byte[text.Length];
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (text[i] > 0x7F)
+            {
+                return false;
+            }
+
+            raw[i] = (byte)text[i];
+        }
+
+        bytes = raw;
+        return true;
     }
 
-    private static bool AsciiEqual(byte left, byte right)
+    private enum ByteKind : byte
     {
-        if (left == right)
+        Empty,
+        NonAscii,
+        Ascii,
+    }
+
+    private readonly struct BytePart
+    {
+        private BytePart(ByteKind kind, int length, SimdLiteralScanner? sensitive, SimdLiteralScanner? insensitive)
         {
-            return true;
+            Kind = kind;
+            Length = length;
+            Sensitive = sensitive;
+            Insensitive = insensitive;
         }
 
-        if (left is >= (byte)'A' and <= (byte)'Z')
+        public ByteKind Kind { get; }
+
+        public int Length { get; }
+
+        public SimdLiteralScanner? Sensitive { get; }
+
+        public SimdLiteralScanner? Insensitive { get; }
+
+        public static BytePart NonAsciiPart { get; } = new(ByteKind.NonAscii, 0, null, null);
+
+        public static BytePart Ascii(SimdLiteralScanner sensitive, SimdLiteralScanner insensitive, int length) =>
+            new(ByteKind.Ascii, length, sensitive, insensitive);
+    }
+
+    private readonly struct ByteClause
+    {
+        public ByteClause(bool always, BytePart[] parts)
         {
-            left += 32;
+            Always = always;
+            Parts = parts;
         }
 
-        if (right is >= (byte)'A' and <= (byte)'Z')
-        {
-            right += 32;
-        }
+        public bool Always { get; }
 
-        return left == right;
+        public BytePart[] Parts { get; }
+
+        public static ByteClause AlwaysHit { get; } = new(true, []);
     }
 
     private static HashSet<int> Intersect(Dictionary<string, List<int>> postings, List<string> grams)
