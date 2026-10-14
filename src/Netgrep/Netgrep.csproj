@@ -1,4 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <Sdk Name="PublishWithSatoriGC" Version="11.0.0-satori.38196422592.1" />
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net11.0</TargetFramework>
@@ -18,6 +19,8 @@
     <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
     <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
     <ServerGarbageCollection>false</ServerGarbageCollection>
+    <!-- Native AOT publish uses Satori GC. /p:UseSatoriGC=false restores the stock GC. -->
+    <UseSatoriGC Condition="'$(UseSatoriGC)' == ''">true</UseSatoriGC>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="System.CommandLine" Version="2.0.12" />

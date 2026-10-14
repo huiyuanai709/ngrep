@@ -146,6 +146,8 @@ PublishAot is on in `src/Netgrep/Netgrep.csproj`, along with invariant globaliza
 dotnet publish src/Netgrep/Netgrep.csproj -c Release -r linux-x64
 ```
 
+That publish uses Satori GC (`PublishWithSatoriGC` 11.0.0-satori.38196422592.1). Satori applies only to the self-contained Native AOT publish. `dotnet test` and `dotnet run` stay on the stock JIT GC. Pass `/p:UseSatoriGC=false` to publish with the stock GC instead. `ServerGarbageCollection` stays false.
+
 The native binary is `src/Netgrep/bin/Release/net11.0/linux-x64/publish/netgrep`. `dotnet build` / `dotnet run` stay on the JIT, which is the right loop for development.
 
 To cut a release, set `<Version>` in `src/Netgrep/Netgrep.csproj` and push a tag `vX.Y.Z` with that same number (`v0.2.0` for version `0.2.0`). [`.github/workflows/release.yml`](.github/workflows/release.yml) builds Native AOT binaries and uploads `netgrep-linux-x64`, `netgrep-win-x64.exe`, `netgrep-osx-arm64`, and `netgrep-osx-x64` (when the macOS runner has an x64 toolchain) to the GitHub Release for that tag. Only the two newest releases are kept. After each publish the workflow deletes every older release and its tag. The workflow can also be run by hand with a version; it creates the tag when the tag is missing.
