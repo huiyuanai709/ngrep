@@ -8,7 +8,7 @@ namespace Netgrep.Output;
 
 internal readonly record struct WatchEvent(string Event, IndexResult Result);
 
-internal readonly record struct SearchPresentation(ReportMode Report, bool OnlyMatching, bool Color);
+internal readonly record struct SearchPresentation(ReportMode Report, bool OnlyMatching, bool Color, bool Heading = false);
 
 internal static class MachineOutput
 {
@@ -21,26 +21,27 @@ internal static class MachineOutput
         IReadOnlyList<SearchMatch> matches,
         OutputFormat format,
         SearchPresentation presentation = default,
-        IReadOnlyList<string>? filesWithoutMatch = null)
+        IReadOnlyList<string>? filesWithoutMatch = null,
+        long elapsedMilliseconds = 0)
     {
         var color = format == OutputFormat.Text && presentation.Color;
         switch (presentation.Report)
         {
             case ReportMode.Count:
-                WriteCounts(matches, format, color);
+                WriteCounts(matches, format, color, elapsedMilliseconds);
                 return;
             case ReportMode.FilesWithMatches:
-                WritePaths(DistinctPaths(matches), format, color, asMatches: true, matches);
+                WritePaths(DistinctPaths(matches), format, color, asMatches: true, matches, elapsedMilliseconds);
                 return;
             case ReportMode.FilesWithoutMatch:
-                WritePaths(filesWithoutMatch ?? [], format, color, asMatches: false, matches: null);
+                WritePaths(filesWithoutMatch ?? [], format, color, asMatches: false, matches: null, elapsedMilliseconds);
                 return;
         }
 
         switch (format)
         {
             case OutputFormat.Text:
-                WriteText(matches, presentation.OnlyMatching, color);
+                WriteText(matches, presentation.OnlyMatching, color, presentation.Heading);
                 break;
             case OutputFormat.Ndjson:
                 foreach (var match in matches)
@@ -53,9 +54,23 @@ internal static class MachineOutput
                 Console.WriteLine(MatchArrayJson(matches));
                 break;
             case OutputFormat.RgJson:
-                WriteRgJson(matches);
+                WriteRgJson(matches, elapsedMilliseconds);
                 break;
         }
+    }
+
+    /// <summary>
+    /// Search summary on stderr, after stdout, so text/json/ndjson/rgjson stay intact.
+    /// Counts are pattern hits even when the report is <c>--files-without-match</c>.
+    /// </summary>
+    public static void WriteStats(SearchOutcome outcome)
+    {
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        Console.Error.WriteLine("files searched: " + outcome.FilesSearched.ToString(culture));
+        Console.Error.WriteLine("files matched: " + outcome.FilesMatched.ToString(culture));
+        Console.Error.WriteLine("lines matched: " + outcome.LinesMatched.ToString(culture));
+        Console.Error.WriteLine("matches: " + outcome.Matches.Count.ToString(culture));
+        Console.Error.WriteLine("elapsed ms: " + outcome.ElapsedMilliseconds.ToString(culture));
     }
 
     public static void WriteIndex(IndexResult result, OutputFormat format)
@@ -179,13 +194,33 @@ internal static class MachineOutput
         }
     }
 
-    private static void WriteText(IReadOnlyList<SearchMatch> matches, bool onlyMatching, bool color)
+    private static void WriteText(IReadOnlyList<SearchMatch> matches, bool onlyMatching, bool color, bool heading)
     {
+        string? headingPath = null;
+        var headingStarted = false;
+        void EnsureHeading(string path)
+        {
+            if (!heading || string.Equals(headingPath, path, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            if (headingStarted)
+            {
+                Console.WriteLine();
+            }
+
+            Console.WriteLine(color ? Paint(path, TextColor.Path) : path);
+            headingPath = path;
+            headingStarted = true;
+        }
+
         if (onlyMatching)
         {
             foreach (var match in matches)
             {
-                WriteMatchLine(match, onlyMatching: true, color);
+                EnsureHeading(match.Path);
+                WriteMatchLine(match, onlyMatching: true, color, includePath: !heading);
             }
 
             return;
@@ -216,7 +251,8 @@ internal static class MachineOutput
         {
             if (match.Before == null && match.After == null)
             {
-                WriteMatchLine(match, onlyMatching: false, color);
+                EnsureHeading(match.Path);
+                WriteMatchLine(match, onlyMatching: false, color, includePath: !heading);
                 continue;
             }
 
@@ -226,6 +262,7 @@ internal static class MachineOutput
                 fileMatches = matchLines[match.Path];
                 lastLine = 0;
                 printed = false;
+                EnsureHeading(path);
             }
 
             var before = match.Before ?? [];
@@ -242,12 +279,12 @@ internal static class MachineOutput
                     continue;
                 }
 
-                WriteContextLine(match.Path, line.Line, line.Text, color);
+                WriteContextLine(match.Path, line.Line, line.Text, color, includePath: !heading);
                 lastLine = line.Line;
                 printed = true;
             }
 
-            WriteMatchLine(match, onlyMatching: false, color);
+            WriteMatchLine(match, onlyMatching: false, color, includePath: !heading);
             if (match.Line > lastLine)
             {
                 lastLine = match.Line;
@@ -261,18 +298,20 @@ internal static class MachineOutput
                     continue;
                 }
 
-                WriteContextLine(match.Path, line.Line, line.Text, color);
+                WriteContextLine(match.Path, line.Line, line.Text, color, includePath: !heading);
                 lastLine = line.Line;
             }
         }
     }
 
-    private static void WriteMatchLine(SearchMatch match, bool onlyMatching, bool color)
+    private static void WriteMatchLine(SearchMatch match, bool onlyMatching, bool color, bool includePath)
     {
         var body = onlyMatching ? match.Text : match.LineText;
+        var line = match.Line.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var column = match.Column.ToString(System.Globalization.CultureInfo.InvariantCulture);
         if (!color)
         {
-            Console.WriteLine($"{match.Path}:{match.Line}:{match.Column}:{body}");
+            Console.WriteLine(includePath ? $"{match.Path}:{line}:{column}:{body}" : $"{line}:{column}:{body}");
             return;
         }
 
@@ -285,30 +324,26 @@ internal static class MachineOutput
             body = Highlight(match.LineText, match.Column, match.Text);
         }
 
-        Console.WriteLine(string.Concat(
-            Paint(match.Path, TextColor.Path),
+        var numbers = string.Concat(
+            Paint(line, TextColor.Line),
             ":",
-            Paint(match.Line.ToString(System.Globalization.CultureInfo.InvariantCulture), TextColor.Line),
+            Paint(column, TextColor.Column),
             ":",
-            Paint(match.Column.ToString(System.Globalization.CultureInfo.InvariantCulture), TextColor.Column),
-            ":",
-            body));
+            body);
+        Console.WriteLine(includePath ? string.Concat(Paint(match.Path, TextColor.Path), ":", numbers) : numbers);
     }
 
-    private static void WriteContextLine(string path, int line, string text, bool color)
+    private static void WriteContextLine(string path, int line, string text, bool color, bool includePath)
     {
+        var lineText = line.ToString(System.Globalization.CultureInfo.InvariantCulture);
         if (!color)
         {
-            Console.WriteLine($"{path}-{line}-{text}");
+            Console.WriteLine(includePath ? $"{path}-{lineText}-{text}" : $"{lineText}-{text}");
             return;
         }
 
-        Console.WriteLine(string.Concat(
-            Paint(path, TextColor.Path),
-            "-",
-            Paint(line.ToString(System.Globalization.CultureInfo.InvariantCulture), TextColor.Line),
-            "-",
-            text));
+        var painted = string.Concat(Paint(lineText, TextColor.Line), "-", text);
+        Console.WriteLine(includePath ? string.Concat(Paint(path, TextColor.Path), "-", painted) : painted);
     }
 
     private static string Highlight(string lineText, int column, string matchText)
@@ -370,7 +405,8 @@ internal static class MachineOutput
         OutputFormat format,
         bool color,
         bool asMatches,
-        IReadOnlyList<SearchMatch>? matches)
+        IReadOnlyList<SearchMatch>? matches,
+        long elapsedMilliseconds)
     {
         var list = paths as IReadOnlyList<string> ?? paths.ToArray();
         switch (format)
@@ -395,7 +431,7 @@ internal static class MachineOutput
             case OutputFormat.RgJson:
                 if (asMatches && matches != null)
                 {
-                    WriteRgJson(matches);
+                    WriteRgJson(matches, elapsedMilliseconds);
                 }
                 else
                 {
@@ -405,14 +441,14 @@ internal static class MachineOutput
                         WriteRgEnd(path, matches: 0, matchedLines: 0);
                     }
 
-                    WriteRgSummary(list.Count, matches: 0, matchedLines: 0);
+                    WriteRgSummary(list.Count, matches: 0, matchedLines: 0, elapsedMilliseconds);
                 }
 
                 break;
         }
     }
 
-    private static void WriteCounts(IReadOnlyList<SearchMatch> matches, OutputFormat format, bool color)
+    private static void WriteCounts(IReadOnlyList<SearchMatch> matches, OutputFormat format, bool color, long elapsedMilliseconds)
     {
         var groups = CountGroups(matches);
         switch (format)
@@ -454,7 +490,7 @@ internal static class MachineOutput
                     lineTotal += group.Lines;
                 }
 
-                WriteRgSummary(groups.Count, matchTotal, lineTotal);
+                WriteRgSummary(groups.Count, matchTotal, lineTotal, elapsedMilliseconds);
                 break;
         }
     }
@@ -561,7 +597,7 @@ internal static class MachineOutput
         return Encoding.UTF8.GetString(stream.ToArray());
     }
 
-    private static void WriteRgJson(IReadOnlyList<SearchMatch> matches)
+    private static void WriteRgJson(IReadOnlyList<SearchMatch> matches, long elapsedMilliseconds)
     {
         string? path = null;
         var fileMatches = 0;
@@ -569,6 +605,9 @@ internal static class MachineOutput
         var totalMatches = 0;
         var totalLines = 0;
         var files = 0;
+        var lastLine = 0;
+        HashSet<int>? fileMatchLines = null;
+        var matchLines = ContextMatchLines(matches);
 
         void EndFile()
         {
@@ -591,16 +630,74 @@ internal static class MachineOutput
                 path = match.Path;
                 fileMatches = 0;
                 fileLines = [];
+                lastLine = 0;
+                fileMatchLines = matchLines.TryGetValue(path, out var lines) ? lines : null;
                 WriteRgBegin(path);
+            }
+
+            if (match.Before != null)
+            {
+                foreach (var line in match.Before)
+                {
+                    if (line.Line <= lastLine || (fileMatchLines != null && fileMatchLines.Contains(line.Line)))
+                    {
+                        continue;
+                    }
+
+                    WriteRgContext(path!, line);
+                    lastLine = line.Line;
+                }
             }
 
             fileMatches++;
             fileLines.Add(match.Line);
             WriteRgMatch(match);
+            if (match.Line > lastLine)
+            {
+                lastLine = match.Line;
+            }
+
+            if (match.After == null)
+            {
+                continue;
+            }
+
+            foreach (var line in match.After)
+            {
+                if (line.Line <= lastLine || (fileMatchLines != null && fileMatchLines.Contains(line.Line)))
+                {
+                    continue;
+                }
+
+                WriteRgContext(path!, line);
+                lastLine = line.Line;
+            }
         }
 
         EndFile();
-        WriteRgSummary(files, totalMatches, totalLines);
+        WriteRgSummary(files, totalMatches, totalLines, elapsedMilliseconds);
+    }
+
+    private static Dictionary<string, HashSet<int>> ContextMatchLines(IReadOnlyList<SearchMatch> matches)
+    {
+        var matchLines = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+        foreach (var match in matches)
+        {
+            if (match.Before == null && match.After == null)
+            {
+                continue;
+            }
+
+            if (!matchLines.TryGetValue(match.Path, out var lines))
+            {
+                lines = [];
+                matchLines[match.Path] = lines;
+            }
+
+            lines.Add(match.Line);
+        }
+
+        return matchLines;
     }
 
     private static void WriteRgBegin(string path)
@@ -646,6 +743,7 @@ internal static class MachineOutput
             writer.WriteString("text", lineText);
             writer.WriteEndObject();
             writer.WriteNumber("line_number", match.Line);
+            writer.WriteNumber("absolute_offset", LineOffset(match));
             writer.WriteStartArray("submatches");
             writer.WriteStartObject();
             writer.WriteStartObject("match");
@@ -660,6 +758,36 @@ internal static class MachineOutput
         }
 
         Console.WriteLine(Encoding.UTF8.GetString(stream.ToArray()));
+    }
+
+    private static void WriteRgContext(string path, ContextLine line)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream, JsonOptions))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("type", "context");
+            writer.WriteStartObject("data");
+            WriteRgPath(writer, path);
+            writer.WriteStartObject("lines");
+            writer.WriteString("text", line.Text + "\n");
+            writer.WriteEndObject();
+            writer.WriteNumber("line_number", line.Line);
+            writer.WriteNumber("absolute_offset", line.Offset);
+            writer.WriteStartArray("submatches");
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+        }
+
+        Console.WriteLine(Encoding.UTF8.GetString(stream.ToArray()));
+    }
+
+    private static int LineOffset(SearchMatch match)
+    {
+        var column = match.Column > 0 ? match.Column - 1 : 0;
+        var offset = match.Offset - column;
+        return offset < 0 ? 0 : offset;
     }
 
     private static void WriteRgEnd(string path, int matches, int matchedLines)
@@ -683,7 +811,7 @@ internal static class MachineOutput
         Console.WriteLine(Encoding.UTF8.GetString(stream.ToArray()));
     }
 
-    private static void WriteRgSummary(int files, int matches, int matchedLines)
+    private static void WriteRgSummary(int files, int matches, int matchedLines, long elapsedMilliseconds)
     {
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream, JsonOptions))
@@ -695,6 +823,7 @@ internal static class MachineOutput
             writer.WriteNumber("searches_with_match", files);
             writer.WriteNumber("matches", matches);
             writer.WriteNumber("matched_lines", matchedLines);
+            writer.WriteNumber("elapsed_ms", elapsedMilliseconds);
             writer.WriteEndObject();
             writer.WriteEndObject();
             writer.WriteEndObject();

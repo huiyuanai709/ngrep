@@ -1,11 +1,12 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using Netgrep.Ignore;
 using Netgrep.Indexing;
 using Netgrep.Text;
 
 namespace Netgrep.Search;
 
-internal readonly record struct ContextLine(int Line, string Text);
+internal readonly record struct ContextLine(int Line, string Text, int Offset = 0);
 
 internal readonly record struct SearchMatch(
     string Path,
@@ -14,7 +15,8 @@ internal readonly record struct SearchMatch(
     string Text,
     string LineText,
     IReadOnlyList<ContextLine>? Before = null,
-    IReadOnlyList<ContextLine>? After = null);
+    IReadOnlyList<ContextLine>? After = null,
+    int Offset = 0);
 
 internal enum ReportMode
 {
@@ -56,6 +58,9 @@ internal sealed class SearchQuery
 
     public ReportMode Report { get; init; }
 
+    /// <summary>When set, <c>-l</c> does not stop at the first hit, so line stats are complete.</summary>
+    public bool Stats { get; init; }
+
     public int BeforeContext { get; init; }
 
     public int AfterContext { get; init; }
@@ -90,6 +95,33 @@ internal sealed class SearchOutcome
     public int Workers { get; init; } = 1;
 
     public IReadOnlyList<string> FilesWithoutMatch { get; init; } = [];
+
+    public int FilesSearched { get; init; }
+
+    public int FilesMatched { get; init; }
+
+    public int LinesMatched { get; init; }
+
+    public long ElapsedMilliseconds { get; init; }
+}
+
+internal sealed class SearchTally
+{
+    private int _searched;
+    private int _matched;
+
+    public int FilesSearched => Volatile.Read(ref _searched);
+
+    public int FilesMatched => Volatile.Read(ref _matched);
+
+    public void File(bool matched)
+    {
+        Interlocked.Increment(ref _searched);
+        if (matched)
+        {
+            Interlocked.Increment(ref _matched);
+        }
+    }
 }
 
 internal static class Searcher
@@ -97,6 +129,8 @@ internal static class Searcher
     public static SearchOutcome Search(SearchQuery query)
     {
         query.CancellationToken.ThrowIfCancellationRequested();
+        var clock = Stopwatch.StartNew();
+        var tally = new SearchTally();
         var plan = MatchPlan.Create(query);
         var workers = ResolveWorkers(query);
         var start = Path.GetFullPath(query.Path);
@@ -107,7 +141,7 @@ internal static class Searcher
 
         if (HiddenPaths.ContainsHardSkip(start))
         {
-            return Finish([], usedIndex: false, note: null, workers: 1, usedPrefilter: false, without: null);
+            return Finish([], usedIndex: false, note: null, workers: 1, usedPrefilter: false, without: null, tally, clock);
         }
 
         var skipIndex = query.ForceScan || !plan.ApplyGitIgnore;
@@ -115,7 +149,7 @@ internal static class Searcher
         {
             var explicitIndex = IndexStore.TryLoad(query.IndexDirectory)
                 ?? throw new InvalidDataException($"Index not found at {Path.GetFullPath(query.IndexDirectory)}.");
-            return SearchIndex(explicitIndex, start, query, plan, workers);
+            return SearchIndex(explicitIndex, start, query, plan, workers, tally, clock);
         }
 
         if (!skipIndex)
@@ -126,14 +160,14 @@ internal static class Searcher
                 var index = IndexStore.TryLoad(discovered);
                 if (index != null)
                 {
-                    return SearchIndex(index, start, query, plan, workers);
+                    return SearchIndex(index, start, query, plan, workers, tally, clock);
                 }
             }
         }
 
         var note = ScanNote(query, indexSkipped: skipIndex && !query.ForceScan && IndexWouldApply(start, query));
-        var scanned = ContentScan(start, plan, workers, query.CancellationToken);
-        return Finish(scanned.Matches, usedIndex: false, note, scanned.Workers, usedPrefilter: false, scanned.Without);
+        var scanned = ContentScan(start, plan, workers, query.CancellationToken, tally);
+        return Finish(scanned.Matches, usedIndex: false, note, scanned.Workers, usedPrefilter: false, scanned.Without, tally, clock);
     }
 
     private static int ResolveWorkers(SearchQuery query)
@@ -162,7 +196,7 @@ internal static class Searcher
         return Math.Max(1, Environment.ProcessorCount);
     }
 
-    private static SearchOutcome SearchIndex(IndexData index, string start, SearchQuery query, MatchPlan plan, int workers)
+    private static SearchOutcome SearchIndex(IndexData index, string start, SearchQuery query, MatchPlan plan, int workers, SearchTally tally, Stopwatch clock)
     {
         var root = index.Manifest.Root;
         if (!Directory.Exists(root))
@@ -173,8 +207,8 @@ internal static class Searcher
         var prefix = RelativeTo(root, start, out var outside, out var prefixIsFile);
         if (outside)
         {
-            var scanned = ContentScan(start, plan, workers, query.CancellationToken);
-            return Finish(scanned.Matches, usedIndex: false, "path is outside the indexed root; scanned content", scanned.Workers, usedPrefilter: false, scanned.Without);
+            var scanned = ContentScan(start, plan, workers, query.CancellationToken, tally);
+            return Finish(scanned.Matches, usedIndex: false, "path is outside the indexed root; scanned content", scanned.Workers, usedPrefilter: false, scanned.Without, tally, clock);
         }
 
         HashSet<int>? selectedIds = null;
@@ -229,8 +263,8 @@ internal static class Searcher
             files,
             degree,
             query.CancellationToken,
-            (file, local) => TryCollect(file, plan, local, stats: null, without));
-        return Finish(matches, usedIndex: true, note: null, degree, usedPrefilter, without);
+            (file, local) => TryCollect(file, plan, local, stats: null, without, tally));
+        return Finish(matches, usedIndex: true, note: null, degree, usedPrefilter, without, tally, clock);
     }
 
     private static bool IndexWouldApply(string start, SearchQuery query)
@@ -274,7 +308,8 @@ internal static class Searcher
         string start,
         MatchPlan plan,
         int workers,
-        CancellationToken cancellation)
+        CancellationToken cancellation,
+        SearchTally tally)
     {
         var without = plan.Report == ReportMode.FilesWithoutMatch ? new ConcurrentBag<string>() : null;
         if (File.Exists(start))
@@ -285,7 +320,7 @@ internal static class Searcher
             // includeHidden so a path the user named is not treated as skipped merely for being a dotfile.
             if ((!plan.ApplyGitIgnore || !IsIgnoredFile(parent, start)) && plan.Filter.Accepts(relative))
             {
-                TryCollect(new ConfirmFile(start, relative), plan, matches, stats: null, without);
+                TryCollect(new ConfirmFile(start, relative), plan, matches, stats: null, without, tally);
             }
 
             return (matches, 1, without);
@@ -297,7 +332,7 @@ internal static class Searcher
             Enumerate(start, plan, stats),
             degree,
             cancellation,
-            (file, local) => TryCollect(file, plan, local, stats, without));
+            (file, local) => TryCollect(file, plan, local, stats, without, tally));
         return (found, degree, without);
     }
 
@@ -326,7 +361,8 @@ internal static class Searcher
         MatchPlan plan,
         List<SearchMatch> matches,
         WalkStats? stats,
-        ConcurrentBag<string>? filesWithoutMatch)
+        ConcurrentBag<string>? filesWithoutMatch,
+        SearchTally tally)
     {
         string text;
         using (var read = TextFiles.Read(file.FullPath))
@@ -346,6 +382,7 @@ internal static class Searcher
 
             if (!plan.Invert && plan.Literals != null && plan.Literals.Misses(read.Span, plan.IgnoreCase))
             {
+                tally.File(matched: false);
                 filesWithoutMatch?.Add(file.RelativePath);
                 return;
             }
@@ -353,9 +390,11 @@ internal static class Searcher
             text = TextFiles.Decode(read.Span);
         }
 
-        if (plan.Report == ReportMode.FilesWithoutMatch)
+        if (plan.Report == ReportMode.FilesWithoutMatch && !plan.CollectAll)
         {
-            if (!MatchPlan.HasMatch(text, plan))
+            var hit = MatchPlan.HasMatch(text, plan);
+            tally.File(hit);
+            if (!hit)
             {
                 filesWithoutMatch?.Add(file.RelativePath);
             }
@@ -363,7 +402,14 @@ internal static class Searcher
             return;
         }
 
+        var before = matches.Count;
         MatchPlan.Collect(text, file.RelativePath, plan, matches);
+        var matched = matches.Count > before;
+        tally.File(matched);
+        if (plan.Report == ReportMode.FilesWithoutMatch && !matched)
+        {
+            filesWithoutMatch?.Add(file.RelativePath);
+        }
     }
 
     private static SearchOutcome Finish(
@@ -372,7 +418,9 @@ internal static class Searcher
         string? note,
         int workers,
         bool usedPrefilter,
-        ConcurrentBag<string>? without)
+        ConcurrentBag<string>? without,
+        SearchTally tally,
+        Stopwatch clock)
     {
         matches.Sort(CompareMatches);
         return new SearchOutcome
@@ -384,7 +432,29 @@ internal static class Searcher
             Confirmation = workers > 1 ? "parallel" : "sequential",
             Workers = workers,
             FilesWithoutMatch = NormalizeWithout(without),
+            FilesSearched = tally.FilesSearched,
+            FilesMatched = tally.FilesMatched,
+            LinesMatched = CountMatchedLines(matches),
+            ElapsedMilliseconds = clock.ElapsedMilliseconds,
         };
+    }
+
+    private static int CountMatchedLines(List<SearchMatch> matches)
+    {
+        var count = 0;
+        string? path = null;
+        var line = 0;
+        foreach (var match in matches)
+        {
+            if (!string.Equals(path, match.Path, StringComparison.Ordinal) || line != match.Line)
+            {
+                count++;
+                path = match.Path;
+                line = match.Line;
+            }
+        }
+
+        return count;
     }
 
     private static string[] NormalizeWithout(ConcurrentBag<string>? without)

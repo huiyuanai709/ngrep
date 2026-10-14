@@ -37,7 +37,9 @@ internal sealed class MatchPlan
 
     public bool WantsContext => Before > 0 || After > 0;
 
-    public bool StopAtFirst => Report == ReportMode.FilesWithMatches;
+    public bool CollectAll { get; init; }
+
+    public bool StopAtFirst => Report == ReportMode.FilesWithMatches && !CollectAll;
 
     /// <summary>Regex matches may include a newline. Set by <c>-U</c> or <c>--multiline-dotall</c>.</summary>
     public bool CrossesLines => Multiline || MultilineDotAll;
@@ -92,6 +94,7 @@ internal sealed class MatchPlan
             Multiline = query.Multiline || query.MultilineDotAll,
             MultilineDotAll = query.MultilineDotAll,
             IncludeHidden = query.IncludeHidden,
+            CollectAll = query.Stats,
         };
     }
 
@@ -139,7 +142,8 @@ internal sealed class MatchPlan
 
                 var lineText = LineMap.LineText(text, starts, line);
                 var (before, after) = Context(text, starts, lineCount, line, plan);
-                matches.Add(new SearchMatch(relativePath, line, 1, lineText, lineText, before, after));
+                var offset = line - 1 < starts.Length ? starts[line - 1] : 0;
+                matches.Add(new SearchMatch(relativePath, line, 1, lineText, lineText, before, after, offset));
                 if (plan.StopAtFirst)
                 {
                     return;
@@ -225,7 +229,8 @@ internal sealed class MatchPlan
             hit.Value,
             LineMap.LineText(text, starts, line),
             before,
-            after));
+            after,
+            hit.Index));
     }
 
     private static Hit? FirstHit(string text, MatchPlan plan)
@@ -553,7 +558,7 @@ internal sealed class MatchPlan
         for (var i = 0; i < length; i++)
         {
             var number = startLine + i;
-            lines[i] = new ContextLine(number, LineMap.LineText(text, starts, number));
+            lines[i] = new ContextLine(number, LineMap.LineText(text, starts, number), LineStart(starts, number));
         }
 
         return lines;
@@ -572,11 +577,14 @@ internal sealed class MatchPlan
         for (var i = 0; i < take; i++)
         {
             var number = line + 1 + i;
-            lines[i] = new ContextLine(number, LineMap.LineText(text, starts, number));
+            lines[i] = new ContextLine(number, LineMap.LineText(text, starts, number), LineStart(starts, number));
         }
 
         return lines;
     }
+
+    private static int LineStart(int[] starts, int line) =>
+        line >= 1 && line - 1 < starts.Length ? starts[line - 1] : 0;
 
     private readonly record struct Hit(int Index, int Length, string Value);
 }

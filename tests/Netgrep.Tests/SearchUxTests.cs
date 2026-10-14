@@ -307,6 +307,10 @@ public class SearchUxTests
         Assert.Contains("--multiline", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--multiline-dotall", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("rgjson", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--file", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--heading", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--no-heading", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--stats", capture.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

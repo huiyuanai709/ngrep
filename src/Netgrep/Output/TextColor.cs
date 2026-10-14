@@ -41,6 +41,21 @@ internal static class TextColor
         };
     }
 
+    /// <summary>
+    /// Stdout is a terminal. <c>TERM=dumb</c>, a redirect, and a <see cref="StringWriter"/> are not.
+    /// <c>NO_COLOR</c> does not affect this; it only turns color off.
+    /// </summary>
+    public static bool IsTerminal()
+    {
+        var term = Environment.GetEnvironmentVariable("TERM");
+        if (string.Equals(term, "dumb", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return !Console.IsOutputRedirected && Console.Out is not StringWriter;
+    }
+
     private static bool AutoDetect()
     {
         var noColor = Environment.GetEnvironmentVariable("NO_COLOR");
@@ -49,17 +64,6 @@ internal static class TextColor
             return false;
         }
 
-        var term = Environment.GetEnvironmentVariable("TERM");
-        if (string.Equals(term, "dumb", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        if (Console.IsOutputRedirected || Console.Out is StringWriter)
-        {
-            return false;
-        }
-
-        return true;
+        return IsTerminal();
     }
 }

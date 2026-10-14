@@ -376,7 +376,9 @@ public class ParityTests
         Assert.Equal("netgrep", sub.GetProperty("match").GetProperty("text").GetString());
         Assert.Equal(5, sub.GetProperty("start").GetInt32());
         Assert.Equal(12, sub.GetProperty("end").GetInt32());
+        Assert.Equal(0, match.GetProperty("absolute_offset").GetInt32());
         Assert.Equal(1, events[3].GetProperty("data").GetProperty("stats").GetProperty("matched_lines").GetInt32());
+        Assert.True(events[3].GetProperty("data").GetProperty("stats").GetProperty("elapsed_ms").GetInt64() >= 0);
         Assert.DoesNotContain("\u001b", capture.Stdout, StringComparison.Ordinal);
 
         capture.Clear();
@@ -401,6 +403,159 @@ public class ParityTests
         capture.Clear();
         Assert.Equal(ExitCodes.Error, NetgrepCli.Run(["index", tree.Root, "--format", "rgjson"]));
         Assert.Contains("only supported for search", capture.Stderr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Pattern_file_skips_comments_and_combines_with_other_patterns()
+    {
+        var parsed = PatternFiles.Parse("\uFEFF# comment\n\n\\#hash\n  spaced\nkeep\n");
+        Assert.Equal(["#hash", "  spaced", "keep"], parsed);
+
+        using var tree = Temp();
+        File.WriteAllText(tree.File("a.txt"), "alpha\n");
+        File.WriteAllText(tree.File("b.txt"), "#hash\n");
+        File.WriteAllText(tree.File("c.txt"), "netgrep\n");
+        var pats = Path.Combine(Path.GetTempPath(), "netgrep-pats-" + Guid.NewGuid().ToString("n") + ".txt");
+        File.WriteAllText(pats, "# comment\n\n\\#hash\nnetgrep\n");
+        try
+        {
+            using var capture = new Capture();
+            Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["-e", "alpha", "-f", pats, tree.Root, "-j", "1"]));
+            var lines = capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim();
+            Assert.Equal("a.txt:1:1:alpha\nb.txt:1:1:#hash\nc.txt:1:1:netgrep", lines);
+
+            capture.Clear();
+            Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["alpha", "-f", pats, tree.Root, "-l", "-j", "1"]));
+            Assert.Equal("a.txt\nb.txt\nc.txt", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
+
+            capture.Clear();
+            var previousIn = Console.In;
+            Console.SetIn(new StringReader("netgrep\n# skip\n\n"));
+            try
+            {
+                Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["-f", "-", tree.Root, "-l", "-j", "1"]));
+            }
+            finally
+            {
+                Console.SetIn(previousIn);
+            }
+
+            Assert.Equal("c.txt", capture.Stdout.Trim());
+
+            capture.Clear();
+            Assert.Equal(ExitCodes.Error, NetgrepCli.Run(["-f", tree.File("missing.txt"), tree.Root]));
+            Assert.Contains("Pattern file not found", capture.Stderr, StringComparison.Ordinal);
+
+            capture.Clear();
+            File.WriteAllText(pats, "# only\n\n");
+            Assert.Equal(ExitCodes.Error, NetgrepCli.Run(["-f", pats, tree.Root]));
+            Assert.Contains("Pattern file contains no patterns", capture.Stderr, StringComparison.Ordinal);
+
+            capture.Clear();
+            File.WriteAllText(pats, "n.t\n");
+            Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["-f", pats, "--regex", tree.Root, "-l", "-j", "1"]));
+            Assert.Equal("c.txt", capture.Stdout.Trim());
+        }
+        finally
+        {
+            File.Delete(pats);
+        }
+    }
+
+    [Fact]
+    public void Headings_drop_the_path_prefix_only_for_text_matches()
+    {
+        using var tree = Temp();
+        File.WriteAllText(tree.File("a.txt"), "netgrep\nnext\n");
+        File.WriteAllText(tree.File("b.txt"), "netgrep\n");
+
+        using var capture = new Capture();
+        Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["netgrep", tree.Root, "-j", "1"]));
+        Assert.Equal("a.txt:1:1:netgrep\nb.txt:1:1:netgrep\n", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
+
+        capture.Clear();
+        Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["netgrep", tree.Root, "--heading", "-j", "1"]));
+        Assert.Equal("a.txt\n1:1:netgrep\n\nb.txt\n1:1:netgrep\n", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
+
+        capture.Clear();
+        Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["netgrep", tree.Root, "--heading", "--no-heading", "-j", "1"]));
+        Assert.Equal("a.txt:1:1:netgrep\nb.txt:1:1:netgrep\n", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
+
+        capture.Clear();
+        Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["netgrep", Path.Combine(tree.Root, "a.txt"), "--heading", "-A", "1", "-j", "1"]));
+        Assert.Equal("a.txt\n1:1:netgrep\n2-next\n", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
+
+        capture.Clear();
+        Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["netgrep", tree.Root, "--heading", "-o", "-j", "1"]));
+        Assert.Equal("a.txt\n1:1:netgrep\n\nb.txt\n1:1:netgrep\n", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
+
+        capture.Clear();
+        Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["netgrep", tree.Root, "--heading", "--format", "json", "-j", "1"]));
+        using (var doc = JsonDocument.Parse(capture.Stdout))
+        {
+            var hit = doc.RootElement.GetProperty("matches")[0];
+            Assert.Equal("a.txt", hit.GetProperty("path").GetString());
+            Assert.Equal("netgrep", hit.GetProperty("text").GetString());
+            Assert.Equal("netgrep", hit.GetProperty("lineText").GetString());
+            Assert.False(hit.TryGetProperty("absolute_offset", out _));
+        }
+
+        Assert.DoesNotContain("files searched", capture.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Stats_go_to_stderr_and_keep_stdout_and_exit_codes()
+    {
+        using var tree = Temp();
+        File.WriteAllText(tree.File("a.txt"), "netgrep netgrep\n");
+        File.WriteAllText(tree.File("b.txt"), "zzzzzz\n");
+
+        using var capture = new Capture();
+        Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["netgrep", tree.Root, "--stats", "-j", "1"]));
+        Assert.Equal(
+            "a.txt:1:1:netgrep netgrep\na.txt:1:9:netgrep netgrep\n",
+            capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
+        Assert.Contains("files searched: 2", capture.Stderr, StringComparison.Ordinal);
+        Assert.Contains("files matched: 1", capture.Stderr, StringComparison.Ordinal);
+        Assert.Contains("lines matched: 1", capture.Stderr, StringComparison.Ordinal);
+        Assert.Contains("matches: 2", capture.Stderr, StringComparison.Ordinal);
+        Assert.Contains("elapsed ms:", capture.Stderr, StringComparison.Ordinal);
+        Assert.DoesNotContain("files searched", capture.Stdout, StringComparison.Ordinal);
+
+        capture.Clear();
+        Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["netgrep", tree.Root, "-l", "--stats", "-j", "1"]));
+        Assert.Equal("a.txt", capture.Stdout.Trim());
+        Assert.Contains("matches: 2", capture.Stderr, StringComparison.Ordinal);
+        Assert.Contains("lines matched: 1", capture.Stderr, StringComparison.Ordinal);
+
+        capture.Clear();
+        Assert.Equal(ExitCodes.NoMatches, NetgrepCli.Run(["missing", tree.Root, "--stats", "--format", "ndjson", "-j", "1"]));
+        Assert.Equal("", capture.Stdout.Trim());
+        Assert.Contains("files searched: 2", capture.Stderr, StringComparison.Ordinal);
+        Assert.Contains("files matched: 0", capture.Stderr, StringComparison.Ordinal);
+        Assert.Contains("matches: 0", capture.Stderr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Rgjson_emits_context_events_when_context_is_requested()
+    {
+        using var tree = Temp();
+        File.WriteAllText(tree.File("a.txt"), "before\nnetgrep\nafter\n");
+
+        using var capture = new Capture();
+        Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["netgrep", tree.Root, "--format", "rgjson", "-C", "1", "-j", "1"]));
+        var events = capture.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => JsonDocument.Parse(line).RootElement.GetProperty("type").GetString())
+            .ToArray();
+        Assert.Equal(new[] { "begin", "context", "match", "context", "end", "summary" }, events);
+
+        capture.Clear();
+        Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["netgrep", tree.Root, "--format", "ndjson", "-C", "1", "-j", "1"]));
+        using var doc = JsonDocument.Parse(capture.Stdout.Trim());
+        Assert.Equal("netgrep", doc.RootElement.GetProperty("text").GetString());
+        Assert.Equal("before", doc.RootElement.GetProperty("before")[0].GetProperty("text").GetString());
+        Assert.False(doc.RootElement.TryGetProperty("absolute_offset", out _));
+        Assert.False(doc.RootElement.GetProperty("before")[0].TryGetProperty("offset", out _));
     }
 
     [Fact]
