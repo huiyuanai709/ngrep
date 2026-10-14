@@ -311,6 +311,13 @@ public class SearchUxTests
         Assert.Contains("--heading", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--no-heading", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--stats", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--extended-regexp", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--fixed-strings", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--line-regexp", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--quiet", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--silent", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--line-number", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--no-messages", capture.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

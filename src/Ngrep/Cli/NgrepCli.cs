@@ -64,12 +64,17 @@ internal static class NgrepCli
         {
             Description = "Directory to index.",
         };
+        var indexQuiet = new Option<bool>("--quiet", "-q")
+        {
+            Description = "Silence index progress on stderr. The stdout summary is unchanged. Search -q is a different flag and suppresses match output.",
+        };
         var indexCommand = new Command("index", "Walk a tree and build or update the inverted index.");
         indexCommand.Arguments.Add(indexPath);
+        indexCommand.Options.Add(indexQuiet);
         indexCommand.SetAction(result =>
         {
             var path = result.GetRequiredValue(indexPath);
-            var built = Indexer.Build(path, result.GetValue(index));
+            var built = Indexer.Build(path, result.GetValue(index), showProgress: !result.GetValue(indexQuiet));
             MachineOutput.WriteIndex(built, OutputFormats.Parse(result.GetValue(format)));
             return ExitCodes.Success;
         });
@@ -83,9 +88,13 @@ internal static class NgrepCli
         {
             Description = "Case-insensitive match (ordinal, culture-invariant).",
         };
-        var regex = new Option<bool>("--regex")
+        var regex = new Option<bool>("--regex", "-E", "--extended-regexp")
         {
-            Description = "Treat patterns as regular expressions. Required literals are trigram-filtered when extraction is safe.",
+            Description = "Treat patterns as .NET regular expressions, not POSIX BRE or ERE. -E and --extended-regexp are aliases. The default is fixed strings. Required literals are trigram-filtered when extraction is safe.",
+        };
+        var fixedStrings = new Option<bool>("--fixed-strings", "-F")
+        {
+            Description = "Treat patterns as literal text. This is the default. Mutually exclusive with -E/--extended-regexp/--regex (exit 2).",
         };
         var scan = new Option<bool>("--scan")
         {
@@ -141,6 +150,10 @@ internal static class NgrepCli
         {
             Description = "Only match when both ends are word boundaries (Unicode letter/digit or underscore).",
         };
+        var lineRegexp = new Option<bool>("--line-regexp", "-x")
+        {
+            Description = "Match only when the entire line matches. A literal must equal the line. A regex is tested against each line, with a trailing CR removed, anchored at both ends. .NET regex, not POSIX ERE.",
+        };
         var invert = new Option<bool>("-v", "--invert-match")
         {
             Description = "Print lines that do not match. Does not trigram-filter; reads candidates in parallel and stops each matching line at the first hit.",
@@ -168,6 +181,18 @@ internal static class NgrepCli
         var count = new Option<bool>("--count", "-c")
         {
             Description = "Print the number of matching lines per file (path:count). With -v, count lines that do not match. A line with several hits counts once. Zero counts are omitted.",
+        };
+        var quiet = new Option<bool>("--quiet", "-q", "--silent")
+        {
+            Description = "Print no match report on stdout. Exit 0 if any line matches, 1 if none, and 2 on error. Mutually exclusive with -c, -l, and --files-without-match. Does not hide the stderr scan note.",
+        };
+        var lineNumber = new Option<bool>("--line-number", "-n")
+        {
+            Description = "Accepted for grep compatibility. Text output always includes the 1-based line number (path:line:column:text, or line:column:text under a heading).",
+        };
+        var noMessages = new Option<bool>("--no-messages", "-s")
+        {
+            Description = "Suppress stderr for a missing search path and for an explicitly named unreadable file. The exit code is still 2. Does not hide usage errors, bad regexes, or missing pattern files. Files skipped while walking a directory stay silent.",
         };
         var onlyMatching = new Option<bool>("--only-matching", "-o")
         {
@@ -208,6 +233,7 @@ internal static class NgrepCli
         searchCommand.Arguments.Add(positionals);
         searchCommand.Options.Add(ignoreCase);
         searchCommand.Options.Add(regex);
+        searchCommand.Options.Add(fixedStrings);
         searchCommand.Options.Add(scan);
         searchCommand.Options.Add(glob);
         searchCommand.Options.Add(type);
@@ -220,6 +246,7 @@ internal static class NgrepCli
         searchCommand.Options.Add(regexp);
         searchCommand.Options.Add(patternFile);
         searchCommand.Options.Add(word);
+        searchCommand.Options.Add(lineRegexp);
         searchCommand.Options.Add(invert);
         searchCommand.Options.Add(noIgnore);
         searchCommand.Options.Add(noIgnoreVcs);
@@ -227,6 +254,9 @@ internal static class NgrepCli
         searchCommand.Options.Add(filesWith);
         searchCommand.Options.Add(filesWithout);
         searchCommand.Options.Add(count);
+        searchCommand.Options.Add(quiet);
+        searchCommand.Options.Add(lineNumber);
+        searchCommand.Options.Add(noMessages);
         searchCommand.Options.Add(onlyMatching);
         searchCommand.Options.Add(hidden);
         searchCommand.Options.Add(color);
@@ -279,6 +309,10 @@ internal static class NgrepCli
                     filesWith,
                     filesWithout,
                     count,
+                    quiet,
+                    lineRegexp,
+                    fixedStrings,
+                    noMessages,
                     onlyMatching,
                     hidden,
                     color,
@@ -362,6 +396,10 @@ internal static class NgrepCli
         Option<bool> filesWith,
         Option<bool> filesWithout,
         Option<bool> count,
+        Option<bool> quiet,
+        Option<bool> lineRegexp,
+        Option<bool> fixedStrings,
+        Option<bool> noMessages,
         Option<bool> onlyMatching,
         Option<bool> hidden,
         Option<string> color,
@@ -385,8 +423,13 @@ internal static class NgrepCli
         }
 
         var bound = SearchSyntax.Bind(result, typeList: false);
+        if (result.GetValue(regex) && result.GetValue(fixedStrings))
+        {
+            throw new ArgumentException("-E/--extended-regexp/--regex and -F/--fixed-strings are mutually exclusive.");
+        }
+
         var patterns = LoadPatterns(bound);
-        var report = BindReport(result, filesWith, filesWithout, count);
+        var report = BindReport(result, filesWith, filesWithout, count, quiet);
         var beforeCount = ContextCount(result, before, context);
         var afterCount = ContextCount(result, after, context);
         if (beforeCount < 0 || afterCount < 0)
@@ -397,33 +440,48 @@ internal static class NgrepCli
         var parsedFormat = OutputFormats.Parse(result.GetValue(format));
         var colorOn = parsedFormat == OutputFormat.Text && TextColor.Enabled(TextColor.Parse(result.GetValue(color)));
         var wantStats = result.GetValue(stats);
-        var outcome = Searcher.Search(new SearchQuery
+        SearchOutcome outcome;
+        try
         {
-            Pattern = patterns[0],
-            AdditionalPatterns = patterns.Count > 1 ? patterns[1..] : [],
-            Path = bound.Path,
-            IndexDirectory = result.GetValue(index),
-            IgnoreCase = result.GetValue(ignoreCase),
-            Regex = result.GetValue(regex),
-            ForceScan = result.GetValue(scan),
-            WordRegexp = result.GetValue(word),
-            InvertMatch = result.GetValue(invert),
-            NoIgnore = result.GetValue(noIgnore),
-            NoIgnoreVcs = result.GetValue(noIgnoreVcs),
-            IncludeHidden = result.GetValue(hidden),
-            Multiline = result.GetValue(multiline),
-            MultilineDotAll = result.GetValue(multilineDotAll),
-            Stats = wantStats,
-            Report = report,
-            BeforeContext = beforeCount,
-            AfterContext = afterCount,
-            Globs = Values(result, glob),
-            Types = Values(result, type),
-            TypeNots = Values(result, typeNot),
-            TypeAdds = adds,
-            MaxDegreeOfParallelism = ThreadCount(result, threads),
-            CancellationToken = cancellationToken,
-        });
+            outcome = Searcher.Search(new SearchQuery
+            {
+                Pattern = patterns[0],
+                AdditionalPatterns = patterns.Count > 1 ? patterns[1..] : [],
+                Path = bound.Path,
+                IndexDirectory = result.GetValue(index),
+                IgnoreCase = result.GetValue(ignoreCase),
+                Regex = result.GetValue(regex),
+                ForceScan = result.GetValue(scan),
+                WordRegexp = result.GetValue(word),
+                InvertMatch = result.GetValue(invert),
+                LineRegexp = result.GetValue(lineRegexp),
+                NoMessages = result.GetValue(noMessages),
+                NoIgnore = result.GetValue(noIgnore),
+                NoIgnoreVcs = result.GetValue(noIgnoreVcs),
+                IncludeHidden = result.GetValue(hidden),
+                Multiline = result.GetValue(multiline),
+                MultilineDotAll = result.GetValue(multilineDotAll),
+                Stats = wantStats,
+                Report = report,
+                BeforeContext = beforeCount,
+                AfterContext = afterCount,
+                Globs = Values(result, glob),
+                Types = Values(result, type),
+                TypeNots = Values(result, typeNot),
+                TypeAdds = adds,
+                MaxDegreeOfParallelism = ThreadCount(result, threads),
+                CancellationToken = cancellationToken,
+            });
+        }
+        catch (SearchPathException ex)
+        {
+            if (!ex.Suppress)
+            {
+                Console.Error.WriteLine(ex.Message);
+            }
+
+            return ExitCodes.Error;
+        }
         var forceHeading = result.GetValue(heading);
         var suppressHeading = result.GetValue(noHeading);
         var useHeading = parsedFormat == OutputFormat.Text
@@ -468,15 +526,17 @@ internal static class NgrepCli
         System.CommandLine.ParseResult result,
         Option<bool> filesWith,
         Option<bool> filesWithout,
-        Option<bool> count)
+        Option<bool> count,
+        Option<bool> quiet)
     {
         var with = result.GetValue(filesWith);
         var without = result.GetValue(filesWithout);
         var counts = result.GetValue(count);
-        var selected = (with ? 1 : 0) + (without ? 1 : 0) + (counts ? 1 : 0);
+        var silent = result.GetValue(quiet);
+        var selected = (with ? 1 : 0) + (without ? 1 : 0) + (counts ? 1 : 0) + (silent ? 1 : 0);
         if (selected > 1)
         {
-            throw new ArgumentException("-l/--files-with-matches, --files-without-match, and -c/--count are mutually exclusive.");
+            throw new ArgumentException("-l/--files-with-matches, --files-without-match, -c/--count, and -q/--quiet/--silent are mutually exclusive.");
         }
 
         if (with)
@@ -492,6 +552,11 @@ internal static class NgrepCli
         if (counts)
         {
             return ReportMode.Count;
+        }
+
+        if (silent)
+        {
+            return ReportMode.Quiet;
         }
 
         return ReportMode.Matches;
