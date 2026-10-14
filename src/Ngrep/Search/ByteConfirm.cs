@@ -25,38 +25,9 @@ internal static class ByteConfirm
     }
 
     /// <summary>
-    /// Arms a per-thread reader callback for <c>-l</c> without context or <c>-w</c>.
-    /// The callback remembers a miss so confirmation does not scan the file again.
-    /// </summary>
-    public static ReadStop? Arm(MatchPlan plan)
-    {
-        if (!plan.StopAtFirst || plan.WantsContext || plan.Word || !CanHandle(plan))
-        {
-            return null;
-        }
-
-        if (!plan.Literals!.TryAsciiOr(plan.IgnoreCase, out var any, out _, out var lengths))
-        {
-            return null;
-        }
-
-        var max = 1;
-        foreach (var length in lengths)
-        {
-            if (length > max)
-            {
-                max = length;
-            }
-        }
-
-        var state = _state ??= new StopState();
-        state.Arm(any, max);
-        return state.Stop;
-    }
-
-    /// <summary>
     /// A stop callback that is not stored in the thread-static slot.
-    /// Async reads resume on another pool thread; <see cref="Adopt"/> binds this callback there before confirm.
+    /// Reads resume on another pool thread; <see cref="Adopt"/> binds this callback there before confirm.
+    /// The callback remembers a miss so confirmation does not scan the file again.
     /// </summary>
     public static ReadStop? ArmFresh(MatchPlan plan)
     {

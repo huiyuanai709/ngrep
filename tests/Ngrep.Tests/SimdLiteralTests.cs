@@ -369,7 +369,7 @@ public class SimdLiteralTests
             ForceScan = scan,
             IgnoreCase = ignoreCase,
             MaxDegreeOfParallelism = 1,
-        });
+        }).GetAwaiter().GetResult();
     }
 
     private static string[] Texts(SearchOutcome outcome) =>

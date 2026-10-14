@@ -401,7 +401,7 @@ public class PosixGrepTests
             Regex = true,
             LineRegexp = true,
             MaxDegreeOfParallelism = 1,
-        });
+        }).GetAwaiter().GetResult();
         Assert.True(outcome.UsedTrigramPrefilter);
         var hit = Assert.Single(outcome.Matches);
         Assert.Equal("a.txt", hit.Path);
@@ -425,7 +425,7 @@ public class PosixGrepTests
     private static RunResult Run(params string[] args)
     {
         using var capture = new Capture();
-        var code = NgrepCli.Run(args);
+        var code = NgrepCli.Run(args).GetAwaiter().GetResult();
         return new RunResult(
             code,
             capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal),

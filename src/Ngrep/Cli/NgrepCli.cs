@@ -9,7 +9,7 @@ namespace Ngrep.Cli;
 
 internal static class NgrepCli
 {
-    public static int Run(string[] args)
+    public static async Task<int> Run(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
         try
@@ -26,7 +26,7 @@ internal static class NgrepCli
                 return ExitCodes.Error;
             }
 
-            return parsed.Invoke(new InvocationConfiguration
+            return await parsed.InvokeAsync(new InvocationConfiguration
             {
                 EnableDefaultExceptionHandler = false,
             });
@@ -103,10 +103,6 @@ internal static class NgrepCli
         var scan = new Option<bool>("--scan")
         {
             Description = "Ignore any on-disk index and scan file contents.",
-        };
-        var asyncIo = new Option<bool>("--async")
-        {
-            Description = "Schedule file reads on tasks (async I/O, then the same SIMD and byte-automaton confirm). Default is the synchronous worker path. Same Native AOT binary; files at or above 256 KiB still map.",
         };
         var glob = new Option<string[]>("-g", "--glob")
         {
@@ -244,7 +240,6 @@ internal static class NgrepCli
         searchCommand.Options.Add(pcre);
         searchCommand.Options.Add(fixedStrings);
         searchCommand.Options.Add(scan);
-        searchCommand.Options.Add(asyncIo);
         searchCommand.Options.Add(glob);
         searchCommand.Options.Add(type);
         searchCommand.Options.Add(typeNot);
@@ -275,9 +270,9 @@ internal static class NgrepCli
         searchCommand.Options.Add(heading);
         searchCommand.Options.Add(noHeading);
         searchCommand.Options.Add(stats);
-        searchCommand.SetAction(result =>
+        searchCommand.SetAction(async (result, cancellationToken) =>
         {
-            using var cts = new CancellationTokenSource();
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             void Cancel(object? _, ConsoleCancelEventArgs e)
             {
                 e.Cancel = true;
@@ -296,7 +291,7 @@ internal static class NgrepCli
 
             try
             {
-                return ExecuteSearch(
+                return await ExecuteSearch(
                     result,
                     format,
                     index,
@@ -304,7 +299,6 @@ internal static class NgrepCli
                     regex,
                     pcre,
                     scan,
-                    asyncIo,
                     glob,
                     type,
                     typeNot,
@@ -385,7 +379,7 @@ internal static class NgrepCli
         return root;
     }
 
-    private static int ExecuteSearch(
+    private static async Task<int> ExecuteSearch(
         System.CommandLine.ParseResult result,
         Option<string> format,
         Option<string> index,
@@ -393,7 +387,6 @@ internal static class NgrepCli
         Option<bool> regex,
         Option<bool> pcre,
         Option<bool> scan,
-        Option<bool> asyncIo,
         Option<string[]> glob,
         Option<string[]> type,
         Option<string[]> typeNot,
@@ -457,7 +450,7 @@ internal static class NgrepCli
         SearchOutcome outcome;
         try
         {
-            outcome = Searcher.Search(new SearchQuery
+            outcome = await Searcher.Search(new SearchQuery
             {
                 Pattern = patterns[0],
                 AdditionalPatterns = patterns.Count > 1 ? patterns[1..] : [],
@@ -467,7 +460,6 @@ internal static class NgrepCli
                 Regex = result.GetValue(regex) || result.GetValue(pcre),
                 Backtracking = result.GetValue(pcre),
                 ForceScan = result.GetValue(scan),
-                AsyncIo = result.GetValue(asyncIo),
                 WordRegexp = result.GetValue(word),
                 InvertMatch = result.GetValue(invert),
                 LineRegexp = result.GetValue(lineRegexp),

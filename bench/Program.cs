@@ -24,14 +24,14 @@ try
     WriteLarge(largeRoot, largeCount, largeBytes);
 
     ScannerThroughput();
-    var miss = Time(root, "unlikely-token-zz", regex: false);
-    var confirm = Time(root, "NEEDLE", regex: false);
-    var regex = Time(root, "NEEDLE[0-9]", regex: true);
-    var listed = Time(largeRoot, "EARLY", regex: false, filesWithMatches: true);
-    var largeMiss = Time(largeRoot, "unlikely-token-zz", regex: false);
-    var largeConfirm = Time(largeRoot, "NEEDLE", regex: false);
-    var largeRegex = Time(largeRoot, "NEEDLE[0-9]", regex: true);
-    var classMiss = Time(largeRoot, "[abc]{8}", regex: true);
+    var miss = await Time(root, "unlikely-token-zz", regex: false);
+    var confirm = await Time(root, "NEEDLE", regex: false);
+    var regex = await Time(root, "NEEDLE[0-9]", regex: true);
+    var listed = await Time(largeRoot, "EARLY", regex: false, filesWithMatches: true);
+    var largeMiss = await Time(largeRoot, "unlikely-token-zz", regex: false);
+    var largeConfirm = await Time(largeRoot, "NEEDLE", regex: false);
+    var largeRegex = await Time(largeRoot, "NEEDLE[0-9]", regex: true);
+    var classMiss = await Time(largeRoot, "[abc]{8}", regex: true);
 
     Console.WriteLine("measure=in-process paired=yes");
     Console.WriteLine($"small_files={files} bytes_each={smallBytes} total_mib={files * (long)smallBytes / (1024 * 1024)}");
@@ -44,22 +44,6 @@ try
     Print("large_regex", largeRegex);
     Print("regex_class_miss", classMiss);
     Print("files_with_matches", listed);
-
-    var asyncMiss = Time(root, "unlikely-token-zz", regex: false, asyncIo: true);
-    var asyncConfirm = Time(root, "NEEDLE", regex: false, asyncIo: true);
-    var asyncRegex = Time(root, "NEEDLE[0-9]", regex: true, asyncIo: true);
-    var asyncListed = Time(largeRoot, "EARLY", regex: false, filesWithMatches: true, asyncIo: true);
-    var asyncLargeMiss = Time(largeRoot, "unlikely-token-zz", regex: false, asyncIo: true);
-    var asyncLargeRegex = Time(largeRoot, "NEEDLE[0-9]", regex: true, asyncIo: true);
-    var asyncClass = Time(largeRoot, "[abc]{8}", regex: true, asyncIo: true);
-    Console.WriteLine("measure=async-in-process paired=yes");
-    Print("async_literal_miss", asyncMiss);
-    Print("async_literal_confirm", asyncConfirm);
-    Print("async_regex_prefilter", asyncRegex);
-    Print("async_large_miss", asyncLargeMiss);
-    Print("async_large_regex", asyncLargeRegex);
-    Print("async_regex_class_miss", asyncClass);
-    Print("async_files_with_matches", asyncListed);
 
     var rg = Which("rg", "/exec-daemon/rg");
     var grep = Which("grep");
@@ -83,10 +67,6 @@ try
         if (ngrepBin != null)
         {
             TimeTool("ngrep", ngrepBin, sample.Name, sample.Ngrep);
-            var asyncArgv = new string[sample.Ngrep.Length + 1];
-            asyncArgv[0] = "--async";
-            sample.Ngrep.CopyTo(asyncArgv, 1);
-            TimeTool("ngrep_async", ngrepBin, sample.Name, asyncArgv);
         }
 
         if (rg != null)
@@ -101,10 +81,10 @@ try
     }
 
     var tinyFiles = WriteTiny(tiny, dirs: 40, sub: 20, perDir: 15);
-    var tinyMiss = TimeTiny(tiny, "unlikely-token-zz", ignore: true, quiet: false, list: false);
-    var tinyNoIgnore = TimeTiny(tiny, "unlikely-token-zz", ignore: false, quiet: false, list: false);
-    var tinyQuiet = TimeTiny(tiny, "NEEDLE", ignore: true, quiet: true, list: false);
-    var tinyList = TimeTiny(tiny, "token", ignore: true, quiet: false, list: true);
+    var tinyMiss = await TimeTiny(tiny, "unlikely-token-zz", ignore: true, quiet: false, list: false);
+    var tinyNoIgnore = await TimeTiny(tiny, "unlikely-token-zz", ignore: false, quiet: false, list: false);
+    var tinyQuiet = await TimeTiny(tiny, "NEEDLE", ignore: true, quiet: true, list: false);
+    var tinyList = await TimeTiny(tiny, "token", ignore: true, quiet: false, list: true);
     var walkMs = TimeWalk(tiny, gitignore: true);
     Console.WriteLine($"tiny_files={tinyFiles} tiny_root={tiny}");
     Print("tiny_ignore_miss", tinyMiss);
@@ -244,17 +224,17 @@ static void WriteLarge(string root, int count, int bytesEach)
     }
 }
 
-static (double Ms, int Files, int Matches) Time(string root, string pattern, bool regex, bool filesWithMatches = false, bool asyncIo = false)
+static async Task<(double Ms, int Files, int Matches)> Time(string root, string pattern, bool regex, bool filesWithMatches = false)
 {
-    var query = Query(root, pattern, regex, filesWithMatches, asyncIo);
-    Searcher.Search(query);
+    var query = Query(root, pattern, regex, filesWithMatches);
+    await Searcher.Search(query);
     var clock = Stopwatch.StartNew();
-    var outcome = Searcher.Search(query);
+    var outcome = await Searcher.Search(query);
     clock.Stop();
     return (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.Matches.Count);
 }
 
-static SearchQuery Query(string root, string pattern, bool regex, bool filesWithMatches, bool asyncIo = false) => new()
+static SearchQuery Query(string root, string pattern, bool regex, bool filesWithMatches) => new()
 {
     Pattern = pattern,
     Path = root,
@@ -262,7 +242,6 @@ static SearchQuery Query(string root, string pattern, bool regex, bool filesWith
     ForceScan = true,
     NoIgnore = true,
     IncludeHidden = true,
-    AsyncIo = asyncIo,
     Report = filesWithMatches ? ReportMode.FilesWithMatches : ReportMode.Matches,
     MaxDegreeOfParallelism = Environment.ProcessorCount,
 };
@@ -402,12 +381,12 @@ static int WriteTiny(string root, int dirs, int sub, int perDir)
     return n;
 }
 
-static (double Ms, int Files, int Matches) TimeTiny(string root, string pattern, bool ignore, bool quiet, bool list)
+static async Task<(double Ms, int Files, int Matches)> TimeTiny(string root, string pattern, bool ignore, bool quiet, bool list)
 {
     var query = TinyQuery(root, pattern, ignore, quiet, list);
-    Searcher.Search(query);
+    await Searcher.Search(query);
     var clock = Stopwatch.StartNew();
-    var outcome = Searcher.Search(query);
+    var outcome = await Searcher.Search(query);
     clock.Stop();
     return (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.Matches.Count);
 }

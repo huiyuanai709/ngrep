@@ -144,7 +144,7 @@ public class PrefilterTests
         Assert.Equal(["keep.txt", "skip.log"], ignored.Matches.Select(match => match.Path).OrderBy(path => path, StringComparer.Ordinal).ToArray());
 
         using var capture = new Capture();
-        var code = NgrepCli.Run(["netgrep", tree.Root, "--no-ignore-vcs", "-j", "1"]);
+        var code = NgrepCli.Run(["netgrep", tree.Root, "--no-ignore-vcs", "-j", "1"]).GetAwaiter().GetResult();
         Assert.Equal(ExitCodes.Success, code);
         Assert.Contains("--no-ignore-vcs", capture.Stderr, StringComparison.Ordinal);
         Assert.Contains("skip.log", capture.Stdout, StringComparison.Ordinal);
@@ -179,7 +179,7 @@ public class PrefilterTests
             IgnoreCase = ignoreCase,
             NoIgnore = noIgnore,
             MaxDegreeOfParallelism = workers,
-        });
+        }).GetAwaiter().GetResult();
     }
 
     private static string[] Texts(SearchOutcome outcome) =>

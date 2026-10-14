@@ -86,9 +86,6 @@ internal sealed class SearchQuery
     /// <summary>0 uses <c>NGREP_THREADS</c>, then <c>NETGREP_THREADS</c>, or <see cref="Environment.ProcessorCount"/>.</summary>
     public int MaxDegreeOfParallelism { get; init; }
 
-    /// <summary><c>--async</c>. Task workers and <see cref="RandomAccess.ReadAsync"/> instead of the synchronous worker threads. Off by default.</summary>
-    public bool AsyncIo { get; init; }
-
     public CancellationToken CancellationToken { get; init; }
 }
 
@@ -139,7 +136,7 @@ internal sealed class SearchTally
 
 internal static class Searcher
 {
-    public static SearchOutcome Search(SearchQuery query)
+    public static async Task<SearchOutcome> Search(SearchQuery query)
     {
         query.CancellationToken.ThrowIfCancellationRequested();
         var clock = Stopwatch.StartNew();
@@ -154,7 +151,7 @@ internal static class Searcher
 
         if (HiddenPaths.ContainsHardSkip(start))
         {
-            return Finish([], usedIndex: false, note: null, workers: 1, usedPrefilter: false, without: null, tally, clock, query.AsyncIo);
+            return Finish([], usedIndex: false, note: null, workers: 1, usedPrefilter: false, without: null, tally, clock);
         }
 
         var skipIndex = query.ForceScan || !plan.ApplyGitIgnore;
@@ -162,7 +159,7 @@ internal static class Searcher
         {
             var explicitIndex = IndexStore.TryLoad(query.IndexDirectory)
                 ?? throw new InvalidDataException($"Index not found at {Path.GetFullPath(query.IndexDirectory)}.");
-            return SearchIndex(explicitIndex, start, query, plan, workers, tally, clock);
+            return await SearchIndex(explicitIndex, start, query, plan, workers, tally, clock);
         }
 
         if (!skipIndex)
@@ -173,14 +170,14 @@ internal static class Searcher
                 var index = IndexStore.TryLoad(discovered);
                 if (index != null)
                 {
-                    return SearchIndex(index, start, query, plan, workers, tally, clock);
+                    return await SearchIndex(index, start, query, plan, workers, tally, clock);
                 }
             }
         }
 
         var note = ScanNote(query, indexSkipped: skipIndex && !query.ForceScan && IndexWouldApply(start, query));
-        var scanned = ContentScan(start, plan, workers, query.CancellationToken, tally, query.AsyncIo);
-        return Finish(scanned.Matches, usedIndex: false, note, scanned.Workers, usedPrefilter: false, scanned.Without, tally, clock, query.AsyncIo);
+        var scanned = await ContentScan(start, plan, workers, query.CancellationToken, tally);
+        return Finish(scanned.Matches, usedIndex: false, note, scanned.Workers, usedPrefilter: false, scanned.Without, tally, clock);
     }
 
     private static int ResolveWorkers(SearchQuery query)
@@ -216,7 +213,7 @@ internal static class Searcher
         return Math.Max(1, Environment.ProcessorCount);
     }
 
-    private static SearchOutcome SearchIndex(IndexData index, string start, SearchQuery query, MatchPlan plan, int workers, SearchTally tally, Stopwatch clock)
+    private static async Task<SearchOutcome> SearchIndex(IndexData index, string start, SearchQuery query, MatchPlan plan, int workers, SearchTally tally, Stopwatch clock)
     {
         var root = index.Manifest.Root;
         if (!Directory.Exists(root))
@@ -227,8 +224,8 @@ internal static class Searcher
         var prefix = RelativeTo(root, start, out var outside, out var prefixIsFile);
         if (outside)
         {
-            var scanned = ContentScan(start, plan, workers, query.CancellationToken, tally, query.AsyncIo);
-            return Finish(scanned.Matches, usedIndex: false, "path is outside the indexed root; scanned content", scanned.Workers, usedPrefilter: false, scanned.Without, tally, clock, query.AsyncIo);
+            var scanned = await ContentScan(start, plan, workers, query.CancellationToken, tally);
+            return Finish(scanned.Matches, usedIndex: false, "path is outside the indexed root; scanned content", scanned.Workers, usedPrefilter: false, scanned.Without, tally, clock);
         }
 
         HashSet<int>? selectedIds = null;
@@ -280,27 +277,14 @@ internal static class Searcher
 
         var degree = files.Count > 1 ? workers : 1;
         var stopOnMatch = plan.Report == ReportMode.Quiet && plan.StopAtFirst;
-        List<SearchMatch> matches;
-        if (query.AsyncIo)
-        {
-            matches = AsyncScheduler.Run(
-                files,
-                degree,
-                query.CancellationToken,
-                (file, local, token) => TryCollectAsync(file, plan, local, stats: null, without, tally, token, errorIfUnreadable: prefixIsFile),
-                stopOnMatch).GetAwaiter().GetResult();
-        }
-        else
-        {
-            matches = ConfirmScheduler.Run(
-                files,
-                degree,
-                query.CancellationToken,
-                (file, local) => TryCollect(file, plan, local, stats: null, without, tally, errorIfUnreadable: prefixIsFile),
-                stopOnMatch);
-        }
+        var matches = await AsyncScheduler.Run(
+            files,
+            degree,
+            query.CancellationToken,
+            (file, local, token) => TryCollectAsync(file, plan, local, stats: null, without, tally, token, errorIfUnreadable: prefixIsFile),
+            stopOnMatch);
 
-        return Finish(matches, usedIndex: true, note: null, degree, usedPrefilter, without, tally, clock, query.AsyncIo);
+        return Finish(matches, usedIndex: true, note: null, degree, usedPrefilter, without, tally, clock);
     }
 
     private static bool IndexWouldApply(string start, SearchQuery query)
@@ -340,13 +324,12 @@ internal static class Searcher
         return "no index found; scanned content";
     }
 
-    private static (List<SearchMatch> Matches, int Workers, ConcurrentBag<string>? Without) ContentScan(
+    private static async Task<(List<SearchMatch> Matches, int Workers, ConcurrentBag<string>? Without)> ContentScan(
         string start,
         MatchPlan plan,
         int workers,
         CancellationToken cancellation,
-        SearchTally tally,
-        bool asyncIo)
+        SearchTally tally)
     {
         var without = plan.Report == ReportMode.FilesWithoutMatch ? new ConcurrentBag<string>() : null;
         if (File.Exists(start))
@@ -357,14 +340,7 @@ internal static class Searcher
             // includeHidden so a path the user named is not treated as skipped merely for being a dotfile.
             if ((!plan.ApplyGitIgnore || !IsIgnoredFile(parent, start)) && plan.Filter.Accepts(relative))
             {
-                if (asyncIo)
-                {
-                    TryCollectAsync(new ConfirmFile(start, relative), plan, matches, stats: null, without, tally, cancellation, errorIfUnreadable: true).GetAwaiter().GetResult();
-                }
-                else
-                {
-                    TryCollect(new ConfirmFile(start, relative), plan, matches, stats: null, without, tally, errorIfUnreadable: true);
-                }
+                await TryCollectAsync(new ConfirmFile(start, relative), plan, matches, stats: null, without, tally, cancellation, errorIfUnreadable: true);
             }
 
             return (matches, 1, without);
@@ -373,35 +349,17 @@ internal static class Searcher
         var stats = new WalkStats();
         var degree = workers > 1 ? workers : 1;
         var stopOnMatch = plan.Report == ReportMode.Quiet && plan.StopAtFirst;
-        List<SearchMatch> found;
-        if (asyncIo)
-        {
-            found = AsyncScheduler.Scan(
-                start,
-                IndexPaths.DefaultFor(start),
-                stats,
-                plan.ApplyGitIgnore,
-                plan.IncludeHidden,
-                plan.Filter,
-                degree,
-                cancellation,
-                (file, local, token) => TryCollectAsync(file, plan, local, stats, without, tally, token),
-                stopOnMatch).GetAwaiter().GetResult();
-        }
-        else
-        {
-            found = ConfirmScheduler.Scan(
-                start,
-                IndexPaths.DefaultFor(start),
-                stats,
-                plan.ApplyGitIgnore,
-                plan.IncludeHidden,
-                plan.Filter,
-                degree,
-                cancellation,
-                (file, local) => TryCollect(file, plan, local, stats, without, tally),
-                stopOnMatch);
-        }
+        var found = await AsyncScheduler.Scan(
+            start,
+            IndexPaths.DefaultFor(start),
+            stats,
+            plan.ApplyGitIgnore,
+            plan.IncludeHidden,
+            plan.Filter,
+            degree,
+            cancellation,
+            (file, local, token) => TryCollectAsync(file, plan, local, stats, without, tally, token),
+            stopOnMatch);
 
         return (found, degree, without);
     }
@@ -411,32 +369,6 @@ internal static class Searcher
         var stats = new WalkStats();
         return !TreeWalker.Enumerate(walkRoot, null, stats, applyGitIgnore: true, includeHidden: true).Any(file =>
             string.Equals(file.FullPath, fullPath, StringComparison.Ordinal));
-    }
-
-    private static void TryCollect(
-        ConfirmFile file,
-        MatchPlan plan,
-        List<SearchMatch> matches,
-        WalkStats? stats,
-        ConcurrentBag<string>? filesWithoutMatch,
-        SearchTally tally,
-        bool errorIfUnreadable = false)
-    {
-        var stop = ByteConfirm.Arm(plan);
-        try
-        {
-            using var read = stop == null ? TextFiles.Read(file.FullPath) : TextFiles.Read(file.FullPath, stop);
-            if (MatchLoaded(read, file, plan, matches, stats, filesWithoutMatch, tally, errorIfUnreadable, out var text))
-            {
-                return;
-            }
-
-            CollectDecoded(text, file, plan, matches, filesWithoutMatch, tally);
-        }
-        finally
-        {
-            ByteConfirm.Disarm();
-        }
     }
 
     private static async ValueTask TryCollectAsync(
@@ -581,8 +513,7 @@ internal static class Searcher
         bool usedPrefilter,
         ConcurrentBag<string>? without,
         SearchTally tally,
-        Stopwatch clock,
-        bool asyncIo = false)
+        Stopwatch clock)
     {
         matches.Sort(CompareMatches);
         return new SearchOutcome
@@ -591,7 +522,7 @@ internal static class Searcher
             UsedIndex = usedIndex,
             Note = note,
             UsedTrigramPrefilter = usedPrefilter,
-            Confirmation = asyncIo ? "async" : workers > 1 ? "parallel" : "sequential",
+            Confirmation = workers > 1 ? "parallel" : "sequential",
             Workers = workers,
             FilesWithoutMatch = NormalizeWithout(without),
             FilesSearched = tally.FilesSearched,

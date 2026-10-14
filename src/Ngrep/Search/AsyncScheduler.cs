@@ -3,10 +3,12 @@ using Ngrep.Ignore;
 
 namespace Ngrep.Search;
 
+internal readonly record struct ConfirmFile(string FullPath, string RelativePath);
+
 /// <summary>
-/// Same walk and confirm contract as <see cref="ConfirmScheduler"/>, with task workers.
-/// Directory listing stays synchronous. Each worker reads with RandomAccess.ReadAsync
-/// and then runs the synchronous matcher. <c>--async</c> is off unless the caller asks for it.
+/// Walks and confirms on task workers. Directory listing stays on the producer task.
+/// Each worker reads with <see cref="RandomAccess.ReadAsync"/> and then runs the
+/// synchronous SIMD and byte-automaton matcher. This is the only search scheduler.
 /// </summary>
 internal static class AsyncScheduler
 {

@@ -29,11 +29,11 @@ public class IndexFlushTests
                 Assert.Equal(["a.txt"], loaded!.Documents.Select(d => d.Path).ToArray());
                 Assert.Equal(1, loaded.Manifest.DocumentCount);
 
-                var hit = Searcher.Search(new SearchQuery { Pattern = "alphaunique", Path = tree.Root, MaxDegreeOfParallelism = 1 });
+                var hit = Searcher.Search(new SearchQuery { Pattern = "alphaunique", Path = tree.Root, MaxDegreeOfParallelism = 1 }).GetAwaiter().GetResult();
                 Assert.True(hit.UsedIndex);
                 Assert.Equal("a.txt", Assert.Single(hit.Matches).Path);
 
-                var miss = Searcher.Search(new SearchQuery { Pattern = "betaunique", Path = tree.Root, MaxDegreeOfParallelism = 1 });
+                var miss = Searcher.Search(new SearchQuery { Pattern = "betaunique", Path = tree.Root, MaxDegreeOfParallelism = 1 }).GetAwaiter().GetResult();
                 Assert.True(miss.UsedIndex);
                 Assert.Empty(miss.Matches);
                 throw new IndexingStoppedException();
@@ -75,9 +75,9 @@ public class IndexFlushTests
         Assert.Equal(originalId, updated.Id);
         Assert.Equal(TextFiles.Sha256Hex("alphaupdated\n"u8.ToArray()), updated.Sha256);
 
-        var hit = Searcher.Search(new SearchQuery { Pattern = "alphaupdated", Path = tree.Root, MaxDegreeOfParallelism = 1 });
+        var hit = Searcher.Search(new SearchQuery { Pattern = "alphaupdated", Path = tree.Root, MaxDegreeOfParallelism = 1 }).GetAwaiter().GetResult();
         Assert.Equal("a.txt", Assert.Single(hit.Matches).Path);
-        var kept = Searcher.Search(new SearchQuery { Pattern = "betaunique", Path = tree.Root, MaxDegreeOfParallelism = 1 });
+        var kept = Searcher.Search(new SearchQuery { Pattern = "betaunique", Path = tree.Root, MaxDegreeOfParallelism = 1 }).GetAwaiter().GetResult();
         Assert.Equal("b.txt", Assert.Single(kept.Matches).Path);
     }
 
@@ -139,13 +139,13 @@ public class IndexFlushTests
         var loaded = IndexStore.TryLoad(built.IndexPath);
         Assert.NotNull(loaded);
         Assert.Equal(previous, Assert.Single(loaded!.Documents).Sha256);
-        var missed = Searcher.Search(new SearchQuery { Pattern = "betaunique", Path = tree.Root, MaxDegreeOfParallelism = 1 });
+        var missed = Searcher.Search(new SearchQuery { Pattern = "betaunique", Path = tree.Root, MaxDegreeOfParallelism = 1 }).GetAwaiter().GetResult();
         Assert.True(missed.UsedIndex);
         Assert.Empty(missed.Matches);
 
         var again = Indexer.Build(tree.Root);
         Assert.Equal(1, again.Updated);
-        var replaced = Searcher.Search(new SearchQuery { Pattern = "betaunique", Path = tree.Root, MaxDegreeOfParallelism = 1 });
+        var replaced = Searcher.Search(new SearchQuery { Pattern = "betaunique", Path = tree.Root, MaxDegreeOfParallelism = 1 }).GetAwaiter().GetResult();
         Assert.Equal("a.txt", Assert.Single(replaced.Matches).Path);
     }
 
