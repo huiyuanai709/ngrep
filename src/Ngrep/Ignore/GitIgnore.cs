@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -11,8 +12,13 @@ namespace Ngrep.Ignore;
 internal sealed class IgnoreRuleSet
 {
     private readonly IgnoreRule[] _rules;
+    private readonly bool _hasNegation;
 
-    private IgnoreRuleSet(IgnoreRule[] rules) => _rules = rules;
+    private IgnoreRuleSet(IgnoreRule[] rules, bool hasNegation)
+    {
+        _rules = rules;
+        _hasNegation = hasNegation;
+    }
 
     public int Count => _rules.Length;
 
@@ -25,23 +31,58 @@ internal sealed class IgnoreRuleSet
             normalized = normalized[1..];
         }
 
+        var hasNegation = false;
         foreach (var raw in normalized.Split('\n'))
         {
-            if (IgnoreRule.TryParse(raw) is { } rule)
+            if (IgnoreRule.TryParse(raw) is not { } rule)
             {
-                rules.Add(rule);
+                continue;
             }
+
+            if (rule.Negation)
+            {
+                hasNegation = true;
+            }
+
+            rules.Add(rule);
         }
 
-        return new IgnoreRuleSet(rules.ToArray());
+        return new IgnoreRuleSet(rules.ToArray(), hasNegation);
     }
 
-    public bool TryDecide(string localPath, bool isDirectory, out bool ignored)
+    public bool TryDecide(ReadOnlySpan<char> localPath, bool isDirectory, out bool ignored)
     {
+        if (!_hasNegation)
+        {
+            foreach (var rule in _rules)
+            {
+                if (rule.DirectoryOnly && !isDirectory)
+                {
+                    continue;
+                }
+
+                if (!rule.Matches(localPath, isDirectory))
+                {
+                    continue;
+                }
+
+                ignored = true;
+                return true;
+            }
+
+            ignored = false;
+            return false;
+        }
+
         var any = false;
         var state = false;
         foreach (var rule in _rules)
         {
+            if (rule.DirectoryOnly && !isDirectory)
+            {
+                continue;
+            }
+
             if (!rule.Matches(localPath, isDirectory))
             {
                 continue;
@@ -58,11 +99,17 @@ internal sealed class IgnoreRuleSet
 
 internal sealed class IgnoreRule
 {
-    private readonly Regex _regex;
+    private readonly Glob? _glob;
+    private readonly string _body;
+    private readonly bool _anchored;
+    private Regex? _regex;
 
-    private IgnoreRule(Regex regex, bool negation, bool directoryOnly)
+    private IgnoreRule(Glob? glob, Regex? regex, string body, bool anchored, bool negation, bool directoryOnly)
     {
+        _glob = glob;
         _regex = regex;
+        _body = body;
+        _anchored = anchored;
         Negation = negation;
         DirectoryOnly = directoryOnly;
     }
@@ -122,31 +169,55 @@ internal sealed class IgnoreRule
             return null;
         }
 
-        Regex regex;
-        try
+        var glob = Glob.TryCreate(line, anchored);
+        Regex? regex = null;
+        if (glob == null)
         {
-            regex = new Regex(
-                Compile(line, anchored),
-                RegexOptions.CultureInvariant,
-                TimeSpan.FromSeconds(2));
-        }
-        catch (RegexParseException)
-        {
-            return null;
+            try
+            {
+                regex = CompileRegex(line, anchored);
+            }
+            catch (RegexParseException)
+            {
+                return null;
+            }
         }
 
-        return new IgnoreRule(regex, negation, directoryOnly);
+        return new IgnoreRule(glob, regex, line, anchored, negation, directoryOnly);
     }
 
-    public bool Matches(string localPath, bool isDirectory)
+    public bool Matches(string localPath, bool isDirectory) => Matches(localPath.AsSpan(), isDirectory);
+
+    public bool Matches(ReadOnlySpan<char> localPath, bool isDirectory)
     {
         if (DirectoryOnly && !isDirectory)
         {
             return false;
         }
 
-        return _regex.IsMatch(localPath);
+        if (_glob != null && _glob.TryMatch(localPath, out var matched))
+        {
+            return matched;
+        }
+
+        return PatternRegex().IsMatch(localPath);
     }
+
+    /// <summary>Regex interpreter for the same pattern. Tests compare it with <see cref="Matches"/>.</summary>
+    internal bool MatchesRegex(string localPath, bool isDirectory)
+    {
+        if (DirectoryOnly && !isDirectory)
+        {
+            return false;
+        }
+
+        return PatternRegex().IsMatch(localPath);
+    }
+
+    private Regex PatternRegex() => _regex ??= CompileRegex(_body, _anchored);
+
+    private static Regex CompileRegex(string pattern, bool anchored) =>
+        new(Compile(pattern, anchored), RegexOptions.CultureInvariant, TimeSpan.FromSeconds(2));
 
     private static string Compile(string pattern, bool anchored)
     {
@@ -283,13 +354,41 @@ internal sealed class IgnoreStack
         return new IgnoreStack(next);
     }
 
-    public bool IsIgnored(string relativePath, bool isDirectory)
+    public bool IsIgnored(string relativePath, bool isDirectory) =>
+        IsIgnored(relativePath.AsSpan(), isDirectory, checkParents: true);
+
+    /// <summary>
+    /// <paramref name="checkParents"/> is false while walking: ignored directories are not entered,
+    /// so a child does not re-test every ancestor.
+    /// </summary>
+    public bool IsIgnored(ReadOnlySpan<char> relativePath, bool isDirectory, bool checkParents)
     {
-        relativePath = Normalize(relativePath);
-        var slash = relativePath.LastIndexOf('/');
-        if (slash > 0 && IsIgnored(relativePath[..slash], true))
+        if (!NeedsNormalize(relativePath))
         {
-            return true;
+            return Decide(relativePath, isDirectory, checkParents);
+        }
+
+        var rented = ArrayPool<char>.Shared.Rent(relativePath.Length);
+        try
+        {
+            var written = NormalizeInto(relativePath, rented);
+            return Decide(rented.AsSpan(0, written), isDirectory, checkParents);
+        }
+        finally
+        {
+            ArrayPool<char>.Shared.Return(rented);
+        }
+    }
+
+    private bool Decide(ReadOnlySpan<char> relativePath, bool isDirectory, bool checkParents)
+    {
+        if (checkParents)
+        {
+            var slash = relativePath.LastIndexOf('/');
+            if (slash > 0 && Decide(relativePath[..slash], true, true))
+            {
+                return true;
+            }
         }
 
         var ignored = false;
@@ -309,7 +408,7 @@ internal sealed class IgnoreStack
         return ignored;
     }
 
-    private static bool TryLocal(string baseRelative, string relativePath, out string local)
+    private static bool TryLocal(string baseRelative, ReadOnlySpan<char> relativePath, out ReadOnlySpan<char> local)
     {
         if (baseRelative.Length == 0)
         {
@@ -317,21 +416,61 @@ internal sealed class IgnoreStack
             return true;
         }
 
-        if (relativePath.Equals(baseRelative, StringComparison.Ordinal))
+        if (relativePath.Length == baseRelative.Length && relativePath.Equals(baseRelative, StringComparison.Ordinal))
         {
-            local = "";
+            local = default;
             return false;
         }
 
-        var prefix = baseRelative + "/";
-        if (!relativePath.StartsWith(prefix, StringComparison.Ordinal))
+        if (relativePath.Length > baseRelative.Length
+            && relativePath.StartsWith(baseRelative, StringComparison.Ordinal)
+            && relativePath[baseRelative.Length] == '/')
         {
-            local = "";
+            local = relativePath[(baseRelative.Length + 1)..];
+            return local.Length > 0;
+        }
+
+        local = default;
+        return false;
+    }
+
+    private static bool NeedsNormalize(ReadOnlySpan<char> path)
+    {
+        if (path.Length == 0)
+        {
             return false;
         }
 
-        local = relativePath[prefix.Length..];
-        return local.Length > 0;
+        if (path[0] == '/' || path[^1] == '/' || path.Contains('\\'))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static int NormalizeInto(ReadOnlySpan<char> path, Span<char> dest)
+    {
+        var start = 0;
+        var end = path.Length;
+        while (start < end && path[start] is '/' or '\\')
+        {
+            start++;
+        }
+
+        while (end > start && path[end - 1] is '/' or '\\')
+        {
+            end--;
+        }
+
+        var written = 0;
+        for (var i = start; i < end; i++)
+        {
+            var c = path[i] == '\\' ? '/' : path[i];
+            dest[written++] = c;
+        }
+
+        return written;
     }
 
     private static string Normalize(string path) => path.Replace('\\', '/').Trim('/');

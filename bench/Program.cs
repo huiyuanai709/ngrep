@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using Ngrep.Ignore;
 using Ngrep.Search;
 using Ngrep.Text;
 
@@ -36,6 +37,21 @@ try
     Print("large_confirm", largeConfirm);
     Print("files_with_matches", listed);
 
+    var tiny = Path.Combine(root, "tiny");
+    var tinyFiles = WriteTiny(tiny, dirs: 40, sub: 20, perDir: 15);
+    WarmTiny(tiny, "unlikely-token-zz");
+    var tinyMiss = TimeTiny(tiny, "unlikely-token-zz", ignore: true, quiet: false, list: false);
+    var tinyNoIgnore = TimeTiny(tiny, "unlikely-token-zz", ignore: false, quiet: false, list: false);
+    var tinyQuiet = TimeTiny(tiny, "NEEDLE", ignore: true, quiet: true, list: false);
+    var tinyList = TimeTiny(tiny, "token", ignore: true, quiet: false, list: true);
+    var walkMs = TimeWalk(tiny, gitignore: true);
+    Console.WriteLine($"tiny_files={tinyFiles}");
+    Print("tiny_ignore_miss", tinyMiss);
+    Print("tiny_noignore_miss", tinyNoIgnore);
+    Print("tiny_quiet_hit", tinyQuiet);
+    Print("tiny_list_hit", tinyList);
+    Console.WriteLine($"tiny_walk_ms={walkMs:F1}");
+
     var rg = WhichRg();
     if (rg != null)
     {
@@ -43,7 +59,15 @@ try
         var rgConfirm = TimeRg(rg, root, ["-F", "--no-ignore", "-uu", "NEEDLE", root]);
         var rgRegex = TimeRg(rg, root, ["--no-ignore", "-uu", "NEEDLE[0-9]", root]);
         var rgList = TimeRg(rg, largeRoot, ["-F", "-l", "--no-ignore", "-uu", "EARLY", largeRoot]);
+        var rgTiny = TimeRg(rg, tiny, ["-F", "--no-heading", "unlikely-token-zz", tiny]);
+        var rgTinyU = TimeRg(rg, tiny, ["-F", "--no-ignore", "-uu", "--no-heading", "unlikely-token-zz", tiny]);
+        var rgQuiet = TimeRg(rg, tiny, ["-F", "-q", "NEEDLE", tiny]);
+        var rgFiles = TimeRg(rg, tiny, ["-F", "-l", "token", tiny]);
         Console.WriteLine($"rg={rg}");
+        Console.WriteLine($"rg_tiny_ignore_miss_ms={rgTiny:F1}");
+        Console.WriteLine($"rg_tiny_noignore_miss_ms={rgTinyU:F1}");
+        Console.WriteLine($"rg_tiny_quiet_hit_ms={rgQuiet:F1}");
+        Console.WriteLine($"rg_tiny_list_hit_ms={rgFiles:F1}");
         Console.WriteLine($"rg_literal_miss_ms={rgMiss:F1}");
         Console.WriteLine($"rg_literal_confirm_ms={rgConfirm:F1}");
         Console.WriteLine($"rg_regex_ms={rgRegex:F1}");
@@ -184,6 +208,101 @@ static string? WhichRg()
 
     return null;
 }
+
+static int WriteTiny(string root, int dirs, int sub, int perDir)
+{
+    Directory.CreateDirectory(Path.Combine(root, ".git"));
+    File.WriteAllText(Path.Combine(root, ".gitignore"), """
+        *.log
+        *.tmp
+        *.o
+        bin/
+        obj/
+        node_modules/
+        dist/
+        generated/
+        *.user
+        [Dd]ebug/
+        **/secret.txt
+
+        """);
+    var body = "using System;\nnamespace N;\nclass C { int token = 1; }\n"u8.ToArray();
+    var n = 0;
+    for (var d = 0; d < dirs; d++)
+    {
+        for (var s = 0; s < sub; s++)
+        {
+            var dir = Path.Combine(root, "src", "d" + d, "s" + s);
+            Directory.CreateDirectory(dir);
+            for (var f = 0; f < perDir; f++)
+            {
+                var path = Path.Combine(dir, "f" + f + ".cs");
+                if (d == 0 && s == 0 && f == 0)
+                {
+                    var withNeedle = new byte[body.Length + 7];
+                    body.CopyTo(withNeedle, 0);
+                    "NEEDLE\n"u8.CopyTo(withNeedle.AsSpan(body.Length));
+                    File.WriteAllBytes(path, withNeedle);
+                }
+                else
+                {
+                    File.WriteAllBytes(path, body);
+                }
+
+                n++;
+            }
+
+            File.WriteAllText(Path.Combine(dir, "skip.log"), "noise\n");
+            File.WriteAllText(Path.Combine(dir, "scratch.tmp"), "noise\n");
+        }
+    }
+
+    var junk = Path.Combine(root, "src", "node_modules", "pkg");
+    Directory.CreateDirectory(junk);
+    for (var i = 0; i < 100; i++)
+    {
+        File.WriteAllText(Path.Combine(junk, "f" + i + ".js"), "module.exports = 1;\n");
+    }
+
+    return n;
+}
+
+static void WarmTiny(string root, string pattern) =>
+    Searcher.Search(TinyQuery(root, pattern, ignore: true, quiet: false, list: false));
+
+static (double Ms, int Files, int Matches) TimeTiny(string root, string pattern, bool ignore, bool quiet, bool list)
+{
+    var clock = Stopwatch.StartNew();
+    var outcome = Searcher.Search(TinyQuery(root, pattern, ignore, quiet, list));
+    clock.Stop();
+    return (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.Matches.Count);
+}
+
+static double TimeWalk(string root, bool gitignore)
+{
+    var stats = new WalkStats();
+    var clock = Stopwatch.StartNew();
+    var n = 0;
+    foreach (var _ in TreeWalker.Enumerate(root, null, stats, gitignore, includeHidden: false))
+    {
+        n++;
+    }
+
+    clock.Stop();
+    Console.WriteLine($"tiny_walk_files={n} ignored={stats.SkippedIgnored}");
+    return clock.Elapsed.TotalMilliseconds;
+}
+
+static SearchQuery TinyQuery(string root, string pattern, bool ignore, bool quiet, bool list) => new()
+{
+    Pattern = pattern,
+    Path = root,
+    ForceScan = true,
+    NoIgnore = !ignore,
+    IncludeHidden = false,
+    Report = quiet ? ReportMode.Quiet : list ? ReportMode.FilesWithMatches : ReportMode.Matches,
+    MaxDegreeOfParallelism = Environment.ProcessorCount,
+};
 
 static double TimeRg(string rg, string workDir, string[] args)
 {

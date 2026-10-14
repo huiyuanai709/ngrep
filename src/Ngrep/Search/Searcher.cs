@@ -277,7 +277,8 @@ internal static class Searcher
             files,
             degree,
             query.CancellationToken,
-            (file, local) => TryCollect(file, plan, local, stats: null, without, tally, errorIfUnreadable: prefixIsFile));
+            (file, local) => TryCollect(file, plan, local, stats: null, without, tally, errorIfUnreadable: prefixIsFile),
+            stopOnMatch: plan.Report == ReportMode.Quiet && plan.StopAtFirst);
         return Finish(matches, usedIndex: true, note: null, degree, usedPrefilter, without, tally, clock);
     }
 
@@ -342,25 +343,18 @@ internal static class Searcher
 
         var stats = new WalkStats();
         var degree = workers > 1 ? workers : 1;
-        var found = ConfirmScheduler.Run(
-            Enumerate(start, plan, stats),
+        var found = ConfirmScheduler.Scan(
+            start,
+            IndexPaths.DefaultFor(start),
+            stats,
+            plan.ApplyGitIgnore,
+            plan.IncludeHidden,
+            plan.Filter,
             degree,
             cancellation,
-            (file, local) => TryCollect(file, plan, local, stats, without, tally));
+            (file, local) => TryCollect(file, plan, local, stats, without, tally),
+            stopOnMatch: plan.Report == ReportMode.Quiet && plan.StopAtFirst);
         return (found, degree, without);
-    }
-
-    private static IEnumerable<ConfirmFile> Enumerate(string start, MatchPlan plan, WalkStats stats)
-    {
-        foreach (var file in TreeWalker.Enumerate(start, IndexPaths.DefaultFor(start), stats, plan.ApplyGitIgnore, plan.IncludeHidden))
-        {
-            if (!plan.Filter.Accepts(file.RelativePath))
-            {
-                continue;
-            }
-
-            yield return new ConfirmFile(file.FullPath, file.RelativePath);
-        }
     }
 
     private static bool IsIgnoredFile(string walkRoot, string fullPath)

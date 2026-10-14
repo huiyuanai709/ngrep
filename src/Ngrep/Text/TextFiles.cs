@@ -39,111 +39,250 @@ internal static class TextFiles
     /// </summary>
     public static PooledBytes Read(string path, ReadStop? stop)
     {
-        byte[]? buffer = null;
+        if (OperatingSystem.IsLinux())
+        {
+            var fd = LinuxFile.OpenRead(path);
+            if (fd < 0)
+            {
+                return PooledBytes.Unreadable();
+            }
+
+            var source = new LinuxBytes(fd);
+            try
+            {
+                return ReadFrom(stop, ref source);
+            }
+            finally
+            {
+                LinuxFile.Close(fd);
+            }
+        }
+
+        SafeFileHandle? handle = null;
         try
         {
-            using var handle = File.OpenHandle(
+            handle = File.OpenHandle(
                 path,
                 FileMode.Open,
                 FileAccess.Read,
                 FileShare.Read,
                 FileOptions.SequentialScan);
-            var lengthLong = RandomAccess.GetLength(handle);
-            if (lengthLong > MaxFileBytes)
-            {
-                return PooledBytes.TooLarge();
-            }
+            var source = new HandleBytes(handle);
+            return ReadFrom(stop, ref source);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return PooledBytes.Unreadable();
+        }
+        finally
+        {
+            handle?.Dispose();
+        }
+    }
 
-            var length = (int)lengthLong;
-            if (length == 0)
-            {
-                return PooledBytes.Ok(null, 0);
-            }
+    private interface IFileBytes
+    {
+        int ReadAt(byte[] buffer, int offset, int count, long position);
 
-            buffer = ArrayPool<byte>.Shared.Rent(length);
-            try
+        long GetLength();
+    }
+
+    private struct LinuxBytes : IFileBytes
+    {
+        private readonly int _fd;
+
+        public LinuxBytes(int fd) => _fd = fd;
+
+        public int ReadAt(byte[] buffer, int offset, int count, long position) =>
+            LinuxFile.ReadAt(_fd, buffer, offset, count, position);
+
+        public long GetLength() => LinuxFile.GetLength(_fd);
+    }
+
+    private struct HandleBytes : IFileBytes
+    {
+        private readonly SafeFileHandle _handle;
+
+        public HandleBytes(SafeFileHandle handle) => _handle = handle;
+
+        public int ReadAt(byte[] buffer, int offset, int count, long position) =>
+            RandomAccess.Read(_handle, buffer.AsSpan(offset, count), position);
+
+        public long GetLength() => RandomAccess.GetLength(_handle);
+    }
+
+    /// <summary>
+    /// Files smaller than the first buffer are one read and no length syscall.
+    /// A full buffer means the file may be larger, so the length is checked then.
+    /// </summary>
+    private static PooledBytes ReadFrom<TSource>(ReadStop? stop, ref TSource source)
+        where TSource : IFileBytes
+    {
+        var first = 64 * 1024;
+        byte[]? buffer = null;
+        var scratch = false;
+        var owned = false;
+        try
+        {
+            buffer = TakeBuffer(first, out scratch);
+            var offset = 0;
+            var checkedBinary = false;
+            var knownLength = -1L;
+            while (true)
             {
-                // A full read is one syscall into the pooled buffer. -l checks each chunk
-                // so a hit can stop, and the chunk is large enough that a miss is not
-                // a long series of small reads.
-                var chunk = stop == null ? length : 1 << 20;
-                var offset = 0;
-                var checkedBinary = false;
-                while (offset < length)
+                if (offset == buffer.Length)
                 {
-                    var end = Math.Min(length, offset + chunk);
-                    if (!Fill(handle, buffer, ref offset, end))
+                    var lengthLong = knownLength >= 0 ? knownLength : source.GetLength();
+                    if (lengthLong < 0)
+                    {
+                        return PooledBytes.Unreadable();
+                    }
+
+                    knownLength = lengthLong;
+                    if (lengthLong > MaxFileBytes)
+                    {
+                        return PooledBytes.TooLarge();
+                    }
+
+                    if (lengthLong <= offset)
                     {
                         break;
                     }
 
-                    if (!checkedBinary && (offset >= BinaryProbeLength || offset >= length))
-                    {
-                        checkedBinary = true;
-                        if (IsBinary(buffer.AsSpan(0, offset)))
-                        {
-                            ArrayPool<byte>.Shared.Return(buffer);
-                            buffer = null;
-                            return PooledBytes.Binary();
-                        }
-                    }
-
-                    if (stop != null && checkedBinary && stop(buffer.AsSpan(0, offset), offset >= length))
-                    {
-                        var owned = buffer;
-                        buffer = null;
-                        return PooledBytes.Ok(owned, offset);
-                    }
+                    var target = stop == null
+                        ? (int)lengthLong
+                        : (int)Math.Min(lengthLong, offset + (1L << 20));
+                    var grown = TakeBuffer(target, out var grownScratch);
+                    buffer.AsSpan(0, offset).CopyTo(grown);
+                    Release(ref buffer, scratch);
+                    buffer = grown;
+                    scratch = grownScratch;
                 }
 
-                if (!checkedBinary && IsBinary(buffer.AsSpan(0, Math.Min(offset, BinaryProbeLength))))
+                var want = buffer.Length - offset;
+                if (knownLength >= 0)
                 {
-                    ArrayPool<byte>.Shared.Return(buffer);
-                    buffer = null;
-                    return PooledBytes.Binary();
+                    var remain = (int)Math.Min(want, knownLength - offset);
+                    want = remain;
                 }
 
-                var done = buffer;
-                buffer = null;
-                return PooledBytes.Ok(done, offset);
+                if (want <= 0)
+                {
+                    break;
+                }
+
+                var read = source.ReadAt(buffer, offset, want, offset);
+                if (read < 0)
+                {
+                    return PooledBytes.Unreadable();
+                }
+
+                if (read == 0)
+                {
+                    break;
+                }
+
+                offset += read;
+                var endOfFile = read < buffer.Length - (offset - read) || (knownLength >= 0 && offset >= knownLength);
+                if (offset < buffer.Length)
+                {
+                    endOfFile = true;
+                }
+
+                if (!checkedBinary && (offset >= BinaryProbeLength || endOfFile))
+                {
+                    checkedBinary = true;
+                    if (IsBinary(buffer.AsSpan(0, offset)))
+                    {
+                        return PooledBytes.Binary();
+                    }
+                }
+
+                if (stop != null && checkedBinary && stop(buffer.AsSpan(0, offset), endOfFile))
+                {
+                    owned = true;
+                    return PooledBytes.Ok(buffer, offset, scratch);
+                }
+
+                if (endOfFile)
+                {
+                    break;
+                }
             }
-            catch
+
+            if (!checkedBinary && IsBinary(buffer.AsSpan(0, Math.Min(offset, BinaryProbeLength))))
             {
-                if (buffer != null)
-                {
-                    ArrayPool<byte>.Shared.Return(buffer);
-                    buffer = null;
-                }
-
-                throw;
+                return PooledBytes.Binary();
             }
+
+            owned = true;
+            return PooledBytes.Ok(buffer, offset, scratch);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            if (buffer != null)
-            {
-                ArrayPool<byte>.Shared.Return(buffer);
-            }
-
             return PooledBytes.Unreadable();
         }
+        finally
+        {
+            if (!owned)
+            {
+                Release(ref buffer, scratch);
+            }
+        }
     }
 
-    private static bool Fill(SafeFileHandle handle, byte[] buffer, ref int offset, int end)
+    [ThreadStatic]
+    private static byte[]? t_scratch;
+
+    [ThreadStatic]
+    private static bool t_held;
+
+    private static byte[] TakeBuffer(int need, out bool scratch)
     {
-        while (offset < end)
+        if (!t_held)
         {
-            var read = RandomAccess.Read(handle, buffer.AsSpan(offset, end - offset), offset);
-            if (read == 0)
+            var buf = t_scratch;
+            if (buf == null || buf.Length < need)
             {
-                return false;
+                var size = 64 * 1024;
+                while (size < need)
+                {
+                    size *= 2;
+                }
+
+                buf = GC.AllocateUninitializedArray<byte>(size);
+                t_scratch = buf;
             }
 
-            offset += read;
+            t_held = true;
+            scratch = true;
+            return buf;
         }
 
-        return true;
+        scratch = false;
+        return ArrayPool<byte>.Shared.Rent(need);
     }
+
+    private static void Release(ref byte[]? buffer, bool scratch)
+    {
+        if (buffer == null)
+        {
+            return;
+        }
+
+        if (scratch)
+        {
+            t_held = false;
+        }
+        else
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        buffer = null;
+    }
+
+    internal static void ReleaseScratch() => t_held = false;
 }
 
 internal delegate bool ReadStop(ReadOnlySpan<byte> contents, bool endOfFile);
@@ -159,12 +298,14 @@ internal enum ReadKind
 internal sealed class PooledBytes : IDisposable
 {
     private byte[]? _buffer;
+    private readonly bool _scratch;
 
-    private PooledBytes(ReadKind kind, byte[]? buffer, int length)
+    private PooledBytes(ReadKind kind, byte[]? buffer, int length, bool scratch)
     {
         Kind = kind;
         _buffer = buffer;
         Length = length;
+        _scratch = scratch;
     }
 
     public ReadKind Kind { get; }
@@ -173,21 +314,29 @@ internal sealed class PooledBytes : IDisposable
 
     public ReadOnlySpan<byte> Span => _buffer == null ? [] : _buffer.AsSpan(0, Length);
 
-    public static PooledBytes Ok(byte[]? buffer, int length) => new(ReadKind.Ok, buffer, length);
+    public static PooledBytes Ok(byte[]? buffer, int length, bool scratch = false) => new(ReadKind.Ok, buffer, length, scratch);
 
-    public static PooledBytes TooLarge() => new(ReadKind.TooLarge, null, 0);
+    public static PooledBytes TooLarge() => new(ReadKind.TooLarge, null, 0, false);
 
-    public static PooledBytes Binary() => new(ReadKind.Binary, null, 0);
+    public static PooledBytes Binary() => new(ReadKind.Binary, null, 0, false);
 
-    public static PooledBytes Unreadable() => new(ReadKind.Unreadable, null, 0);
+    public static PooledBytes Unreadable() => new(ReadKind.Unreadable, null, 0, false);
 
     public void Dispose()
     {
         var buffer = Interlocked.Exchange(ref _buffer, null);
-        if (buffer != null)
+        if (buffer == null)
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            return;
         }
+
+        if (_scratch)
+        {
+            TextFiles.ReleaseScratch();
+            return;
+        }
+
+        ArrayPool<byte>.Shared.Return(buffer);
     }
 }
 

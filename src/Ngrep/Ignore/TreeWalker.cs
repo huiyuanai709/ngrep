@@ -2,6 +2,33 @@ namespace Ngrep.Ignore;
 
 internal readonly record struct WalkedFile(string FullPath, string RelativePath);
 
+internal readonly struct WalkDir
+{
+    public string Full { get; init; }
+
+    public string WalkRelative { get; init; }
+
+    public string ScopeRelative { get; init; }
+
+    public IgnoreStack Ignores { get; init; }
+}
+
+internal readonly struct WalkOptions
+{
+    public WalkOptions(bool applyGitIgnore, bool includeHidden, string? indexRelative)
+    {
+        ApplyGitIgnore = applyGitIgnore;
+        IncludeHidden = includeHidden;
+        IndexRelative = indexRelative;
+    }
+
+    public bool ApplyGitIgnore { get; }
+
+    public bool IncludeHidden { get; }
+
+    public string? IndexRelative { get; }
+}
+
 internal sealed class WalkStats
 {
     private int _skippedIgnored;
@@ -35,100 +62,140 @@ internal static class TreeWalker
         bool applyGitIgnore = true,
         bool includeHidden = false)
     {
+        var root = CreateRoot(walkRoot, applyGitIgnore);
+        var options = new WalkOptions(applyGitIgnore, includeHidden, IndexRelative(root.Full, indexDirectory));
+        var stack = new Stack<WalkDir>();
+        stack.Push(root);
+        var files = new List<WalkedFile>(32);
+        var children = new List<WalkDir>(8);
+        while (stack.Count > 0)
+        {
+            var dir = stack.Pop();
+            Collect(dir, options, stats, files, children);
+            foreach (var file in files)
+            {
+                yield return file;
+            }
+
+            for (var i = children.Count - 1; i >= 0; i--)
+            {
+                stack.Push(children[i]);
+            }
+        }
+    }
+
+    public static WalkOptions CreateOptions(string walkRootFull, string? indexDirectory, bool applyGitIgnore, bool includeHidden) =>
+        new(applyGitIgnore, includeHidden, IndexRelative(walkRootFull, indexDirectory));
+
+    public static WalkDir CreateRoot(string walkRoot, bool applyGitIgnore)
+    {
         walkRoot = Path.GetFullPath(walkRoot);
         var scopeRoot = FindGitRoot(walkRoot) ?? walkRoot;
-        var indexRelative = IndexRelative(walkRoot, indexDirectory);
-        var stackFrames = new Stack<(string Full, string WalkRelative, IgnoreStack Ignores)>();
-        var rootIgnores = applyGitIgnore ? LoadChain(scopeRoot, walkRoot) : IgnoreStack.Empty;
-        stackFrames.Push((walkRoot, "", rootIgnores));
-
-        while (stackFrames.Count > 0)
+        var scopeRelative = Relative(scopeRoot, walkRoot);
+        var ignores = applyGitIgnore ? LoadAncestors(scopeRoot, walkRoot) : IgnoreStack.Empty;
+        return new WalkDir
         {
-            var (full, walkRelative, ignores) = stackFrames.Pop();
-            List<string> entries;
-            try
-            {
-                entries = Directory.EnumerateFileSystemEntries(full)
-                    .OrderBy(Path.GetFileName, StringComparer.Ordinal)
-                    .ToList();
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                stats.IncrementSkippedUnreadable();
-                continue;
-            }
+            Full = walkRoot,
+            WalkRelative = "",
+            ScopeRelative = scopeRelative,
+            Ignores = ignores,
+        };
+    }
 
-            var directories = new List<(string Full, string WalkRelative, string ScopeRelative)>();
-            foreach (var entry in entries)
+    public static void Collect(WalkDir dir, WalkOptions options, WalkStats stats, List<WalkedFile> files, List<WalkDir> children)
+    {
+        files.Clear();
+        children.Clear();
+        var sink = new ListSink();
+        if (!DirectoryEntries.TryList(dir.Full, ref sink))
+        {
+            stats.IncrementSkippedUnreadable();
+            return;
+        }
+
+        var entries = sink.Entries;
+        if (entries == null)
+        {
+            return;
+        }
+
+        entries.Sort(static (left, right) => string.CompareOrdinal(left.Name, right.Name));
+        var ignores = dir.Ignores;
+        if (options.ApplyGitIgnore)
+        {
+            for (var i = 0; i < entries.Count; i++)
             {
-                var name = Path.GetFileName(entry);
-                FileAttributes attributes;
+                if (!string.Equals(entries[i].Name, ".gitignore", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var gitignore = Path.Join(dir.Full, ".gitignore");
                 try
                 {
-                    attributes = File.GetAttributes(entry);
+                    ignores = ignores.Add(dir.ScopeRelative, File.ReadAllText(gitignore));
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
                     stats.IncrementSkippedUnreadable();
-                    continue;
                 }
 
-                if ((attributes & FileAttributes.ReparsePoint) != 0)
-                {
-                    continue;
-                }
+                break;
+            }
+        }
 
-                var isDir = (attributes & FileAttributes.Directory) != 0;
-                var childWalk = walkRelative.Length == 0 ? name : walkRelative + "/" + name;
-                var scopeRelative = ScopeRelative(scopeRoot, entry);
+        foreach (var entry in entries)
+        {
+            if (entry.Kind == DirentKind.Symlink)
+            {
+                continue;
+            }
 
-                if (isDir && (name is ".git" or ".ngrep" || IsIndexPath(childWalk, indexRelative)))
-                {
-                    continue;
-                }
+            var name = entry.Name;
+            var isDir = entry.Kind == DirentKind.Directory;
+            if (entry.Kind == DirentKind.Other)
+            {
+                continue;
+            }
 
-                // Dotfiles are skipped unless the caller asked for them. .gitignore is still
-                // read from disk when a directory is entered; the file itself is not a hit.
-                if (!includeHidden && name.Length > 0 && name[0] == '.')
-                {
-                    continue;
-                }
+            var childWalk = JoinRelative(dir.WalkRelative, name);
+            if (isDir && (name is ".git" or ".ngrep" || IsIndexPath(childWalk, options.IndexRelative)))
+            {
+                continue;
+            }
 
-                if (isDir)
-                {
-                    if (applyGitIgnore && ignores.IsIgnored(scopeRelative, true))
-                    {
-                        continue;
-                    }
+            // Dotfiles are skipped unless the caller asked for them. .gitignore is still
+            // read above; the file itself is not a hit unless hidden names are included.
+            if (!options.IncludeHidden && name.Length > 0 && name[0] == '.')
+            {
+                continue;
+            }
 
-                    directories.Add((entry, childWalk, scopeRelative));
-                    continue;
-                }
-
-                if (applyGitIgnore && ignores.IsIgnored(scopeRelative, false))
+            var scopeRelative = JoinRelative(dir.ScopeRelative, name);
+            if (options.ApplyGitIgnore && ignores.IsIgnored(scopeRelative, isDir, checkParents: false))
+            {
+                if (!isDir)
                 {
                     stats.IncrementSkippedIgnored();
-                    continue;
                 }
 
-                yield return new WalkedFile(entry, childWalk);
+                continue;
             }
 
-            for (var i = directories.Count - 1; i >= 0; i--)
+            var full = Path.Join(dir.Full, name);
+            if (isDir)
             {
-                var dir = directories[i];
-                var childIgnores = ignores;
-                if (applyGitIgnore)
+                children.Add(new WalkDir
                 {
-                    var gitignore = Path.Combine(dir.Full, ".gitignore");
-                    if (File.Exists(gitignore))
-                    {
-                        childIgnores = ignores.Add(dir.ScopeRelative, File.ReadAllText(gitignore));
-                    }
-                }
-
-                stackFrames.Push((dir.Full, dir.WalkRelative, childIgnores));
+                    Full = full,
+                    WalkRelative = childWalk,
+                    ScopeRelative = scopeRelative,
+                    Ignores = ignores,
+                });
+                continue;
             }
+
+            files.Add(new WalkedFile(full, childWalk));
         }
     }
 
@@ -149,11 +216,26 @@ internal static class TreeWalker
         return null;
     }
 
-    private static IgnoreStack LoadChain(string scopeRoot, string walkRoot)
+    private static string JoinRelative(string parent, string name)
+    {
+        if (parent.Length == 0)
+        {
+            return name;
+        }
+
+        return string.Concat(parent, "/", name);
+    }
+
+    private static IgnoreStack LoadAncestors(string scopeRoot, string walkRoot)
     {
         var stack = IgnoreStack.Empty;
         foreach (var dir in Chain(scopeRoot, walkRoot))
         {
+            if (string.Equals(dir, Path.GetFullPath(walkRoot), StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             var gitignore = Path.Combine(dir, ".gitignore");
             if (!File.Exists(gitignore))
             {
@@ -198,9 +280,9 @@ internal static class TreeWalker
         return chain;
     }
 
-    private static string ScopeRelative(string scopeRoot, string fullPath)
+    private static string Relative(string scopeRoot, string walkRoot)
     {
-        var rel = Path.GetRelativePath(scopeRoot, fullPath).Replace('\\', '/');
+        var rel = Path.GetRelativePath(scopeRoot, walkRoot).Replace('\\', '/');
         return rel == "." ? "" : rel;
     }
 
@@ -230,5 +312,16 @@ internal static class TreeWalker
 
         return walkRelative.Equals(indexRelative, StringComparison.Ordinal)
             || walkRelative.StartsWith(indexRelative + "/", StringComparison.Ordinal);
+    }
+
+    private struct ListSink : IDirentSink
+    {
+        public List<(string Name, DirentKind Kind)> Entries;
+
+        public void OnEntry(string name, DirentKind kind)
+        {
+            Entries ??= new List<(string, DirentKind)>(32);
+            Entries.Add((name, kind));
+        }
     }
 }
