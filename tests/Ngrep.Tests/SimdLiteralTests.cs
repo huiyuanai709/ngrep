@@ -88,6 +88,34 @@ public class SimdLiteralTests
     }
 
     [Fact]
+    public void Nine_patterns_exercise_a_second_teddy_group()
+    {
+        var needles = new byte[9][];
+        for (var i = 0; i < needles.Length; i++)
+        {
+            needles[i] = Encoding.ASCII.GetBytes($"p{i:00}-needle");
+        }
+
+        var scanner = SimdLiteralScanner.Create(needles, ignoreCase: false);
+        foreach (var at in new[] { 0, 15, 16, 31, 32, 63, 64, 127, 200 })
+        {
+            var hay = Encoding.ASCII.GetBytes(new string('z', at) + "p08-needle" + new string('z', 40) + "p00-needle");
+            Agree(hay, needles, ignoreCase: false);
+            Assert.Equal(at, scanner.IndexOfAny(hay));
+        }
+
+        var folded = new byte[9][];
+        for (var i = 0; i < folded.Length; i++)
+        {
+            folded[i] = Encoding.ASCII.GetBytes($"Nx{i}");
+        }
+
+        var bytes = Encoding.ASCII.GetBytes(new string('q', 70) + "nx8");
+        Agree(bytes, folded, ignoreCase: true);
+        Assert.Equal(70, SimdLiteralScanner.Create(folded, ignoreCase: true).IndexOfAny(bytes));
+    }
+
+    [Fact]
     public void Every_supported_isa_matches_a_scalar_scan()
     {
         var rng = new Random(1234);

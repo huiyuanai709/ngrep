@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace Ngrep.Text;
 
@@ -12,15 +13,7 @@ internal static class TextFiles
     public static bool IsBinary(ReadOnlySpan<byte> bytes)
     {
         var n = Math.Min(bytes.Length, BinaryProbeLength);
-        for (var i = 0; i < n; i++)
-        {
-            if (bytes[i] == 0)
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return bytes[..n].Contains((byte)0);
     }
 
     public static string Decode(ReadOnlySpan<byte> bytes)
@@ -36,63 +29,124 @@ internal static class TextFiles
     public static string Sha256Hex(ReadOnlySpan<byte> bytes) =>
         Convert.ToHexStringLower(SHA256.HashData(bytes));
 
-    public static PooledBytes Read(string path)
+    public static PooledBytes Read(string path) => Read(path, stop: null);
+
+    /// <summary>
+    /// <paramref name="stop"/> is consulted after each chunk, once the leading bytes
+    /// have passed the NUL probe. Returning true ends the read before EOF. A miss
+    /// still reads the whole file. The span passed to <paramref name="stop"/> is the
+    /// prefix read so far; <c>endOfFile</c> is true on the last chunk.
+    /// </summary>
+    public static PooledBytes Read(string path, ReadStop? stop)
     {
+        byte[]? buffer = null;
         try
         {
-            using var stream = new FileStream(
+            using var handle = File.OpenHandle(
                 path,
                 FileMode.Open,
                 FileAccess.Read,
                 FileShare.Read,
-                bufferSize: 1 << 16,
                 FileOptions.SequentialScan);
-            if (stream.Length > MaxFileBytes)
+            var lengthLong = RandomAccess.GetLength(handle);
+            if (lengthLong > MaxFileBytes)
             {
                 return PooledBytes.TooLarge();
             }
 
-            var length = (int)stream.Length;
+            var length = (int)lengthLong;
             if (length == 0)
             {
                 return PooledBytes.Ok(null, 0);
             }
 
-            var buffer = ArrayPool<byte>.Shared.Rent(length);
+            buffer = ArrayPool<byte>.Shared.Rent(length);
             try
             {
+                // A full read is one syscall into the pooled buffer. -l checks each chunk
+                // so a hit can stop, and the chunk is large enough that a miss is not
+                // a long series of small reads.
+                var chunk = stop == null ? length : 1 << 20;
                 var offset = 0;
+                var checkedBinary = false;
                 while (offset < length)
                 {
-                    var read = stream.Read(buffer, offset, length - offset);
-                    if (read == 0)
+                    var end = Math.Min(length, offset + chunk);
+                    if (!Fill(handle, buffer, ref offset, end))
                     {
                         break;
                     }
 
-                    offset += read;
+                    if (!checkedBinary && (offset >= BinaryProbeLength || offset >= length))
+                    {
+                        checkedBinary = true;
+                        if (IsBinary(buffer.AsSpan(0, offset)))
+                        {
+                            ArrayPool<byte>.Shared.Return(buffer);
+                            buffer = null;
+                            return PooledBytes.Binary();
+                        }
+                    }
+
+                    if (stop != null && checkedBinary && stop(buffer.AsSpan(0, offset), offset >= length))
+                    {
+                        var owned = buffer;
+                        buffer = null;
+                        return PooledBytes.Ok(owned, offset);
+                    }
                 }
 
-                if (IsBinary(buffer.AsSpan(0, offset)))
+                if (!checkedBinary && IsBinary(buffer.AsSpan(0, Math.Min(offset, BinaryProbeLength))))
                 {
                     ArrayPool<byte>.Shared.Return(buffer);
+                    buffer = null;
                     return PooledBytes.Binary();
                 }
 
-                return PooledBytes.Ok(buffer, offset);
+                var done = buffer;
+                buffer = null;
+                return PooledBytes.Ok(done, offset);
             }
             catch
             {
-                ArrayPool<byte>.Shared.Return(buffer);
+                if (buffer != null)
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                    buffer = null;
+                }
+
                 throw;
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            if (buffer != null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+
             return PooledBytes.Unreadable();
         }
     }
+
+    private static bool Fill(SafeFileHandle handle, byte[] buffer, ref int offset, int end)
+    {
+        while (offset < end)
+        {
+            var read = RandomAccess.Read(handle, buffer.AsSpan(offset, end - offset), offset);
+            if (read == 0)
+            {
+                return false;
+            }
+
+            offset += read;
+        }
+
+        return true;
+    }
 }
+
+internal delegate bool ReadStop(ReadOnlySpan<byte> contents, bool endOfFile);
 
 internal enum ReadKind
 {

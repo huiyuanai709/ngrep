@@ -20,10 +20,12 @@ internal enum SimdIsa
 }
 
 /// <summary>
-/// Multi-literal byte search. A SIMD compare nominates alignments; an exact
-/// compare accepts them. This is a memmem-style prefilter, not a Teddy fingerprint.
+/// Multi-literal byte search. One needle uses a memmem-style compare of the
+/// first, rarest interior, and last bytes. Several needles of length at least
+/// two use a Teddy nibble fingerprint (a bit per pattern, confirmed exactly).
+/// A SIMD compare nominates alignments; an exact compare accepts them.
 /// </summary>
-internal sealed class SimdLiteralScanner
+internal sealed partial class SimdLiteralScanner
 {
     private readonly byte[][] _needles;
     private readonly bool _ignoreCase;
@@ -42,6 +44,17 @@ internal sealed class SimdLiteralScanner
     private readonly Vector128<byte>[] _k128;
     private readonly Vector256<byte>[] _k256;
     private readonly Vector512<byte>[] _k512;
+    private readonly bool _useRare;
+    private readonly int _rareAt;
+    private readonly byte _rare;
+    private readonly byte _rareAlt;
+    private readonly bool _rareFold;
+    private readonly bool _covered;
+    private readonly int _filterAt;
+    private readonly byte _filter;
+    private readonly byte _filterAlt;
+    private readonly bool _filterFold;
+    private readonly TeddyTables? _teddy;
 
     private SimdLiteralScanner(byte[][] needles, bool ignoreCase)
     {
@@ -80,6 +93,42 @@ internal sealed class SimdLiteralScanner
             _lastFold = IsAsciiLetter(_last);
             _firstAlt = (byte)(_first ^ 0x20);
             _lastAlt = (byte)(_last ^ 0x20);
+            _rareAt = PickRare(_one);
+            _useRare = _rareAt > 0 && _rareAt < _one.Length - 1;
+            if (_useRare)
+            {
+                _rare = _one[_rareAt];
+                _rareFold = IsAsciiLetter(_rare);
+                _rareAlt = (byte)(_rare ^ 0x20);
+            }
+
+            // Length 2 is fully covered by the end bytes. Length 3 with the middle byte is too.
+            _covered = _one.Length <= 2 || (_useRare && _one.Length == 3);
+            _filterAt = 0;
+            _filter = _first;
+            _filterAlt = _firstAlt;
+            _filterFold = _firstFold;
+            var best = Rank(_first);
+            if (_useRare)
+            {
+                var rareRank = Rank(_rare);
+                if (rareRank < best)
+                {
+                    best = rareRank;
+                    _filterAt = _rareAt;
+                    _filter = _rare;
+                    _filterAlt = _rareAlt;
+                    _filterFold = _rareFold;
+                }
+            }
+
+            if (Rank(_last) < best)
+            {
+                _filterAt = _one.Length - 1;
+                _filter = _last;
+                _filterAlt = _lastAlt;
+                _filterFold = _lastFold;
+            }
         }
 
         var lists = new List<int>[256];
@@ -111,6 +160,11 @@ internal sealed class SimdLiteralScanner
         _offs[256] = ids.Count;
         _ids = ids.ToArray();
         _probes = probes.ToArray();
+        if (needles.Length >= 2 && _minLength >= 2)
+        {
+            _teddy = TeddyTables.Build(needles, ignoreCase);
+        }
+
         if (_one != null)
         {
             _k128 = [];
@@ -234,11 +288,29 @@ internal sealed class SimdLiteralScanner
             var firstAlt = Vector512.Create(_firstAlt);
             var last = Vector512.Create(_last);
             var lastAlt = Vector512.Create(_lastAlt);
+            var rare = Vector512.Create(_rare);
+            var rareAlt = Vector512.Create(_rareAlt);
+            var filter = Vector512.Create(_filter);
+            var filterAlt = Vector512.Create(_filterAlt);
+            var filterAt = _filterAt;
             var i = 0;
             if (lastVec >= 0)
             {
                 for (; i <= lastVec; i += 64)
                 {
+                    // One compare of the rarest probe byte. A miss skips the other loads.
+                    var primary = Avx512F.LoadVector512(basePtr + i + filterAt);
+                    var pm = Avx512BW.CompareEqual(primary, filter);
+                    if (_ignoreCase && _filterFold)
+                    {
+                        pm = Avx512F.Or(pm, Avx512BW.CompareEqual(primary, filterAlt));
+                    }
+
+                    if (pm.ExtractMostSignificantBits() == 0)
+                    {
+                        continue;
+                    }
+
                     var head = Avx512F.LoadVector512(basePtr + i);
                     var tail = Avx512F.LoadVector512(basePtr + i + len - 1);
                     var hm = Avx512BW.CompareEqual(head, first);
@@ -253,7 +325,20 @@ internal sealed class SimdLiteralScanner
                         tm = Avx512F.Or(tm, Avx512BW.CompareEqual(tail, lastAlt));
                     }
 
-                    var found = ConfirmBits(haystack, i, Avx512F.And(hm, tm).ExtractMostSignificantBits(), endsMatched: true);
+                    var mask = Avx512F.And(hm, tm);
+                    if (_useRare)
+                    {
+                        var mid = Avx512F.LoadVector512(basePtr + i + _rareAt);
+                        var rm = Avx512BW.CompareEqual(mid, rare);
+                        if (_ignoreCase && _rareFold)
+                        {
+                            rm = Avx512F.Or(rm, Avx512BW.CompareEqual(mid, rareAlt));
+                        }
+
+                        mask = Avx512F.And(mask, rm);
+                    }
+
+                    var found = ConfirmBits(haystack, i, mask.ExtractMostSignificantBits(), endsMatched: true);
                     if (found >= 0)
                     {
                         return found;
@@ -270,6 +355,11 @@ internal sealed class SimdLiteralScanner
         if (!Avx512BW.IsSupported)
         {
             return IndexOfAnyScalar(haystack, 0);
+        }
+
+        if (_teddy != null)
+        {
+            return SearchTeddyAvx512(haystack);
         }
 
         var keys = _k512;
@@ -318,11 +408,28 @@ internal sealed class SimdLiteralScanner
             var firstAlt = Vector256.Create(_firstAlt);
             var last = Vector256.Create(_last);
             var lastAlt = Vector256.Create(_lastAlt);
+            var rare = Vector256.Create(_rare);
+            var rareAlt = Vector256.Create(_rareAlt);
+            var filter = Vector256.Create(_filter);
+            var filterAlt = Vector256.Create(_filterAlt);
+            var filterAt = _filterAt;
             var i = 0;
             if (lastVec >= 0)
             {
                 for (; i <= lastVec; i += 32)
                 {
+                    var primary = Avx.LoadVector256(basePtr + i + filterAt);
+                    var pm = Avx2.CompareEqual(primary, filter);
+                    if (_ignoreCase && _filterFold)
+                    {
+                        pm = Avx2.Or(pm, Avx2.CompareEqual(primary, filterAlt));
+                    }
+
+                    if ((uint)Avx2.MoveMask(pm) == 0)
+                    {
+                        continue;
+                    }
+
                     var head = Avx.LoadVector256(basePtr + i);
                     var tail = Avx.LoadVector256(basePtr + i + len - 1);
                     var hm = Avx2.CompareEqual(head, first);
@@ -337,7 +444,20 @@ internal sealed class SimdLiteralScanner
                         tm = Avx2.Or(tm, Avx2.CompareEqual(tail, lastAlt));
                     }
 
-                    var found = ConfirmBits(haystack, i, (uint)Avx2.MoveMask(Avx2.And(hm, tm)), endsMatched: true);
+                    var mask = Avx2.And(hm, tm);
+                    if (_useRare)
+                    {
+                        var mid = Avx.LoadVector256(basePtr + i + _rareAt);
+                        var rm = Avx2.CompareEqual(mid, rare);
+                        if (_ignoreCase && _rareFold)
+                        {
+                            rm = Avx2.Or(rm, Avx2.CompareEqual(mid, rareAlt));
+                        }
+
+                        mask = Avx2.And(mask, rm);
+                    }
+
+                    var found = ConfirmBits(haystack, i, (uint)Avx2.MoveMask(mask), endsMatched: true);
                     if (found >= 0)
                     {
                         return found;
@@ -354,6 +474,11 @@ internal sealed class SimdLiteralScanner
         if (!Avx2.IsSupported)
         {
             return IndexOfAnyScalar(haystack, 0);
+        }
+
+        if (_teddy != null)
+        {
+            return SearchTeddyAvx2(haystack);
         }
 
         var keys = _k256;
@@ -402,11 +527,28 @@ internal sealed class SimdLiteralScanner
             var firstAlt = Vector128.Create(_firstAlt);
             var last = Vector128.Create(_last);
             var lastAlt = Vector128.Create(_lastAlt);
+            var rare = Vector128.Create(_rare);
+            var rareAlt = Vector128.Create(_rareAlt);
+            var filter = Vector128.Create(_filter);
+            var filterAlt = Vector128.Create(_filterAlt);
+            var filterAt = _filterAt;
             var i = 0;
             if (lastVec >= 0)
             {
                 for (; i <= lastVec; i += 16)
                 {
+                    var primary = Sse2.LoadVector128(basePtr + i + filterAt);
+                    var pm = Sse2.CompareEqual(primary, filter);
+                    if (_ignoreCase && _filterFold)
+                    {
+                        pm = Sse2.Or(pm, Sse2.CompareEqual(primary, filterAlt));
+                    }
+
+                    if ((uint)Sse2.MoveMask(pm) == 0)
+                    {
+                        continue;
+                    }
+
                     var head = Sse2.LoadVector128(basePtr + i);
                     var tail = Sse2.LoadVector128(basePtr + i + len - 1);
                     var hm = Sse2.CompareEqual(head, first);
@@ -421,7 +563,20 @@ internal sealed class SimdLiteralScanner
                         tm = Sse2.Or(tm, Sse2.CompareEqual(tail, lastAlt));
                     }
 
-                    var found = ConfirmBits(haystack, i, (uint)Sse2.MoveMask(Sse2.And(hm, tm)), endsMatched: true);
+                    var mask = Sse2.And(hm, tm);
+                    if (_useRare)
+                    {
+                        var mid = Sse2.LoadVector128(basePtr + i + _rareAt);
+                        var rm = Sse2.CompareEqual(mid, rare);
+                        if (_ignoreCase && _rareFold)
+                        {
+                            rm = Sse2.Or(rm, Sse2.CompareEqual(mid, rareAlt));
+                        }
+
+                        mask = Sse2.And(mask, rm);
+                    }
+
+                    var found = ConfirmBits(haystack, i, (uint)Sse2.MoveMask(mask), endsMatched: true);
                     if (found >= 0)
                     {
                         return found;
@@ -438,6 +593,11 @@ internal sealed class SimdLiteralScanner
         if (!Sse2.IsSupported)
         {
             return IndexOfAnyScalar(haystack, 0);
+        }
+
+        if (_teddy != null && Ssse3.IsSupported)
+        {
+            return SearchTeddySse(haystack);
         }
 
         var keys = _k128;
@@ -479,11 +639,28 @@ internal sealed class SimdLiteralScanner
         var firstAlt = Vector128.Create(_firstAlt);
         var last = Vector128.Create(_last);
         var lastAlt = Vector128.Create(_lastAlt);
+        var rare = Vector128.Create(_rare);
+        var rareAlt = Vector128.Create(_rareAlt);
+        var filter = Vector128.Create(_filter);
+        var filterAlt = Vector128.Create(_filterAlt);
+        var filterAt = _filterAt;
         var i = 0;
         if (lastVec >= 0)
         {
             for (; i <= lastVec; i += 16)
             {
+                var primary = Vector128.LoadUnsafe(ref origin, (nuint)(i + filterAt));
+                var pm = Vector128.Equals(primary, filter);
+                if (_ignoreCase && _filterFold)
+                {
+                    pm = Vector128.BitwiseOr(pm, Vector128.Equals(primary, filterAlt));
+                }
+
+                if (pm.ExtractMostSignificantBits() == 0)
+                {
+                    continue;
+                }
+
                 var head = Vector128.LoadUnsafe(ref origin, (nuint)i);
                 var tail = Vector128.LoadUnsafe(ref origin, (nuint)(i + len - 1));
                 var hm = Vector128.Equals(head, first);
@@ -498,7 +675,20 @@ internal sealed class SimdLiteralScanner
                     tm = Vector128.BitwiseOr(tm, Vector128.Equals(tail, lastAlt));
                 }
 
-                var found = ConfirmBits(haystack, i, Vector128.BitwiseAnd(hm, tm).ExtractMostSignificantBits(), endsMatched: true);
+                var mask = Vector128.BitwiseAnd(hm, tm);
+                if (_useRare)
+                {
+                    var mid = Vector128.LoadUnsafe(ref origin, (nuint)(i + _rareAt));
+                    var rm = Vector128.Equals(mid, rare);
+                    if (_ignoreCase && _rareFold)
+                    {
+                        rm = Vector128.BitwiseOr(rm, Vector128.Equals(mid, rareAlt));
+                    }
+
+                    mask = Vector128.BitwiseAnd(mask, rm);
+                }
+
+                var found = ConfirmBits(haystack, i, mask.ExtractMostSignificantBits(), endsMatched: true);
                 if (found >= 0)
                 {
                     return found;
@@ -511,6 +701,11 @@ internal sealed class SimdLiteralScanner
 
     private int ScanManyVector128(ReadOnlySpan<byte> haystack)
     {
+        if (_teddy != null && Ssse3.IsSupported)
+        {
+            return SearchTeddySse(haystack);
+        }
+
         var keys = _k128;
         ref var origin = ref MemoryMarshal.GetReference(haystack);
         var i = 0;
@@ -545,7 +740,7 @@ internal sealed class SimdLiteralScanner
             var pos = origin + bit;
             if (endsMatched)
             {
-                if (_one!.Length == 2 || MatchesAt(haystack, pos, _one))
+                if (_covered || MatchesAt(haystack, pos, _one!))
                 {
                     return pos;
                 }
@@ -578,6 +773,11 @@ internal sealed class SimdLiteralScanner
             start = 0;
         }
 
+        if (_one != null)
+        {
+            return IndexOfOne(haystack, start);
+        }
+
         var last = haystack.Length - _minLength;
         for (var i = start; i <= last; i++)
         {
@@ -589,6 +789,46 @@ internal sealed class SimdLiteralScanner
 
         return -1;
     }
+
+    private int IndexOfOne(ReadOnlySpan<byte> haystack, int start)
+    {
+        var needle = _one!;
+        var len = needle.Length;
+        var last = haystack.Length - len;
+        for (var i = start; i <= last; i++)
+        {
+            if (!Probe(haystack[i + _filterAt], _filter, _filterAlt, _filterFold))
+            {
+                continue;
+            }
+
+            if (_filterAt != 0 && !Probe(haystack[i], _first, _firstAlt, _firstFold))
+            {
+                continue;
+            }
+
+            if (_filterAt != len - 1 && !Probe(haystack[i + len - 1], _last, _lastAlt, _lastFold))
+            {
+                continue;
+            }
+
+            if (_useRare && _filterAt != _rareAt && !Probe(haystack[i + _rareAt], _rare, _rareAlt, _rareFold))
+            {
+                continue;
+            }
+
+            if (_covered || MatchesAt(haystack, i, needle))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool Probe(byte value, byte expected, byte alt, bool fold) =>
+        value == expected || (_ignoreCase && fold && value == alt);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool MatchesAny(ReadOnlySpan<byte> haystack, int pos)
@@ -656,6 +896,48 @@ internal sealed class SimdLiteralScanner
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool IsAsciiLetter(byte value) =>
         value is >= (byte)'A' and <= (byte)'Z' or >= (byte)'a' and <= (byte)'z';
+
+    /// <summary>Lowest-frequency interior byte. Common ASCII letters confirm far more often than a rare byte.</summary>
+    private static int PickRare(byte[] needle)
+    {
+        if (needle.Length < 3)
+        {
+            return 0;
+        }
+
+        var best = 1;
+        var bestRank = Rank(needle[1]);
+        for (var i = 2; i < needle.Length - 1; i++)
+        {
+            var rank = Rank(needle[i]);
+            if (rank < bestRank)
+            {
+                bestRank = rank;
+                best = i;
+            }
+        }
+
+        return best;
+    }
+
+    private static int Rank(byte value)
+    {
+        if (value is >= (byte)'A' and <= (byte)'Z')
+        {
+            value += 32;
+        }
+
+        // Rough English / source frequency. Lower is rarer and a better filter.
+        return value switch
+        {
+            (byte)'e' or (byte)'t' or (byte)'a' or (byte)'o' or (byte)'i' or (byte)'n' or (byte)'s' or (byte)' ' => 40,
+            (byte)'r' or (byte)'h' or (byte)'l' or (byte)'d' or (byte)'c' or (byte)'u' or (byte)'m' => 30,
+            (byte)'_' or (byte)'.' or (byte)'/' or (byte)'\\' or (byte)'(' or (byte)')' or (byte)'"' or (byte)'\'' => 24,
+            >= (byte)'0' and <= (byte)'9' => 18,
+            >= (byte)'a' and <= (byte)'z' => 12,
+            _ => value < 32 ? 1 : 4,
+        };
+    }
 
     private static void AddStart(List<int>[] lists, byte value, int needle)
     {
