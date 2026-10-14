@@ -6,7 +6,11 @@ namespace Ngrep.Indexing;
 
 internal static class Indexer
 {
-    public static IndexResult Build(string root, string? indexDirectory = null, bool showProgress = false)
+    public static IndexResult Build(
+        string root,
+        string? indexDirectory = null,
+        bool showProgress = false,
+        Action<string, string>? onPersisted = null)
     {
         root = Path.GetFullPath(root);
         if (!Directory.Exists(root))
@@ -97,16 +101,15 @@ internal static class Indexer
 
                 var text = TextFiles.Decode(bytes);
                 var id = previous?.Id ?? nextId++;
+                var kind = previous == null ? "added" : "updated";
                 if (previous != null)
                 {
                     RemoveDoc(postings, previous.Id);
                     updated++;
-                    WriteOutcome("updated", file.RelativePath);
                 }
                 else
                 {
                     added++;
-                    WriteOutcome("added", file.RelativePath);
                 }
 
                 foreach (var gram in Trigrams.Extract(text))
@@ -124,6 +127,7 @@ internal static class Indexer
                     LineStarts = LineMap.Build(text),
                 };
                 seen.Add(file.RelativePath);
+                Commit(kind, file.RelativePath);
             }
             finally
             {
@@ -140,7 +144,7 @@ internal static class Indexer
             RemoveDoc(postings, documents[path].Id);
             documents.Remove(path);
             removed++;
-            WriteOutcome("removed", path);
+            Commit("removed", path);
         }
 
         if (showProgress)
@@ -148,28 +152,13 @@ internal static class Indexer
             WriteSummary();
         }
 
-        var now = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture);
-        var kept = documents.Values.OrderBy(d => d.Path, StringComparer.Ordinal).ToList();
-        var manifest = new IndexManifest
-        {
-            FormatVersion = IndexPaths.FormatVersion,
-            Tool = IndexPaths.ToolName,
-            Root = root,
-            CreatedUtc = string.IsNullOrEmpty(createdUtc) ? now : createdUtc,
-            UpdatedUtc = now,
-            DocumentCount = kept.Count,
-            TrigramCount = postings.Count,
-            CaseFolding = "invariant-lowercase",
-            ColumnUnit = "utf16-code-unit",
-        };
-
-        IndexStore.Write(indexPath, manifest, kept, postings);
+        Commit(null, null);
 
         return new IndexResult
         {
             Root = root,
             IndexPath = indexPath,
-            Documents = kept.Count,
+            Documents = documents.Count,
             Added = added,
             Updated = updated,
             Unchanged = unchanged,
@@ -179,6 +168,37 @@ internal static class Indexer
             SkippedTooLarge = stats.SkippedTooLarge,
             SkippedUnreadable = stats.SkippedUnreadable,
         };
+
+        void Commit(string? kind, string? relativePath)
+        {
+            var now = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+            if (string.IsNullOrEmpty(createdUtc))
+            {
+                createdUtc = now;
+            }
+
+            var kept = documents.Values.OrderBy(d => d.Path, StringComparer.Ordinal).ToList();
+            var manifest = new IndexManifest
+            {
+                FormatVersion = IndexPaths.FormatVersion,
+                Tool = IndexPaths.ToolName,
+                Root = root,
+                CreatedUtc = createdUtc,
+                UpdatedUtc = now,
+                DocumentCount = kept.Count,
+                TrigramCount = postings.Count,
+                CaseFolding = "invariant-lowercase",
+                ColumnUnit = "utf16-code-unit",
+            };
+            IndexStore.Write(indexPath, manifest, kept, postings);
+            if (kind == null || relativePath == null)
+            {
+                return;
+            }
+
+            WriteOutcome(kind, relativePath);
+            onPersisted?.Invoke(kind, relativePath);
+        }
 
         void WriteOutcome(string verb, string relativePath)
         {

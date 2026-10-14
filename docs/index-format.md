@@ -1,6 +1,6 @@
 # ngrep index format v1
 
-The index is a directory, by default `<root>/.ngrep/index`. `ngrep index --index <dir>` writes somewhere else. An index left in `.netgrep` is not opened; index the tree again so it is written under `.ngrep`. A rewrite is atomic on the same filesystem: files are written to `<index>.tmp`, the previous directory is renamed to `<index>.bak`, then the temp directory becomes `<index>`. A crash can leave `.bak`. Readers use `<index>` when `manifest.json` is there, and otherwise fall back to `<index>.bak`.
+The index is a directory, by default `<root>/.ngrep/index`. `ngrep index --index <dir>` writes somewhere else. An index left in `.netgrep` is not opened; index the tree again so it is written under `.ngrep`. Each commit is atomic on the same filesystem: files are written to `<index>.tmp`, the previous directory is renamed to `<index>.bak`, then the temp directory becomes `<index>`. A crash can leave `.bak`. Readers use `<index>` when `manifest.json` is there, and otherwise fall back to `<index>.bak`. A failure while writing `<index>.tmp` deletes that temp directory and leaves the previous index in place.
 
 ## manifest.json
 
@@ -62,14 +62,20 @@ A literal query of length >= 3 is answered by intersecting the posting lists of 
 
 ## Incremental updates
 
-`ngrep index` on an existing directory is a logical per-file update:
+`ngrep index` on an existing directory is a per-file update, and each added, updated, or removed document is committed before the next one:
 
-- unchanged size and mtime: keep the document and its postings
-- same SHA-256: refresh size/mtime only
-- content change: delete that `id` from every posting list, then insert the new trigrams
-- path missing from the walk: delete the document and its postings
+- unchanged size and mtime: keep the document and its postings; no commit for that file
+- same SHA-256: refresh size and mtime in memory; the new timestamps are stored in the final commit
+- content change: delete that `id` from every posting list, insert the new trigrams, then commit
+- path missing from the walk: after every walked file has been considered, delete that document and its postings, then commit that one removal
 
-v1 rewrites `postings.bin` and `documents.ndjson` as a whole. The per-file work is incremental; the physical layout is not a write-ahead log. A later version can shard postings by document id without changing the trigram or line/column rules.
+A commit rewrites `manifest.json`, `documents.ndjson`, and `postings.bin` into `<index>.tmp` and replaces `<index>` only after those files are complete. The committed directory is a normal v1 index: `documentCount` matches the rows, and postings refer only to ids in that snapshot. `.ngrep/` therefore appears when the first document is committed, not when the walk ends.
+
+Removals wait until the walk finishes, then run one path at a time in ordinal path order. Until a stale path is committed, it stays in the index. A killed process leaves the last successful commit: files already added or updated are searchable, files not yet visited are absent from a new index (or still present from the previous index), and deletions that were not committed yet are still present. A crash while writing the temp directory does not replace a good index.
+
+Unchanged files are not given their own commit. A crash before the final commit keeps their previous records. Those records still describe the same bytes when the hash matched. The final commit also covers an empty tree and refreshes `updatedUtc`.
+
+v1 still rewrites the three files as a whole on every commit. It is not a write-ahead log. A later version can shard postings by document id without changing the trigram or line/column rules.
 
 ## What is not in the index
 

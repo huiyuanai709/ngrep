@@ -8,6 +8,10 @@ internal static class IndexStore
 {
     private static readonly UTF8Encoding Utf8 = new(encoderShouldEmitUTF8Identifier: false);
 
+    // Runs after <index>.tmp is complete and before it replaces the live index.
+    // A throw leaves the previous index in place. Tests clear this in a finally.
+    internal static Action? TestHookBeforeCommit { get; set; }
+
     public static IndexData? TryLoad(string indexDirectory)
     {
         var dir = ResolveExisting(indexDirectory);
@@ -34,6 +38,21 @@ internal static class IndexStore
         using (var stream = File.Create(Path.Combine(tempDir, "postings.bin")))
         {
             WritePostings(stream, postings);
+            stream.Flush(flushToDisk: true);
+        }
+
+        try
+        {
+            TestHookBeforeCommit?.Invoke();
+        }
+        catch
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+
+            throw;
         }
 
         var backup = finalDir + ".bak";
