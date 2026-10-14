@@ -76,7 +76,7 @@ internal static class NetgrepCli
 
         var positionals = new Argument<string[]>("pattern")
         {
-            Description = "Search pattern and optional path: <pattern> [path]. With -e, every -e value is a pattern (OR). A positional written before the first -e is also a pattern; any later positional is the path.",
+            Description = "Search pattern and optional path: <pattern> [path]. With -e or -f, every -e value is a pattern and every -f value is a pattern file (OR). A positional written before the first -e or -f is also a pattern; any later positional is the path.",
             Arity = ArgumentArity.ZeroOrMore,
         };
         var ignoreCase = new Option<bool>("--ignore-case", "-i")
@@ -130,6 +130,11 @@ internal static class NetgrepCli
         var regexp = new Option<string[]>("-e", "--regexp")
         {
             Description = "Pattern to search for. Repeatable. Matches if any pattern matches (OR).",
+            Arity = ArgumentArity.ZeroOrMore,
+        };
+        var patternFile = new Option<string[]>("-f", "--file")
+        {
+            Description = "Read patterns from a file, one per line. An empty line matches every line. A line starting with # is a pattern, not a comment. '-' reads stdin. Repeatable, OR-ed with -e and a positional pattern.",
             Arity = ArgumentArity.ZeroOrMore,
         };
         var word = new Option<bool>("-w", "--word-regexp")
@@ -186,6 +191,18 @@ internal static class NetgrepCli
         {
             Description = "Let '.' match a newline. Implies --multiline.",
         };
+        var heading = new Option<bool>("--heading")
+        {
+            Description = "Print a path heading before each file's text matches, and omit the path from match lines. Forces headings for one file and for a pipe.",
+        };
+        var noHeading = new Option<bool>("--no-heading")
+        {
+            Description = "Keep path:line:column:text on every text match line. Overrides --heading. Default when stdout is not a terminal, TERM=dumb, or only one file was searched.",
+        };
+        var stats = new Option<bool>("--stats")
+        {
+            Description = "After the search, print files searched, files matched, lines matched, matches, and elapsed milliseconds on stderr. Stdout is unchanged. Collects every hit so -l line counts are complete.",
+        };
 
         var searchCommand = new Command("search", "Query the index, or scan contents when no index covers the path.");
         searchCommand.Arguments.Add(positionals);
@@ -201,6 +218,7 @@ internal static class NetgrepCli
         searchCommand.Options.Add(before);
         searchCommand.Options.Add(context);
         searchCommand.Options.Add(regexp);
+        searchCommand.Options.Add(patternFile);
         searchCommand.Options.Add(word);
         searchCommand.Options.Add(invert);
         searchCommand.Options.Add(noIgnore);
@@ -214,6 +232,9 @@ internal static class NetgrepCli
         searchCommand.Options.Add(color);
         searchCommand.Options.Add(multiline);
         searchCommand.Options.Add(multilineDotAll);
+        searchCommand.Options.Add(heading);
+        searchCommand.Options.Add(noHeading);
+        searchCommand.Options.Add(stats);
         searchCommand.SetAction(result =>
         {
             using var cts = new CancellationTokenSource();
@@ -263,6 +284,9 @@ internal static class NetgrepCli
                     color,
                     multiline,
                     multilineDotAll,
+                    heading,
+                    noHeading,
+                    stats,
                     cts.Token);
             }
             catch (OperationCanceledException)
@@ -343,6 +367,9 @@ internal static class NetgrepCli
         Option<string> color,
         Option<bool> multiline,
         Option<bool> multilineDotAll,
+        Option<bool> heading,
+        Option<bool> noHeading,
+        Option<bool> stats,
         CancellationToken cancellationToken)
     {
         var showTypes = result.GetValue(typeList);
@@ -358,6 +385,7 @@ internal static class NetgrepCli
         }
 
         var bound = SearchSyntax.Bind(result, typeList: false);
+        var patterns = LoadPatterns(bound);
         var report = BindReport(result, filesWith, filesWithout, count);
         var beforeCount = ContextCount(result, before, context);
         var afterCount = ContextCount(result, after, context);
@@ -368,10 +396,11 @@ internal static class NetgrepCli
 
         var parsedFormat = OutputFormats.Parse(result.GetValue(format));
         var colorOn = parsedFormat == OutputFormat.Text && TextColor.Enabled(TextColor.Parse(result.GetValue(color)));
+        var wantStats = result.GetValue(stats);
         var outcome = Searcher.Search(new SearchQuery
         {
-            Pattern = bound.Patterns[0],
-            AdditionalPatterns = bound.Patterns.Length > 1 ? bound.Patterns[1..] : [],
+            Pattern = patterns[0],
+            AdditionalPatterns = patterns.Count > 1 ? patterns[1..] : [],
             Path = bound.Path,
             IndexDirectory = result.GetValue(index),
             IgnoreCase = result.GetValue(ignoreCase),
@@ -384,6 +413,7 @@ internal static class NetgrepCli
             IncludeHidden = result.GetValue(hidden),
             Multiline = result.GetValue(multiline),
             MultilineDotAll = result.GetValue(multilineDotAll),
+            Stats = wantStats,
             Report = report,
             BeforeContext = beforeCount,
             AfterContext = afterCount,
@@ -394,16 +424,44 @@ internal static class NetgrepCli
             MaxDegreeOfParallelism = ThreadCount(result, threads),
             CancellationToken = cancellationToken,
         });
+        var forceHeading = result.GetValue(heading);
+        var suppressHeading = result.GetValue(noHeading);
+        var useHeading = parsedFormat == OutputFormat.Text
+            && report == ReportMode.Matches
+            && !suppressHeading
+            && (forceHeading || (TextColor.IsTerminal() && outcome.FilesSearched > 1));
         MachineOutput.Note(outcome.Note);
         MachineOutput.WriteMatches(
             outcome.Matches,
             parsedFormat,
-            new SearchPresentation(report, result.GetValue(onlyMatching), colorOn),
-            outcome.FilesWithoutMatch);
+            new SearchPresentation(report, result.GetValue(onlyMatching), colorOn, useHeading),
+            outcome.FilesWithoutMatch,
+            outcome.ElapsedMilliseconds);
+        if (wantStats)
+        {
+            MachineOutput.WriteStats(outcome);
+        }
+
         var produced = report == ReportMode.FilesWithoutMatch
             ? outcome.FilesWithoutMatch.Count > 0
             : outcome.Matches.Count > 0;
         return produced ? ExitCodes.Success : ExitCodes.NoMatches;
+    }
+
+    private static List<string> LoadPatterns(BoundSearch bound)
+    {
+        var patterns = new List<string>(bound.Patterns);
+        foreach (var file in bound.PatternFiles)
+        {
+            patterns.AddRange(PatternFiles.Read(file));
+        }
+
+        if (patterns.Count == 0)
+        {
+            throw new ArgumentException("Pattern file contains no patterns.");
+        }
+
+        return patterns;
     }
 
     private static ReportMode BindReport(

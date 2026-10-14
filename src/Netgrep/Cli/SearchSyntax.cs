@@ -3,7 +3,7 @@ using System.CommandLine.Parsing;
 
 namespace Netgrep.Cli;
 
-internal readonly record struct BoundSearch(string[] Patterns, string Path);
+internal readonly record struct BoundSearch(string[] Patterns, string[] PatternFiles, string Path);
 
 /// <summary>
 /// <c>netgrep &lt;pattern&gt; [path]</c> is rewritten to <c>search</c> unless the first positional
@@ -41,6 +41,8 @@ internal static class SearchSyntax
         "-j",
         "--threads",
         "--color",
+        "-f",
+        "--file",
     };
 
     public static string[] Rewrite(string[] args)
@@ -59,8 +61,9 @@ internal static class SearchSyntax
     public static BoundSearch Bind(ParseResult result, bool typeList)
     {
         var patterns = new List<string>();
+        var files = new List<string>();
         string? path = null;
-        var sawRegexp = false;
+        var sawPatternSource = false;
         var tookPositionalPattern = false;
         string? pending = null;
 
@@ -68,7 +71,21 @@ internal static class SearchSyntax
         {
             if (token.Type == TokenType.Option)
             {
-                pending = IsValueOption(token.Value) ? token.Value : null;
+                var name = OptionName(token.Value);
+                var inline = InlineValue(token.Value);
+                if (IsPatternSource(name))
+                {
+                    sawPatternSource = true;
+                }
+
+                if (inline != null)
+                {
+                    TakePatternSource(name, inline, patterns, files);
+                    pending = null;
+                    continue;
+                }
+
+                pending = IsValueOption(name) ? name : null;
                 continue;
             }
 
@@ -79,22 +96,12 @@ internal static class SearchSyntax
 
             if (pending != null)
             {
-                if (IsRegexpOption(pending))
-                {
-                    if (token.Value.Length == 0)
-                    {
-                        throw new ArgumentException("Pattern is empty.");
-                    }
-
-                    patterns.Add(token.Value);
-                    sawRegexp = true;
-                }
-
+                TakePatternSource(pending, token.Value, patterns, files);
                 pending = null;
                 continue;
             }
 
-            if (!sawRegexp && !tookPositionalPattern)
+            if (!sawPatternSource && !tookPositionalPattern)
             {
                 if (token.Value.Length == 0)
                 {
@@ -114,21 +121,46 @@ internal static class SearchSyntax
             path = token.Value;
         }
 
-        if (patterns.Count == 0)
+        if (patterns.Count == 0 && files.Count == 0)
         {
             if (typeList)
             {
-                return new BoundSearch([], ".");
+                return new BoundSearch([], [], ".");
             }
 
             throw new ArgumentException("Pattern is required. Usage: netgrep <pattern> [path]");
         }
 
-        return new BoundSearch(patterns.ToArray(), path ?? ".");
+        return new BoundSearch(patterns.ToArray(), files.ToArray(), path ?? ".");
+    }
+
+    private static void TakePatternSource(string name, string value, List<string> patterns, List<string> files)
+    {
+        if (IsRegexpOption(name))
+        {
+            if (value.Length == 0)
+            {
+                throw new ArgumentException("Pattern is empty.");
+            }
+
+            patterns.Add(value);
+            return;
+        }
+
+        if (IsFileOption(name))
+        {
+            if (value.Length == 0)
+            {
+                throw new ArgumentException("Pattern file path is empty.");
+            }
+
+            files.Add(value);
+        }
     }
 
     private static bool HasSubcommand(string[] args)
     {
+        var sawPatternSource = false;
         for (var i = 0; i < args.Length; i++)
         {
             var arg = args[i];
@@ -144,6 +176,12 @@ internal static class SearchSyntax
 
             if (arg.StartsWith('-'))
             {
+                var name = OptionName(arg);
+                if (IsPatternSource(name))
+                {
+                    sawPatternSource = true;
+                }
+
                 if (arg.Contains('='))
                 {
                     continue;
@@ -154,7 +192,7 @@ internal static class SearchSyntax
                     continue;
                 }
 
-                if (ValueOptions.Contains(arg))
+                if (ValueOptions.Contains(arg) || ValueOptions.Contains(name))
                 {
                     i++;
                 }
@@ -162,7 +200,18 @@ internal static class SearchSyntax
                 continue;
             }
 
+            if (sawPatternSource)
+            {
+                return false;
+            }
+
             return Subcommands.Contains(arg);
+        }
+
+        // `-e` / `-f` with no path still searches `.`, including when every positional was a pattern source.
+        if (sawPatternSource)
+        {
+            return false;
         }
 
         for (var i = 0; i < args.Length; i++)
@@ -191,5 +240,31 @@ internal static class SearchSyntax
         return false;
     }
 
+    private static string OptionName(string token)
+    {
+        var eq = token.IndexOf('=');
+        if (eq >= 0)
+        {
+            token = token[..eq];
+        }
+
+        if (token.Length > 2 && token[0] == '-' && token[1] != '-' && ValueOptions.Contains(token[..2]))
+        {
+            return token[..2];
+        }
+
+        return token;
+    }
+
+    private static string? InlineValue(string token)
+    {
+        var eq = token.IndexOf('=');
+        return eq >= 0 ? token[(eq + 1)..] : null;
+    }
+
+    private static bool IsPatternSource(string name) => IsRegexpOption(name) || IsFileOption(name);
+
     private static bool IsRegexpOption(string token) => token is "-e" or "--regexp";
+
+    private static bool IsFileOption(string token) => token is "-f" or "--file";
 }

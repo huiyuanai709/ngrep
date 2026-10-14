@@ -37,7 +37,9 @@ internal sealed class MatchPlan
 
     public bool WantsContext => Before > 0 || After > 0;
 
-    public bool StopAtFirst => Report == ReportMode.FilesWithMatches;
+    public bool CollectAll { get; init; }
+
+    public bool StopAtFirst => Report == ReportMode.FilesWithMatches && !CollectAll;
 
     /// <summary>Regex matches may include a newline. Set by <c>-U</c> or <c>--multiline-dotall</c>.</summary>
     public bool CrossesLines => Multiline || MultilineDotAll;
@@ -92,6 +94,7 @@ internal sealed class MatchPlan
             Multiline = query.Multiline || query.MultilineDotAll,
             MultilineDotAll = query.MultilineDotAll,
             IncludeHidden = query.IncludeHidden,
+            CollectAll = query.Stats,
         };
     }
 
@@ -139,7 +142,8 @@ internal sealed class MatchPlan
 
                 var lineText = LineMap.LineText(text, starts, line);
                 var (before, after) = Context(text, starts, lineCount, line, plan);
-                matches.Add(new SearchMatch(relativePath, line, 1, lineText, lineText, before, after));
+                var offset = line - 1 < starts.Length ? starts[line - 1] : 0;
+                matches.Add(new SearchMatch(relativePath, line, 1, lineText, lineText, before, after, offset));
                 if (plan.StopAtFirst)
                 {
                     return;
@@ -162,9 +166,15 @@ internal sealed class MatchPlan
         var hits = new List<Hit>();
         if (plan.Regex)
         {
-            foreach (var regex in plan.Regexes!)
+            for (var i = 0; i < plan.Regexes!.Length; i++)
             {
-                foreach (Match match in regex.Matches(text))
+                if (plan.Patterns[i].Length == 0)
+                {
+                    CollectEmpty(text, plan.Word, hits);
+                    continue;
+                }
+
+                foreach (Match match in plan.Regexes[i].Matches(text))
                 {
                     if (!match.Success)
                     {
@@ -190,6 +200,12 @@ internal sealed class MatchPlan
             var comparison = plan.IgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
             foreach (var pattern in plan.Patterns)
             {
+                if (pattern.Length == 0)
+                {
+                    CollectEmpty(text, plan.Word, hits);
+                    continue;
+                }
+
                 CollectLiteral(text, pattern, comparison, plan.Word, hits);
             }
         }
@@ -225,7 +241,8 @@ internal sealed class MatchPlan
             hit.Value,
             LineMap.LineText(text, starts, line),
             before,
-            after));
+            after,
+            hit.Index));
     }
 
     private static Hit? FirstHit(string text, MatchPlan plan)
@@ -233,9 +250,15 @@ internal sealed class MatchPlan
         Hit? best = null;
         if (plan.Regex)
         {
-            foreach (var regex in plan.Regexes!)
+            for (var i = 0; i < plan.Regexes!.Length; i++)
             {
-                ConsiderFirstRegex(text, regex, plan, ref best);
+                if (plan.Patterns[i].Length == 0)
+                {
+                    ConsiderEmpty(text, plan.Word, ref best);
+                    continue;
+                }
+
+                ConsiderFirstRegex(text, plan.Regexes[i], plan, ref best);
             }
         }
         else
@@ -252,7 +275,13 @@ internal sealed class MatchPlan
 
     private static void ConsiderFirstLiteral(string text, string pattern, StringComparison comparison, bool word, ref Hit? best)
     {
-        if (pattern.Length == 0 || pattern.Length > text.Length)
+        if (pattern.Length == 0)
+        {
+            ConsiderEmpty(text, word, ref best);
+            return;
+        }
+
+        if (pattern.Length > text.Length)
         {
             return;
         }
@@ -320,28 +349,11 @@ internal sealed class MatchPlan
     private static string[] Combine(SearchQuery query)
     {
         var extra = query.AdditionalPatterns;
-        var count = query.Pattern.Length > 0 ? 1 : 0;
-        count += extra.Count;
-        if (count == 0)
+        var patterns = new string[1 + extra.Count];
+        patterns[0] = query.Pattern;
+        for (var i = 0; i < extra.Count; i++)
         {
-            throw new ArgumentException("Pattern is empty.");
-        }
-
-        var patterns = new string[count];
-        var index = 0;
-        if (query.Pattern.Length > 0)
-        {
-            patterns[index++] = query.Pattern;
-        }
-
-        foreach (var pattern in extra)
-        {
-            if (pattern.Length == 0)
-            {
-                throw new ArgumentException("Pattern is empty.");
-            }
-
-            patterns[index++] = pattern;
+            patterns[i + 1] = extra[i];
         }
 
         return patterns;
@@ -368,7 +380,13 @@ internal sealed class MatchPlan
 
     private static void MarkLiteral(string text, int[] starts, string pattern, StringComparison comparison, bool word, HashSet<int> lines)
     {
-        if (pattern.Length == 0 || pattern.Length > text.Length)
+        if (pattern.Length == 0)
+        {
+            MarkEmpty(text, starts, word, lines);
+            return;
+        }
+
+        if (pattern.Length > text.Length)
         {
             return;
         }
@@ -414,6 +432,12 @@ internal sealed class MatchPlan
 
     private static void MarkRegex(string text, int[] starts, Regex regex, MatchPlan plan, HashSet<int> lines)
     {
+        if (regex.ToString().Length == 0)
+        {
+            MarkEmpty(text, starts, plan.Word, lines);
+            return;
+        }
+
         var from = 0;
         while (from <= text.Length)
         {
@@ -464,6 +488,74 @@ internal sealed class MatchPlan
 
             var next = match.Index + Math.Max(1, match.Length);
             from = next <= from ? from + 1 : next;
+        }
+    }
+
+    /// <summary>
+    /// An empty pattern matches every line once, at column 1. Ripgrep's empty regex also
+    /// reports a zero-width match at every offset; text output still shows each line once.
+    /// </summary>
+    private static void CollectEmpty(string text, bool word, List<Hit> hits)
+    {
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        var from = 0;
+        while (from < text.Length)
+        {
+            if (!word || WordBoundary.At(text, from, 0))
+            {
+                hits.Add(new Hit(from, 0, ""));
+            }
+
+            var newline = text.IndexOf('\n', from);
+            if (newline < 0)
+            {
+                break;
+            }
+
+            from = newline + 1;
+        }
+    }
+
+    private static void ConsiderEmpty(string text, bool word, ref Hit? best)
+    {
+        if (text.Length == 0 || (word && !WordBoundary.At(text, 0, 0)))
+        {
+            return;
+        }
+
+        var limit = best?.Index ?? int.MaxValue;
+        if (0 < limit)
+        {
+            best = new Hit(0, 0, "");
+        }
+    }
+
+    private static void MarkEmpty(string text, int[] starts, bool word, HashSet<int> lines)
+    {
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        var from = 0;
+        while (from < text.Length)
+        {
+            if (!word || WordBoundary.At(text, from, 0))
+            {
+                lines.Add(LineMap.Map(starts, from).Line);
+            }
+
+            var newline = text.IndexOf('\n', from);
+            if (newline < 0)
+            {
+                break;
+            }
+
+            from = newline + 1;
         }
     }
 
@@ -553,7 +645,7 @@ internal sealed class MatchPlan
         for (var i = 0; i < length; i++)
         {
             var number = startLine + i;
-            lines[i] = new ContextLine(number, LineMap.LineText(text, starts, number));
+            lines[i] = new ContextLine(number, LineMap.LineText(text, starts, number), LineStart(starts, number));
         }
 
         return lines;
@@ -572,11 +664,14 @@ internal sealed class MatchPlan
         for (var i = 0; i < take; i++)
         {
             var number = line + 1 + i;
-            lines[i] = new ContextLine(number, LineMap.LineText(text, starts, number));
+            lines[i] = new ContextLine(number, LineMap.LineText(text, starts, number), LineStart(starts, number));
         }
 
         return lines;
     }
+
+    private static int LineStart(int[] starts, int line) =>
+        line >= 1 && line - 1 < starts.Length ? starts[line - 1] : 0;
 
     private readonly record struct Hit(int Index, int Length, string Value);
 }
