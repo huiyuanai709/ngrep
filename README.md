@@ -75,7 +75,7 @@ Hidden files and directories (any path component whose name starts with `.`) are
 
 Text headings follow ripgrep when more than one file is searched. On a terminal (`TERM` is not `dumb`, and stdout is not redirected), a search that reads more than one file prints the path on its own line, then `line:column:text` (and context as `line-text`) without repeating the path. A blank line separates files. A single file, a one-file directory, a pipe, or `TERM=dumb` keeps `path:line:column:text`. `--heading` forces the heading form even then. `--no-heading` forces the prefixed form and wins when both flags are set. JSON, NDJSON, and rgjson never print headings. `-l`, `--files-without-match`, and `-c` do not use headings. `NO_COLOR` turns color off and does not turn headings off. A heading is colored with the same magenta as a path.
 
-`--stats` prints a summary on stderr after stdout is finished:
+`--stats` prints a summary on stderr after stdout is flushed:
 
 ```text
 files searched: 2

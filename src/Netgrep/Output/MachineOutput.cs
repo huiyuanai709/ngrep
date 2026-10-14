@@ -65,6 +65,7 @@ internal static class MachineOutput
     /// </summary>
     public static void WriteStats(SearchOutcome outcome)
     {
+        Console.Out.Flush();
         var culture = System.Globalization.CultureInfo.InvariantCulture;
         Console.Error.WriteLine("files searched: " + outcome.FilesSearched.ToString(culture));
         Console.Error.WriteLine("files matched: " + outcome.FilesMatched.ToString(culture));
