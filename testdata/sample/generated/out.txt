@@ -1,1 +1,1 @@
-hidden netgrep-bin
+hidden ngrep-bin

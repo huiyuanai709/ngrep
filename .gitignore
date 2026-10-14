@@ -1,5 +1,6 @@
 bin/
 obj/
+.ngrep/
 .netgrep/
 TestResults/
 *.user

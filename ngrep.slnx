@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/Ngrep/Ngrep.csproj" />
+  <Project Path="tests/Ngrep.Tests/Ngrep.Tests.csproj" />
+</Solution>
