@@ -17,11 +17,11 @@ public class ParityTests
         File.WriteAllText(tree.File("empty.txt"), "");
 
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-l", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-l", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("a.txt", capture.Stdout.Trim());
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-l", "--format", "json", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-l", "--format", "json", "-j", "1"]).GetAwaiter().GetResult());
         using (var doc = JsonDocument.Parse(capture.Stdout))
         {
             var paths = doc.RootElement.GetProperty("paths").EnumerateArray().Select(item => item.GetString()).ToArray();
@@ -29,7 +29,7 @@ public class ParityTests
         }
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--files-with-matches", "--format", "ndjson", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--files-with-matches", "--format", "ndjson", "-j", "1"]).GetAwaiter().GetResult());
         using (var doc = JsonDocument.Parse(capture.Stdout.Trim()))
         {
             Assert.Equal("a.txt", doc.RootElement.GetProperty("path").GetString());
@@ -37,7 +37,7 @@ public class ParityTests
         }
 
         capture.Clear();
-        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["missing", tree.Root, "-l", "-j", "1"]));
+        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["missing", tree.Root, "-l", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("", capture.Stdout.Trim());
     }
 
@@ -58,14 +58,14 @@ public class ParityTests
             Path = tree.Root,
             Report = ReportMode.FilesWithoutMatch,
             MaxDegreeOfParallelism = 1,
-        });
+        }).GetAwaiter().GetResult();
         var parallel = Searcher.Search(new SearchQuery
         {
             Pattern = "netgrep",
             Path = tree.Root,
             Report = ReportMode.FilesWithoutMatch,
             MaxDegreeOfParallelism = 4,
-        });
+        }).GetAwaiter().GetResult();
         Assert.True(indexed.UsedIndex);
         Assert.True(indexed.UsedTrigramPrefilter);
         Assert.Equal(["empty.txt", "miss.txt"], indexed.FilesWithoutMatch);
@@ -73,11 +73,11 @@ public class ParityTests
         Assert.Empty(indexed.Matches);
 
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--files-without-match", "netgrep", tree.Root, "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--files-without-match", "netgrep", tree.Root, "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("empty.txt\nmiss.txt", capture.Stdout.Trim().Replace("\r\n", "\n", StringComparison.Ordinal));
 
         capture.Clear();
-        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["--files-without-match", "netgrep", Path.Combine(tree.Root, "hit.txt"), "-j", "1"]));
+        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["--files-without-match", "netgrep", Path.Combine(tree.Root, "hit.txt"), "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("", capture.Stdout.Trim());
     }
 
@@ -90,20 +90,20 @@ public class ParityTests
         File.WriteAllText(tree.File("empty.txt"), "");
 
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-v", "-l", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-v", "-l", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("mixed.txt", capture.Stdout.Trim());
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-v", "--files-without-match", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-v", "--files-without-match", "-j", "1"]).GetAwaiter().GetResult());
         var without = capture.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         Assert.Equal(["all.txt", "empty.txt"], without.OrderBy(path => path, StringComparer.Ordinal).ToArray());
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-v", "-c", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-v", "-c", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("mixed.txt:1", capture.Stdout.Trim());
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", Path.Combine(tree.Root, "mixed.txt"), "-c", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", Path.Combine(tree.Root, "mixed.txt"), "-c", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("mixed.txt:1", capture.Stdout.Trim());
     }
 
@@ -115,11 +115,11 @@ public class ParityTests
         File.WriteAllText(tree.File("b.txt"), "nope\n");
 
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-c", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-c", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("a.txt:2", capture.Stdout.Trim());
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-c", "--format", "ndjson", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-c", "--format", "ndjson", "-j", "1"]).GetAwaiter().GetResult());
         using (var doc = JsonDocument.Parse(capture.Stdout.Trim()))
         {
             Assert.Equal("a.txt", doc.RootElement.GetProperty("path").GetString());
@@ -127,7 +127,7 @@ public class ParityTests
         }
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-c", "--format", "json", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-c", "--format", "json", "-j", "1"]).GetAwaiter().GetResult());
         using (var doc = JsonDocument.Parse(capture.Stdout))
         {
             var counts = doc.RootElement.GetProperty("counts");
@@ -136,20 +136,20 @@ public class ParityTests
         }
 
         capture.Clear();
-        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["missing", tree.Root, "-c", "--format", "json", "-j", "1"]));
+        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["missing", tree.Root, "-c", "--format", "json", "-j", "1"]).GetAwaiter().GetResult());
         using (var empty = JsonDocument.Parse(capture.Stdout))
         {
             Assert.Equal(0, empty.RootElement.GetProperty("counts").GetArrayLength());
         }
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-o", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-o", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal(
             "a.txt:1:1:netgrep\na.txt:1:9:netgrep\na.txt:3:1:netgrep",
             capture.Stdout.Trim().Replace("\r\n", "\n", StringComparison.Ordinal));
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-o", "--format", "ndjson", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-o", "--format", "ndjson", "-j", "1"]).GetAwaiter().GetResult());
         var lines = capture.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries);
         Assert.Equal(3, lines.Length);
         using var first = JsonDocument.Parse(lines[0]);
@@ -166,11 +166,11 @@ public class ParityTests
         using var tree = Temp();
         File.WriteAllText(tree.File("a.txt"), "netgrep\n");
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["netgrep", tree.Root, "-l", "-c"]));
+        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["netgrep", tree.Root, "-l", "-c"]).GetAwaiter().GetResult());
         Assert.Contains("mutually exclusive", capture.Stderr, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["netgrep", tree.Root, "-l", "--files-without-match"]));
+        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["netgrep", tree.Root, "-l", "--files-without-match"]).GetAwaiter().GetResult());
         Assert.Contains("mutually exclusive", capture.Stderr, StringComparison.Ordinal);
     }
 
@@ -187,11 +187,11 @@ public class ParityTests
         Indexing.Indexer.Build(tree.Root);
 
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-l", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-l", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("visible.txt", capture.Stdout.Trim());
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--hidden", "-l", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--hidden", "-l", "-j", "1"]).GetAwaiter().GetResult());
         var hidden = capture.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         Assert.Equal([".hidden/.inner", ".hidden/note.txt", ".secret", "visible.txt"], hidden.OrderBy(path => path, StringComparer.Ordinal).ToArray());
         Assert.DoesNotContain(hidden, path => path.StartsWith(".git", StringComparison.Ordinal) || path.Contains("/.git", StringComparison.Ordinal));
@@ -203,28 +203,28 @@ public class ParityTests
             Path = tree.Root,
             IncludeHidden = true,
             MaxDegreeOfParallelism = 1,
-        });
+        }).GetAwaiter().GetResult();
         Assert.True(indexed.UsedIndex);
         Assert.Contains(indexed.Matches, match => match.Path == ".secret");
 
         capture.Clear();
-        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["netgrep", tree.Root, "-g", ".secret", "-l", "-j", "1"]));
+        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["netgrep", tree.Root, "-g", ".secret", "-l", "-j", "1"]).GetAwaiter().GetResult());
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--hidden", "-g", ".secret", "-l", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--hidden", "-g", ".secret", "-l", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal(".secret", capture.Stdout.Trim());
 
         capture.Clear();
         var named = Path.Combine(tree.Root, ".secret");
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", named, "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", named, "-j", "1"]).GetAwaiter().GetResult());
         Assert.Contains(".secret:1:", capture.Stdout, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", Path.Combine(tree.Root, ".hidden"), "-l", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", Path.Combine(tree.Root, ".hidden"), "-l", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal(".hidden/note.txt", capture.Stdout.Trim());
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--no-ignore", "-l", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--no-ignore", "-l", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("visible.txt", capture.Stdout.Trim());
     }
 
@@ -237,9 +237,9 @@ public class ParityTests
         File.WriteAllText(tree.File("visible.txt"), "other\n");
 
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["netgrep", tree.Root, "--hidden", "-j", "1"]));
+        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["netgrep", tree.Root, "--hidden", "-j", "1"]).GetAwaiter().GetResult());
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--hidden", "--no-ignore", "-l", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--hidden", "--no-ignore", "-l", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal(".secret", capture.Stdout.Trim());
     }
 
@@ -250,19 +250,19 @@ public class ParityTests
         File.WriteAllText(tree.File("a.txt"), "beta netgrep gamma\n");
 
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--color", "never", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--color", "never", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("a.txt:1:6:beta netgrep gamma", capture.Stdout.Trim());
         Assert.DoesNotContain("\u001b", capture.Stdout, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--color=always", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--color=always", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Contains("\u001b[35ma.txt\u001b[0m", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("\u001b[32m1\u001b[0m", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("\u001b[34m6\u001b[0m", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("beta \u001b[1;31mnetgrep\u001b[0m gamma", capture.Stdout, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--color=always", "--format", "ndjson", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--color=always", "--format", "ndjson", "-j", "1"]).GetAwaiter().GetResult());
         Assert.DoesNotContain("\u001b", capture.Stdout, StringComparison.Ordinal);
         using (var doc = JsonDocument.Parse(capture.Stdout.Trim()))
         {
@@ -270,11 +270,11 @@ public class ParityTests
         }
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--color", "always", "-l", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--color", "always", "-l", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Contains("\u001b[35ma.txt\u001b[0m", capture.Stdout, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["netgrep", tree.Root, "--color", "sometimes"]));
+        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["netgrep", tree.Root, "--color", "sometimes"]).GetAwaiter().GetResult());
         Assert.Contains("auto, always, or never", capture.Stderr, StringComparison.Ordinal);
 
         var previous = Environment.GetEnvironmentVariable("NO_COLOR");
@@ -318,18 +318,18 @@ public class ParityTests
         Assert.True(dot.CrossesLines);
 
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["--regex", "foo\nbar", tree.Root, "-j", "1"]));
+        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["--regex", "foo\nbar", tree.Root, "-j", "1"]).GetAwaiter().GetResult());
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--regex", "-U", "foo\nbar", tree.Root, "-o", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--regex", "-U", "foo\nbar", tree.Root, "-o", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Contains("span.txt:1:1:foo\nbar", capture.Stdout, StringComparison.Ordinal);
         Assert.DoesNotContain("nope", capture.Stdout, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["--regex", "-U", "foo.bar", tree.Root, "-j", "1"]));
+        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["--regex", "-U", "foo.bar", tree.Root, "-j", "1"]).GetAwaiter().GetResult());
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--regex", "--multiline-dotall", "foo.bar", tree.Root, "--format", "ndjson", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--regex", "--multiline-dotall", "foo.bar", tree.Root, "--format", "ndjson", "-j", "1"]).GetAwaiter().GetResult());
         using (var doc = JsonDocument.Parse(capture.Stdout.Trim()))
         {
             Assert.Equal("span.txt", doc.RootElement.GetProperty("path").GetString());
@@ -340,20 +340,20 @@ public class ParityTests
         }
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--regex", "^bar$", tree.Root, "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--regex", "^bar$", tree.Root, "-j", "1"]).GetAwaiter().GetResult());
         var anchored = capture.Stdout.Trim().Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("lines.txt:2:1:bar", anchored, StringComparison.Ordinal);
         Assert.Contains("span.txt:2:1:bar", anchored, StringComparison.Ordinal);
         Assert.DoesNotContain("alpha", anchored, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--regex", "-U", "-v", "foo\nbar", Path.Combine(tree.Root, "span.txt"), "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--regex", "-U", "-v", "foo\nbar", Path.Combine(tree.Root, "span.txt"), "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("span.txt:3:1:nope", capture.Stdout.Trim());
 
         capture.Clear();
-        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["--regex", "(?s)foo.bar", tree.Root, "-j", "1"]));
+        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["--regex", "(?s)foo.bar", tree.Root, "-j", "1"]).GetAwaiter().GetResult());
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--regex", "-U", "(?s)foo.bar", tree.Root, "-l", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--regex", "-U", "(?s)foo.bar", tree.Root, "-l", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("span.txt", capture.Stdout.Trim());
     }
 
@@ -364,7 +364,7 @@ public class ParityTests
         File.WriteAllText(tree.File("a.txt"), "beta netgrep gamma\n");
 
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--format", "rgjson", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--format", "rgjson", "-j", "1"]).GetAwaiter().GetResult());
         var events = capture.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)
             .Select(line => JsonDocument.Parse(line).RootElement)
             .ToArray();
@@ -384,7 +384,7 @@ public class ParityTests
         Assert.DoesNotContain("\u001b", capture.Stdout, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["missing", tree.Root, "--format", "rgjson", "-j", "1"]));
+        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["missing", tree.Root, "--format", "rgjson", "-j", "1"]).GetAwaiter().GetResult());
         using (var summary = JsonDocument.Parse(capture.Stdout.Trim()))
         {
             Assert.Equal("summary", summary.RootElement.GetProperty("type").GetString());
@@ -392,7 +392,7 @@ public class ParityTests
         }
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--format", "json", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--format", "json", "-j", "1"]).GetAwaiter().GetResult());
         using (var doc = JsonDocument.Parse(capture.Stdout))
         {
             var hit = doc.RootElement.GetProperty("matches")[0];
@@ -403,7 +403,7 @@ public class ParityTests
         }
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["index", tree.Root, "--format", "rgjson"]));
+        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["index", tree.Root, "--format", "rgjson"]).GetAwaiter().GetResult());
         Assert.Contains("only supported for search", capture.Stderr, StringComparison.Ordinal);
     }
 
@@ -426,32 +426,32 @@ public class ParityTests
         try
         {
             using var capture = new Capture();
-            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-e", "alpha", "-f", pats, tree.Root, "-j", "1"]));
+            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-e", "alpha", "-f", pats, tree.Root, "-j", "1"]).GetAwaiter().GetResult());
             var lines = capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim();
             Assert.Equal("a.txt:1:1:alpha\nb.txt:1:1:#hash\nc.txt:1:1:netgrep\nd.txt:1:2:\\#hash", lines);
 
             capture.Clear();
-            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["alpha", "-f", pats, tree.Root, "-l", "-j", "1"]));
+            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["alpha", "-f", pats, tree.Root, "-l", "-j", "1"]).GetAwaiter().GetResult());
             Assert.Equal("a.txt\nb.txt\nc.txt\nd.txt", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
 
             capture.Clear();
             File.WriteAllText(pats, "\\#hash\n");
-            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-f", pats, tree.Root, "-j", "1"]));
+            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-f", pats, tree.Root, "-j", "1"]).GetAwaiter().GetResult());
             Assert.Equal("d.txt:1:1:\\#hash", capture.Stdout.Trim());
 
             capture.Clear();
-            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-f", pats, "--regex", tree.Root, "-l", "-j", "1"]));
+            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-f", pats, "--regex", tree.Root, "-l", "-j", "1"]).GetAwaiter().GetResult());
             Assert.Equal("b.txt\nd.txt", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
 
             capture.Clear();
             File.WriteAllText(pats, "\n");
-            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-f", pats, tree.Root, "-j", "1"]));
+            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-f", pats, tree.Root, "-j", "1"]).GetAwaiter().GetResult());
             Assert.Equal(
                 "a.txt:1:1:alpha\nb.txt:1:1:#hash\nc.txt:1:1:netgrep\nd.txt:1:1:\\#hash",
                 capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
 
             capture.Clear();
-            Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["-f", pats, tree.Root, "-v", "-l", "-j", "1"]));
+            Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["-f", pats, tree.Root, "-v", "-l", "-j", "1"]).GetAwaiter().GetResult());
             Assert.Equal("", capture.Stdout.Trim());
 
             capture.Clear();
@@ -459,7 +459,7 @@ public class ParityTests
             Console.SetIn(new StringReader("netgrep\n#hash\n"));
             try
             {
-                Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-f", "-", tree.Root, "-l", "-j", "1"]));
+                Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-f", "-", tree.Root, "-l", "-j", "1"]).GetAwaiter().GetResult());
             }
             finally
             {
@@ -469,22 +469,22 @@ public class ParityTests
             Assert.Equal("b.txt\nc.txt\nd.txt", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
 
             capture.Clear();
-            Assert.Equal(ExitCodes.Error, NgrepCli.Run(["-f", tree.File("missing.txt"), tree.Root]));
+            Assert.Equal(ExitCodes.Error, NgrepCli.Run(["-f", tree.File("missing.txt"), tree.Root]).GetAwaiter().GetResult());
             Assert.Contains("Pattern file not found", capture.Stderr, StringComparison.Ordinal);
 
             capture.Clear();
             File.WriteAllText(pats, "");
-            Assert.Equal(ExitCodes.Error, NgrepCli.Run(["-f", pats, tree.Root]));
+            Assert.Equal(ExitCodes.Error, NgrepCli.Run(["-f", pats, tree.Root]).GetAwaiter().GetResult());
             Assert.Contains("Pattern file contains no patterns", capture.Stderr, StringComparison.Ordinal);
 
             capture.Clear();
             File.WriteAllText(pats, "# only\n");
-            Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["-f", pats, tree.Root, "-j", "1"]));
+            Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["-f", pats, tree.Root, "-j", "1"]).GetAwaiter().GetResult());
             Assert.Equal("", capture.Stdout.Trim());
 
             capture.Clear();
             File.WriteAllText(pats, "n.t\n");
-            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-f", pats, "--regex", tree.Root, "-l", "-j", "1"]));
+            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-f", pats, "--regex", tree.Root, "-l", "-j", "1"]).GetAwaiter().GetResult());
             Assert.Equal("c.txt", capture.Stdout.Trim());
         }
         finally
@@ -501,27 +501,27 @@ public class ParityTests
         File.WriteAllText(tree.File("b.txt"), "netgrep\n");
 
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("a.txt:1:1:netgrep\nb.txt:1:1:netgrep\n", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--heading", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--heading", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("a.txt\n1:1:netgrep\n\nb.txt\n1:1:netgrep\n", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--heading", "--no-heading", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--heading", "--no-heading", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("a.txt:1:1:netgrep\nb.txt:1:1:netgrep\n", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", Path.Combine(tree.Root, "a.txt"), "--heading", "-A", "1", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", Path.Combine(tree.Root, "a.txt"), "--heading", "-A", "1", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("a.txt\n1:1:netgrep\n2-next\n", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--heading", "-o", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--heading", "-o", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("a.txt\n1:1:netgrep\n\nb.txt\n1:1:netgrep\n", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--heading", "--format", "json", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--heading", "--format", "json", "-j", "1"]).GetAwaiter().GetResult());
         using (var doc = JsonDocument.Parse(capture.Stdout))
         {
             var hit = doc.RootElement.GetProperty("matches")[0];
@@ -542,7 +542,7 @@ public class ParityTests
         File.WriteAllText(tree.File("b.txt"), "zzzzzz\n");
 
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--stats", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--stats", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal(
             "a.txt:1:1:netgrep netgrep\na.txt:1:9:netgrep netgrep\n",
             capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
@@ -554,13 +554,13 @@ public class ParityTests
         Assert.DoesNotContain("files searched", capture.Stdout, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-l", "--stats", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-l", "--stats", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("a.txt", capture.Stdout.Trim());
         Assert.Contains("matches: 2", capture.Stderr, StringComparison.Ordinal);
         Assert.Contains("lines matched: 1", capture.Stderr, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["missing", tree.Root, "--stats", "--format", "ndjson", "-j", "1"]));
+        Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["missing", tree.Root, "--stats", "--format", "ndjson", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("", capture.Stdout.Trim());
         Assert.Contains("files searched: 2", capture.Stderr, StringComparison.Ordinal);
         Assert.Contains("files matched: 0", capture.Stderr, StringComparison.Ordinal);
@@ -574,14 +574,14 @@ public class ParityTests
         File.WriteAllText(tree.File("a.txt"), "before\nnetgrep\nafter\n");
 
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--format", "rgjson", "-C", "1", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--format", "rgjson", "-C", "1", "-j", "1"]).GetAwaiter().GetResult());
         var events = capture.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)
             .Select(line => JsonDocument.Parse(line).RootElement.GetProperty("type").GetString())
             .ToArray();
         Assert.Equal(new[] { "begin", "context", "match", "context", "end", "summary" }, events);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--format", "ndjson", "-C", "1", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--format", "ndjson", "-C", "1", "-j", "1"]).GetAwaiter().GetResult());
         using var doc = JsonDocument.Parse(capture.Stdout.Trim());
         Assert.Equal("netgrep", doc.RootElement.GetProperty("text").GetString());
         Assert.Equal("before", doc.RootElement.GetProperty("before")[0].GetProperty("text").GetString());

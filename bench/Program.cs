@@ -24,14 +24,14 @@ try
     WriteLarge(largeRoot, largeCount, largeBytes);
 
     ScannerThroughput();
-    var miss = Time(root, "unlikely-token-zz", regex: false);
-    var confirm = Time(root, "NEEDLE", regex: false);
-    var regex = Time(root, "NEEDLE[0-9]", regex: true);
-    var listed = Time(largeRoot, "EARLY", regex: false, filesWithMatches: true);
-    var largeMiss = Time(largeRoot, "unlikely-token-zz", regex: false);
-    var largeConfirm = Time(largeRoot, "NEEDLE", regex: false);
-    var largeRegex = Time(largeRoot, "NEEDLE[0-9]", regex: true);
-    var classMiss = Time(largeRoot, "[abc]{8}", regex: true);
+    var miss = await Time(root, "unlikely-token-zz", regex: false);
+    var confirm = await Time(root, "NEEDLE", regex: false);
+    var regex = await Time(root, "NEEDLE[0-9]", regex: true);
+    var listed = await Time(largeRoot, "EARLY", regex: false, filesWithMatches: true);
+    var largeMiss = await Time(largeRoot, "unlikely-token-zz", regex: false);
+    var largeConfirm = await Time(largeRoot, "NEEDLE", regex: false);
+    var largeRegex = await Time(largeRoot, "NEEDLE[0-9]", regex: true);
+    var classMiss = await Time(largeRoot, "[abc]{8}", regex: true);
 
     Console.WriteLine("measure=in-process paired=yes");
     Console.WriteLine($"small_files={files} bytes_each={smallBytes} total_mib={files * (long)smallBytes / (1024 * 1024)}");
@@ -81,10 +81,10 @@ try
     }
 
     var tinyFiles = WriteTiny(tiny, dirs: 40, sub: 20, perDir: 15);
-    var tinyMiss = TimeTiny(tiny, "unlikely-token-zz", ignore: true, quiet: false, list: false);
-    var tinyNoIgnore = TimeTiny(tiny, "unlikely-token-zz", ignore: false, quiet: false, list: false);
-    var tinyQuiet = TimeTiny(tiny, "NEEDLE", ignore: true, quiet: true, list: false);
-    var tinyList = TimeTiny(tiny, "token", ignore: true, quiet: false, list: true);
+    var tinyMiss = await TimeTiny(tiny, "unlikely-token-zz", ignore: true, quiet: false, list: false);
+    var tinyNoIgnore = await TimeTiny(tiny, "unlikely-token-zz", ignore: false, quiet: false, list: false);
+    var tinyQuiet = await TimeTiny(tiny, "NEEDLE", ignore: true, quiet: true, list: false);
+    var tinyList = await TimeTiny(tiny, "token", ignore: true, quiet: false, list: true);
     var walkMs = TimeWalk(tiny, gitignore: true);
     Console.WriteLine($"tiny_files={tinyFiles} tiny_root={tiny}");
     Print("tiny_ignore_miss", tinyMiss);
@@ -116,9 +116,18 @@ static void WriteSmall(string root, int files, int bytesEach)
 {
     var line = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx const token = 1;\n"u8;
     var body = new byte[bytesEach];
-    for (var offset = 0; offset + line.Length <= body.Length; offset += line.Length)
+    var filled = 0;
+    while (filled + line.Length <= body.Length)
     {
-        line.CopyTo(body.AsSpan(offset));
+        line.CopyTo(body.AsSpan(filled));
+        filled += line.Length;
+    }
+
+    // A zero tail is a NUL. ngrep only probes the first 8 KiB, so it would still
+    // search the file, while rg skips it as binary. Fill the remainder with text.
+    if (filled < body.Length)
+    {
+        body.AsSpan(filled).Fill((byte)'x');
     }
 
     for (var i = 0; i < files; i++)
@@ -215,12 +224,12 @@ static void WriteLarge(string root, int count, int bytesEach)
     }
 }
 
-static (double Ms, int Files, int Matches) Time(string root, string pattern, bool regex, bool filesWithMatches = false)
+static async Task<(double Ms, int Files, int Matches)> Time(string root, string pattern, bool regex, bool filesWithMatches = false)
 {
     var query = Query(root, pattern, regex, filesWithMatches);
-    Searcher.Search(query);
+    await Searcher.Search(query);
     var clock = Stopwatch.StartNew();
-    var outcome = Searcher.Search(query);
+    var outcome = await Searcher.Search(query);
     clock.Stop();
     return (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.Matches.Count);
 }
@@ -372,12 +381,12 @@ static int WriteTiny(string root, int dirs, int sub, int perDir)
     return n;
 }
 
-static (double Ms, int Files, int Matches) TimeTiny(string root, string pattern, bool ignore, bool quiet, bool list)
+static async Task<(double Ms, int Files, int Matches)> TimeTiny(string root, string pattern, bool ignore, bool quiet, bool list)
 {
     var query = TinyQuery(root, pattern, ignore, quiet, list);
-    Searcher.Search(query);
+    await Searcher.Search(query);
     var clock = Stopwatch.StartNew();
-    var outcome = Searcher.Search(query);
+    var outcome = await Searcher.Search(query);
     clock.Stop();
     return (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.Matches.Count);
 }

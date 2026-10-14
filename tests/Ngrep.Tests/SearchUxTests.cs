@@ -23,20 +23,20 @@ public class SearchUxTests
             Pattern = "netgrep",
             Path = tree.Root,
             MaxDegreeOfParallelism = 1,
-        });
+        }).GetAwaiter().GetResult();
         var parallel = Searcher.Search(new SearchQuery
         {
             Pattern = "netgrep",
             Path = tree.Root,
             MaxDegreeOfParallelism = 4,
-        });
+        }).GetAwaiter().GetResult();
         var scan = Searcher.Search(new SearchQuery
         {
             Pattern = "netgrep",
             Path = tree.Root,
             ForceScan = true,
             MaxDegreeOfParallelism = 4,
-        });
+        }).GetAwaiter().GetResult();
 
         Assert.Equal("sequential", sequential.Confirmation);
         Assert.Equal(1, sequential.Workers);
@@ -54,14 +54,59 @@ public class SearchUxTests
     }
 
     [Fact]
-    public void Scheduler_runs_workers_concurrently_and_honors_cancellation()
+    public void Scan_workers_agree_including_a_mapped_file()
+    {
+        using var tree = Temp();
+        File.WriteAllText(tree.File("a.txt"), "nope\nNEEDLE\n");
+        File.WriteAllText(tree.File("sub/b.txt"), "NEEDLE9\n");
+        File.WriteAllText(tree.File("sub/big.txt"), new string('x', 300 * 1024) + "\nNEEDLE\n");
+
+        static string[] Keys(SearchOutcome outcome) =>
+            outcome.Matches
+                .Select(m => $"{m.Path}:{m.Line}:{m.Column}:{m.Text}")
+                .OrderBy(s => s, StringComparer.Ordinal)
+                .ToArray();
+
+        void Same(string pattern, bool regex, bool list)
+        {
+            SearchOutcome Run(int workers) => Searcher.Search(new SearchQuery
+            {
+                Pattern = pattern,
+                Path = tree.Root,
+                Regex = regex,
+                ForceScan = true,
+                NoIgnore = true,
+                IncludeHidden = true,
+                Report = list ? ReportMode.FilesWithMatches : ReportMode.Matches,
+                MaxDegreeOfParallelism = workers,
+            }).GetAwaiter().GetResult();
+
+            var one = Run(1);
+            var many = Run(4);
+            Assert.Equal("sequential", one.Confirmation);
+            Assert.Equal("parallel", many.Confirmation);
+            Assert.Equal(Keys(one), Keys(many));
+            Assert.Equal(one.FilesSearched, many.FilesSearched);
+        }
+
+        Same("NEEDLE", regex: false, list: false);
+        Same("NEEDLE[0-9]", regex: true, list: false);
+        Same("NEEDLE", regex: false, list: true);
+
+        using var capture = new Capture();
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--scan", "--no-ignore", "--hidden", "-E", "NEEDLE[0-9]", tree.Root, "-j", "2"]).GetAwaiter().GetResult());
+        Assert.Contains("NEEDLE9", capture.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Scheduler_runs_workers_concurrently_and_honors_cancellation()
     {
         var files = Enumerable.Range(0, 8)
             .Select(i => new ConfirmFile(i.ToString(), i.ToString()))
             .ToArray();
         var release = new ManualResetEventSlim(false);
         var entered = 0;
-        ConfirmScheduler.Run(files, 4, CancellationToken.None, (_, _) =>
+        await AsyncScheduler.Run(files, 4, CancellationToken.None, (_, _, _) =>
         {
             var n = Interlocked.Increment(ref entered);
             if (n == 4)
@@ -73,12 +118,14 @@ public class SearchUxTests
             {
                 throw new TimeoutException("workers did not run concurrently");
             }
+
+            return ValueTask.CompletedTask;
         }, stopOnMatch: false);
         Assert.True(entered >= 4);
 
         using var canceled = new CancellationTokenSource();
         canceled.Cancel();
-        Assert.Throws<OperationCanceledException>(() => Searcher.Search(new SearchQuery
+        await Assert.ThrowsAsync<OperationCanceledException>(() => Searcher.Search(new SearchQuery
         {
             Pattern = "netgrep",
             Path = ".",
@@ -95,7 +142,7 @@ public class SearchUxTests
         File.WriteAllText(tree.File("notes.txt"), "nothing\n");
 
         using var capture = new Capture();
-        var scanned = NgrepCli.Run(["netgrep", tree.Root, "--format", "ndjson", "-j", "1"]);
+        var scanned = NgrepCli.Run(["netgrep", tree.Root, "--format", "ndjson", "-j", "1"]).GetAwaiter().GetResult();
         Assert.Equal(ExitCodes.Success, scanned);
         Assert.Contains("no index found", capture.Stderr, StringComparison.Ordinal);
         using (var doc = JsonDocument.Parse(capture.Stdout.Trim()))
@@ -106,9 +153,9 @@ public class SearchUxTests
         }
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["index", tree.Root, "--format", "json"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["index", tree.Root, "--format", "json"]).GetAwaiter().GetResult());
         capture.Clear();
-        var indexed = NgrepCli.Run(["netgrep", tree.Root, "--format", "ndjson", "-j", "1"]);
+        var indexed = NgrepCli.Run(["netgrep", tree.Root, "--format", "ndjson", "-j", "1"]).GetAwaiter().GetResult();
         Assert.Equal(ExitCodes.Success, indexed);
         Assert.Equal("", capture.Stderr.Trim());
         using (var doc = JsonDocument.Parse(capture.Stdout.Trim()))
@@ -119,7 +166,7 @@ public class SearchUxTests
         }
 
         capture.Clear();
-        var missing = NgrepCli.Run(["not-present", tree.Root, "-j", "1"]);
+        var missing = NgrepCli.Run(["not-present", tree.Root, "-j", "1"]).GetAwaiter().GetResult();
         Assert.Equal(ExitCodes.NoMatches, missing);
         Assert.Equal("", capture.Stdout.Trim());
     }
@@ -162,12 +209,12 @@ public class SearchUxTests
         Assert.Equal(["skip.log"], Paths(tree.Root, "--no-ignore-vcs", "-g", "*.log"));
 
         using var capture = new Capture();
-        var unknown = NgrepCli.Run(["netgrep", tree.Root, "-t", "nope"]);
+        var unknown = NgrepCli.Run(["netgrep", tree.Root, "-t", "nope"]).GetAwaiter().GetResult();
         Assert.Equal(ExitCodes.Error, unknown);
         Assert.Contains("Unknown file type", capture.Stderr, StringComparison.Ordinal);
 
         capture.Clear();
-        var list = NgrepCli.Run(["--type-list"]);
+        var list = NgrepCli.Run(["--type-list"]).GetAwaiter().GetResult();
         Assert.Equal(ExitCodes.Success, list);
         Assert.Contains("cs: *.cs, *.csx", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("\nrs: *.rs\n", capture.Stdout, StringComparison.Ordinal);
@@ -187,7 +234,7 @@ public class SearchUxTests
         File.WriteAllText(tree.File("App.cs"), "alpha\nbeta netgrep gamma\ndelta\ngap\nepsilon netgrep\nomega\n");
 
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-A", "1", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-A", "1", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal(
             """
             App.cs:2:6:beta netgrep gamma
@@ -199,7 +246,7 @@ public class SearchUxTests
             capture.Stdout.Trim().Replace("\r\n", "\n", StringComparison.Ordinal));
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-B", "1", "-C", "0", "--format", "ndjson", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-B", "1", "-C", "0", "--format", "ndjson", "-j", "1"]).GetAwaiter().GetResult());
         var lines = capture.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries);
         Assert.Equal(2, lines.Length);
         using var first = JsonDocument.Parse(lines[0]);
@@ -215,7 +262,7 @@ public class SearchUxTests
         Assert.Equal(0, first.RootElement.GetProperty("after").GetArrayLength());
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-C", "1", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-C", "1", "-j", "1"]).GetAwaiter().GetResult());
         var text = capture.Stdout.Trim().Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("App.cs-1-alpha\nApp.cs:2:6:beta netgrep gamma\nApp.cs-3-delta", text, StringComparison.Ordinal);
         Assert.Contains("App.cs-4-gap\nApp.cs:5:9:epsilon netgrep\nApp.cs-6-omega", text, StringComparison.Ordinal);
@@ -234,7 +281,7 @@ public class SearchUxTests
             Path = tree.Root,
             WordRegexp = true,
             MaxDegreeOfParallelism = 1,
-        });
+        }).GetAwaiter().GetResult();
         Assert.Equal([2, 3, 4], word.Matches.Select(m => m.Line).ToArray());
 
         var either = Searcher.Search(new SearchQuery
@@ -243,33 +290,33 @@ public class SearchUxTests
             AdditionalPatterns = ["netgrep"],
             Path = tree.Root,
             MaxDegreeOfParallelism = 1,
-        });
+        }).GetAwaiter().GetResult();
         Assert.Equal([1, 5], either.Matches.Select(m => m.Line).ToArray());
 
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-e", "alpha", "-e", "netgrep", tree.Root, "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-e", "alpha", "-e", "netgrep", tree.Root, "-j", "1"]).GetAwaiter().GetResult());
         Assert.Contains("a.txt:1:1:netgrep", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("a.txt:5:1:alpha", capture.Stdout, StringComparison.Ordinal);
         Assert.DoesNotContain("a.txt:2:", capture.Stdout, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", "-e", "alpha", tree.Root, "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", "-e", "alpha", tree.Root, "-j", "1"]).GetAwaiter().GetResult());
         Assert.Contains("a.txt:1:1:netgrep", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("a.txt:5:1:alpha", capture.Stdout, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-e", "alpha", tree.Root, "-v", "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-e", "alpha", tree.Root, "-v", "-j", "1"]).GetAwaiter().GetResult());
         Assert.DoesNotContain("alpha", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("a.txt:1:1:netgrep", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("a.txt:2:1:net", capture.Stdout, StringComparison.Ordinal);
 
         capture.Clear();
         File.WriteAllText(Path.Combine(tree.Root, "only.txt"), "netgrep\n");
-        var none = NgrepCli.Run(["netgrep", Path.Combine(tree.Root, "only.txt"), "-v", "-j", "1"]);
+        var none = NgrepCli.Run(["netgrep", Path.Combine(tree.Root, "only.txt"), "-v", "-j", "1"]).GetAwaiter().GetResult();
         Assert.Equal(ExitCodes.NoMatches, none);
 
         capture.Clear();
-        var regex = NgrepCli.Run(["-e", "n.t", "--regex", "-w", tree.Root, "-j", "1", "--format", "ndjson"]);
+        var regex = NgrepCli.Run(["-e", "n.t", "--regex", "-w", tree.Root, "-j", "1", "--format", "ndjson"]).GetAwaiter().GetResult();
         Assert.Equal(ExitCodes.Success, regex);
         var paths = capture.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)
             .Select(line => JsonDocument.Parse(line).RootElement)
@@ -283,13 +330,13 @@ public class SearchUxTests
     public void Search_help_lists_new_flags_and_subcommands_remain()
     {
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--help"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--help"]).GetAwaiter().GetResult());
         Assert.Contains("index", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("search", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("watch", capture.Stdout, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["search", "--help"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["search", "--help"]).GetAwaiter().GetResult());
         Assert.Contains("--glob", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--type-list", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--after-context", capture.Stdout, StringComparison.Ordinal);
@@ -318,6 +365,7 @@ public class SearchUxTests
         Assert.Contains("--silent", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--line-number", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--no-messages", capture.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("--async", capture.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -332,7 +380,7 @@ public class SearchUxTests
     private static string[] Paths(string root, params string[] args)
     {
         using var capture = new Capture();
-        var code = NgrepCli.Run(["netgrep", ..args, root, "-j", "1"]);
+        var code = NgrepCli.Run(["netgrep", ..args, root, "-j", "1"]).GetAwaiter().GetResult();
         Assert.True(code is ExitCodes.Success or ExitCodes.NoMatches, capture.Stderr);
         return capture.Stdout
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)

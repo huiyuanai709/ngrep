@@ -50,7 +50,7 @@ public class IndexSearchTests
         var doc = Assert.Single(loaded.Documents, d => d.Path == "src/App.cs");
         Assert.Equal(new[] { 0, 6, 25 }, doc.LineStarts);
 
-        var outcome = Searcher.Search(new SearchQuery { Pattern = "netgrep", Path = tree.Root });
+        var outcome = Searcher.Search(new SearchQuery { Pattern = "netgrep", Path = tree.Root }).GetAwaiter().GetResult();
         Assert.True(outcome.UsedIndex);
         var match = Assert.Single(outcome.Matches);
         Assert.Equal("src/App.cs", match.Path);
@@ -68,13 +68,13 @@ public class IndexSearchTests
         File.WriteAllText(tree.File("b.txt"), "abcxyz");
         Indexer.Build(tree.Root);
 
-        var both = Searcher.Search(new SearchQuery { Pattern = "abc", Path = tree.Root });
+        var both = Searcher.Search(new SearchQuery { Pattern = "abc", Path = tree.Root }).GetAwaiter().GetResult();
         Assert.Equal(2, both.Matches.Count);
 
-        var one = Searcher.Search(new SearchQuery { Pattern = "xyz", Path = tree.Root });
+        var one = Searcher.Search(new SearchQuery { Pattern = "xyz", Path = tree.Root }).GetAwaiter().GetResult();
         Assert.Equal("b.txt", Assert.Single(one.Matches).Path);
 
-        var none = Searcher.Search(new SearchQuery { Pattern = "abcxyzdef", Path = tree.Root });
+        var none = Searcher.Search(new SearchQuery { Pattern = "abcxyzdef", Path = tree.Root }).GetAwaiter().GetResult();
         Assert.Empty(none.Matches);
         Assert.True(none.UsedIndex);
     }
@@ -85,7 +85,7 @@ public class IndexSearchTests
         using var tree = new TempTree();
         File.WriteAllText(tree.File("a.txt"), "hi");
         Indexer.Build(tree.Root);
-        var outcome = Searcher.Search(new SearchQuery { Pattern = "hi", Path = tree.Root });
+        var outcome = Searcher.Search(new SearchQuery { Pattern = "hi", Path = tree.Root }).GetAwaiter().GetResult();
         Assert.True(outcome.UsedIndex);
         Assert.Equal(1, Assert.Single(outcome.Matches).Column);
     }
@@ -97,13 +97,13 @@ public class IndexSearchTests
         File.WriteAllText(tree.File("a.txt"), "NetGrep");
         Indexer.Build(tree.Root);
 
-        var sensitive = Searcher.Search(new SearchQuery { Pattern = "netgrep", Path = tree.Root });
+        var sensitive = Searcher.Search(new SearchQuery { Pattern = "netgrep", Path = tree.Root }).GetAwaiter().GetResult();
         Assert.Empty(sensitive.Matches);
 
-        var folded = Searcher.Search(new SearchQuery { Pattern = "netgrep", Path = tree.Root, IgnoreCase = true });
+        var folded = Searcher.Search(new SearchQuery { Pattern = "netgrep", Path = tree.Root, IgnoreCase = true }).GetAwaiter().GetResult();
         Assert.Equal("NetGrep", Assert.Single(folded.Matches).Text);
 
-        var exact = Searcher.Search(new SearchQuery { Pattern = "NetGrep", Path = tree.Root });
+        var exact = Searcher.Search(new SearchQuery { Pattern = "NetGrep", Path = tree.Root }).GetAwaiter().GetResult();
         Assert.Single(exact.Matches);
     }
 
@@ -113,7 +113,7 @@ public class IndexSearchTests
         using var tree = new TempTree();
         File.WriteAllText(tree.File("a.txt"), "netgrep");
         Indexer.Build(tree.Root);
-        var outcome = Searcher.Search(new SearchQuery { Pattern = "n.tgrep", Path = tree.Root, Regex = true });
+        var outcome = Searcher.Search(new SearchQuery { Pattern = "n.tgrep", Path = tree.Root, Regex = true }).GetAwaiter().GetResult();
         Assert.Equal("netgrep", Assert.Single(outcome.Matches).Text);
     }
 
@@ -134,11 +134,11 @@ public class IndexSearchTests
         Assert.Equal(1, built.SkippedBinary);
         Assert.True(built.SkippedIgnored >= 2);
 
-        var outcome = Searcher.Search(new SearchQuery { Pattern = "netgrep", Path = tree.Root });
+        var outcome = Searcher.Search(new SearchQuery { Pattern = "netgrep", Path = tree.Root }).GetAwaiter().GetResult();
         var paths = outcome.Matches.Select(m => m.Path).OrderBy(p => p, StringComparer.Ordinal).ToArray();
         Assert.Equal(new[] { "keep.txt", "nested/keep.tmp" }, paths);
-        Assert.Empty(Searcher.Search(new SearchQuery { Pattern = "netgrep-log", Path = tree.Root }).Matches);
-        Assert.Empty(Searcher.Search(new SearchQuery { Pattern = "netgrep-git", Path = tree.Root }).Matches);
+        Assert.Empty(Searcher.Search(new SearchQuery { Pattern = "netgrep-log", Path = tree.Root }).GetAwaiter().GetResult().Matches);
+        Assert.Empty(Searcher.Search(new SearchQuery { Pattern = "netgrep-git", Path = tree.Root }).GetAwaiter().GetResult().Matches);
     }
 
     [Fact]
@@ -158,13 +158,13 @@ public class IndexSearchTests
         File.WriteAllText(file, "alpha\nbeta netgrep gamma\nextra needle\n");
         var third = Indexer.Build(tree.Root);
         Assert.Equal(1, third.Updated);
-        Assert.Contains(Searcher.Search(new SearchQuery { Pattern = "needle", Path = tree.Root }).Matches, m => m.Line == 3);
+        Assert.Contains(Searcher.Search(new SearchQuery { Pattern = "needle", Path = tree.Root }).GetAwaiter().GetResult().Matches, m => m.Line == 3);
 
         File.Delete(file);
         var fourth = Indexer.Build(tree.Root);
         Assert.Equal(1, fourth.Removed);
         Assert.Equal(0, fourth.Documents);
-        Assert.Empty(Searcher.Search(new SearchQuery { Pattern = "needle", Path = tree.Root }).Matches);
+        Assert.Empty(Searcher.Search(new SearchQuery { Pattern = "needle", Path = tree.Root }).GetAwaiter().GetResult().Matches);
     }
 
     [Fact]
@@ -172,7 +172,7 @@ public class IndexSearchTests
     {
         using var tree = new TempTree();
         File.WriteAllText(tree.File("a.txt"), "netgrep");
-        var outcome = Searcher.Search(new SearchQuery { Pattern = "netgrep", Path = tree.Root });
+        var outcome = Searcher.Search(new SearchQuery { Pattern = "netgrep", Path = tree.Root }).GetAwaiter().GetResult();
         Assert.False(outcome.UsedIndex);
         Assert.NotNull(outcome.Note);
         Assert.Equal(1, Assert.Single(outcome.Matches).Line);
@@ -186,7 +186,7 @@ public class IndexSearchTests
         File.WriteAllText(tree.File("other.txt"), "netgrep");
         Indexer.Build(tree.Root);
 
-        var outcome = Searcher.Search(new SearchQuery { Pattern = "netgrep", Path = Path.Combine(tree.Root, "src") });
+        var outcome = Searcher.Search(new SearchQuery { Pattern = "netgrep", Path = Path.Combine(tree.Root, "src") }).GetAwaiter().GetResult();
         Assert.True(outcome.UsedIndex);
         Assert.Equal("src/App.cs", Assert.Single(outcome.Matches).Path);
     }

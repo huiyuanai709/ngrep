@@ -9,7 +9,7 @@ namespace Ngrep.Cli;
 
 internal static class NgrepCli
 {
-    public static int Run(string[] args)
+    public static async Task<int> Run(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
         try
@@ -26,7 +26,7 @@ internal static class NgrepCli
                 return ExitCodes.Error;
             }
 
-            return parsed.Invoke(new InvocationConfiguration
+            return await parsed.InvokeAsync(new InvocationConfiguration
             {
                 EnableDefaultExceptionHandler = false,
             });
@@ -270,9 +270,9 @@ internal static class NgrepCli
         searchCommand.Options.Add(heading);
         searchCommand.Options.Add(noHeading);
         searchCommand.Options.Add(stats);
-        searchCommand.SetAction(result =>
+        searchCommand.SetAction(async (result, cancellationToken) =>
         {
-            using var cts = new CancellationTokenSource();
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             void Cancel(object? _, ConsoleCancelEventArgs e)
             {
                 e.Cancel = true;
@@ -291,7 +291,7 @@ internal static class NgrepCli
 
             try
             {
-                return ExecuteSearch(
+                return await ExecuteSearch(
                     result,
                     format,
                     index,
@@ -379,7 +379,7 @@ internal static class NgrepCli
         return root;
     }
 
-    private static int ExecuteSearch(
+    private static async Task<int> ExecuteSearch(
         System.CommandLine.ParseResult result,
         Option<string> format,
         Option<string> index,
@@ -450,7 +450,7 @@ internal static class NgrepCli
         SearchOutcome outcome;
         try
         {
-            outcome = Searcher.Search(new SearchQuery
+            outcome = await Searcher.Search(new SearchQuery
             {
                 Pattern = patterns[0],
                 AdditionalPatterns = patterns.Count > 1 ? patterns[1..] : [],

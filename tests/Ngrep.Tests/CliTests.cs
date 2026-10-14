@@ -14,7 +14,7 @@ public class CliTests
         File.WriteAllText(Path.Combine(tree, "App.cs"), "alpha\nbeta netgrep gamma\n");
 
         using var capture = new Capture();
-        var indexed = NgrepCli.Run(["index", tree, "--format", "json"]);
+        var indexed = NgrepCli.Run(["index", tree, "--format", "json"]).GetAwaiter().GetResult();
         Assert.Equal(ExitCodes.Success, indexed);
         using (var indexDoc = JsonDocument.Parse(capture.Stdout))
         {
@@ -24,7 +24,7 @@ public class CliTests
         }
 
         capture.Clear();
-        var found = NgrepCli.Run(["search", "netgrep", tree, "--format", "ndjson"]);
+        var found = NgrepCli.Run(["search", "netgrep", tree, "--format", "ndjson"]).GetAwaiter().GetResult();
         Assert.Equal(ExitCodes.Success, found);
         var line = capture.Stdout.Trim();
         using (var match = JsonDocument.Parse(line))
@@ -36,16 +36,16 @@ public class CliTests
         }
 
         capture.Clear();
-        var missing = NgrepCli.Run(["search", "not-present", tree, "--format", "ndjson"]);
+        var missing = NgrepCli.Run(["search", "not-present", tree, "--format", "ndjson"]).GetAwaiter().GetResult();
         Assert.Equal(ExitCodes.NoMatches, missing);
         Assert.Equal("", capture.Stdout.Trim());
 
         capture.Clear();
-        var bad = NgrepCli.Run(["search", "(", tree, "--regex", "--format", "json"]);
+        var bad = NgrepCli.Run(["search", "(", tree, "--regex", "--format", "json"]).GetAwaiter().GetResult();
         Assert.Equal(ExitCodes.Error, bad);
 
         capture.Clear();
-        var usage = NgrepCli.Run(["index"]);
+        var usage = NgrepCli.Run(["index"]).GetAwaiter().GetResult();
         Assert.Equal(ExitCodes.Error, usage);
         Assert.Contains("Required", capture.Stderr, StringComparison.OrdinalIgnoreCase);
     }
@@ -54,7 +54,7 @@ public class CliTests
     public void Help_exits_zero()
     {
         using var capture = new Capture();
-        var code = NgrepCli.Run(["--help"]);
+        var code = NgrepCli.Run(["--help"]).GetAwaiter().GetResult();
         Assert.Equal(ExitCodes.Success, code);
         Assert.Contains("index", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("search", capture.Stdout, StringComparison.Ordinal);
@@ -69,9 +69,9 @@ public class CliTests
         try
         {
             using var capture = new Capture();
-            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["index", sample]));
+            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["index", sample]).GetAwaiter().GetResult());
             capture.Clear();
-            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["search", "ngrep", sample, "--format", "ndjson"]));
+            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["search", "ngrep", sample, "--format", "ndjson"]).GetAwaiter().GetResult());
             var paths = capture.Stdout
                 .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(line => JsonDocument.Parse(line).RootElement.GetProperty("path").GetString())
@@ -83,7 +83,7 @@ public class CliTests
             Assert.DoesNotContain(paths, path => path == "assets/icon.bin");
 
             capture.Clear();
-            var hidden = NgrepCli.Run(["search", "ngrep-log", sample, "--format", "ndjson"]);
+            var hidden = NgrepCli.Run(["search", "ngrep-log", sample, "--format", "ndjson"]).GetAwaiter().GetResult();
             Assert.Equal(ExitCodes.NoMatches, hidden);
         }
         finally
@@ -141,7 +141,7 @@ public class CliTests
 
     private static string[] SearcherHits(string root)
     {
-        var outcome = Search.Searcher.Search(new Search.SearchQuery { Pattern = "netgrep", Path = root });
+        var outcome = Search.Searcher.Search(new Search.SearchQuery { Pattern = "netgrep", Path = root }).GetAwaiter().GetResult();
         return outcome.Matches.Select(m => m.Path).ToArray();
     }
 

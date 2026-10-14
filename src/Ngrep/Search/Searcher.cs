@@ -136,7 +136,7 @@ internal sealed class SearchTally
 
 internal static class Searcher
 {
-    public static SearchOutcome Search(SearchQuery query)
+    public static async Task<SearchOutcome> Search(SearchQuery query)
     {
         query.CancellationToken.ThrowIfCancellationRequested();
         var clock = Stopwatch.StartNew();
@@ -159,7 +159,7 @@ internal static class Searcher
         {
             var explicitIndex = IndexStore.TryLoad(query.IndexDirectory)
                 ?? throw new InvalidDataException($"Index not found at {Path.GetFullPath(query.IndexDirectory)}.");
-            return SearchIndex(explicitIndex, start, query, plan, workers, tally, clock);
+            return await SearchIndex(explicitIndex, start, query, plan, workers, tally, clock);
         }
 
         if (!skipIndex)
@@ -170,13 +170,13 @@ internal static class Searcher
                 var index = IndexStore.TryLoad(discovered);
                 if (index != null)
                 {
-                    return SearchIndex(index, start, query, plan, workers, tally, clock);
+                    return await SearchIndex(index, start, query, plan, workers, tally, clock);
                 }
             }
         }
 
         var note = ScanNote(query, indexSkipped: skipIndex && !query.ForceScan && IndexWouldApply(start, query));
-        var scanned = ContentScan(start, plan, workers, query.CancellationToken, tally);
+        var scanned = await ContentScan(start, plan, workers, query.CancellationToken, tally);
         return Finish(scanned.Matches, usedIndex: false, note, scanned.Workers, usedPrefilter: false, scanned.Without, tally, clock);
     }
 
@@ -213,7 +213,7 @@ internal static class Searcher
         return Math.Max(1, Environment.ProcessorCount);
     }
 
-    private static SearchOutcome SearchIndex(IndexData index, string start, SearchQuery query, MatchPlan plan, int workers, SearchTally tally, Stopwatch clock)
+    private static async Task<SearchOutcome> SearchIndex(IndexData index, string start, SearchQuery query, MatchPlan plan, int workers, SearchTally tally, Stopwatch clock)
     {
         var root = index.Manifest.Root;
         if (!Directory.Exists(root))
@@ -224,7 +224,7 @@ internal static class Searcher
         var prefix = RelativeTo(root, start, out var outside, out var prefixIsFile);
         if (outside)
         {
-            var scanned = ContentScan(start, plan, workers, query.CancellationToken, tally);
+            var scanned = await ContentScan(start, plan, workers, query.CancellationToken, tally);
             return Finish(scanned.Matches, usedIndex: false, "path is outside the indexed root; scanned content", scanned.Workers, usedPrefilter: false, scanned.Without, tally, clock);
         }
 
@@ -276,12 +276,14 @@ internal static class Searcher
         }
 
         var degree = files.Count > 1 ? workers : 1;
-        var matches = ConfirmScheduler.Run(
+        var stopOnMatch = plan.Report == ReportMode.Quiet && plan.StopAtFirst;
+        var matches = await AsyncScheduler.Run(
             files,
             degree,
             query.CancellationToken,
-            (file, local) => TryCollect(file, plan, local, stats: null, without, tally, errorIfUnreadable: prefixIsFile),
-            stopOnMatch: plan.Report == ReportMode.Quiet && plan.StopAtFirst);
+            (file, local, token) => TryCollectAsync(file, plan, local, stats: null, without, tally, token, errorIfUnreadable: prefixIsFile),
+            stopOnMatch);
+
         return Finish(matches, usedIndex: true, note: null, degree, usedPrefilter, without, tally, clock);
     }
 
@@ -322,7 +324,7 @@ internal static class Searcher
         return "no index found; scanned content";
     }
 
-    private static (List<SearchMatch> Matches, int Workers, ConcurrentBag<string>? Without) ContentScan(
+    private static async Task<(List<SearchMatch> Matches, int Workers, ConcurrentBag<string>? Without)> ContentScan(
         string start,
         MatchPlan plan,
         int workers,
@@ -338,7 +340,7 @@ internal static class Searcher
             // includeHidden so a path the user named is not treated as skipped merely for being a dotfile.
             if ((!plan.ApplyGitIgnore || !IsIgnoredFile(parent, start)) && plan.Filter.Accepts(relative))
             {
-                TryCollect(new ConfirmFile(start, relative), plan, matches, stats: null, without, tally, errorIfUnreadable: true);
+                await TryCollectAsync(new ConfirmFile(start, relative), plan, matches, stats: null, without, tally, cancellation, errorIfUnreadable: true);
             }
 
             return (matches, 1, without);
@@ -346,7 +348,8 @@ internal static class Searcher
 
         var stats = new WalkStats();
         var degree = workers > 1 ? workers : 1;
-        var found = ConfirmScheduler.Scan(
+        var stopOnMatch = plan.Report == ReportMode.Quiet && plan.StopAtFirst;
+        var found = await AsyncScheduler.Scan(
             start,
             IndexPaths.DefaultFor(start),
             stats,
@@ -355,8 +358,9 @@ internal static class Searcher
             plan.Filter,
             degree,
             cancellation,
-            (file, local) => TryCollect(file, plan, local, stats, without, tally),
-            stopOnMatch: plan.Report == ReportMode.Quiet && plan.StopAtFirst);
+            (file, local, token) => TryCollectAsync(file, plan, local, stats, without, tally, token),
+            stopOnMatch);
+
         return (found, degree, without);
     }
 
@@ -367,88 +371,118 @@ internal static class Searcher
             string.Equals(file.FullPath, fullPath, StringComparison.Ordinal));
     }
 
-    private static void TryCollect(
+    private static async ValueTask TryCollectAsync(
         ConfirmFile file,
         MatchPlan plan,
         List<SearchMatch> matches,
         WalkStats? stats,
         ConcurrentBag<string>? filesWithoutMatch,
         SearchTally tally,
+        CancellationToken cancellation,
         bool errorIfUnreadable = false)
     {
-        var stop = ByteConfirm.Arm(plan);
-        string text;
+        var stop = ByteConfirm.ArmFresh(plan);
         try
         {
-        using (var read = stop == null ? TextFiles.Read(file.FullPath) : TextFiles.Read(file.FullPath, stop))
-        {
-            switch (read.Kind)
+            using var read = await TextFiles.ReadAsync(file.FullPath, stop, cancellation);
+            ByteConfirm.Adopt(stop);
+            if (MatchLoaded(read, file, plan, matches, stats, filesWithoutMatch, tally, errorIfUnreadable, out var text))
             {
-                case ReadKind.TooLarge:
-                    stats?.IncrementSkippedTooLarge();
-                    return;
-                case ReadKind.Binary:
-                    stats?.IncrementSkippedBinary();
-                    return;
-                case ReadKind.Unreadable:
-                    stats?.IncrementSkippedUnreadable();
-                    if (errorIfUnreadable)
-                    {
-                        throw new SearchPathException($"Unreadable: {file.FullPath}", plan.NoMessages);
-                    }
-
-                    return;
-            }
-
-            if (ByteConfirm.TryHandle(read.Span, file.RelativePath, plan, matches, out var byteMatched))
-            {
-                tally.File(byteMatched);
-                if (!byteMatched)
-                {
-                    filesWithoutMatch?.Add(file.RelativePath);
-                }
-
                 return;
             }
 
-            // The byte automaton already scans. A literal prefilter would read the file again.
-            if (plan.BytePrograms == null && !plan.Invert && plan.Literals != null && plan.Literals.Misses(read.Span, plan.IgnoreCase))
-            {
-                tally.File(matched: false);
-                filesWithoutMatch?.Add(file.RelativePath);
-                return;
-            }
-
-            if (MatchPlan.TryCollectAutomaton(read.Span, file.RelativePath, plan, matches, out var automatonMatched))
-            {
-                tally.File(automatonMatched);
-                if (!automatonMatched)
-                {
-                    filesWithoutMatch?.Add(file.RelativePath);
-                }
-
-                return;
-            }
-
-            if (MatchPlan.TryCollectBytes(read.Span, file.RelativePath, plan, matches, out var prefiltered))
-            {
-                tally.File(prefiltered);
-                if (!prefiltered)
-                {
-                    filesWithoutMatch?.Add(file.RelativePath);
-                }
-
-                return;
-            }
-
-            text = TextFiles.Decode(read.Span);
-        }
+            CollectDecoded(text, file, plan, matches, filesWithoutMatch, tally);
         }
         finally
         {
             ByteConfirm.Disarm();
         }
+    }
 
+    /// <summary>True when the file is finished. False when <paramref name="text"/> must be matched as a string.</summary>
+    private static bool MatchLoaded(
+        PooledBytes read,
+        ConfirmFile file,
+        MatchPlan plan,
+        List<SearchMatch> matches,
+        WalkStats? stats,
+        ConcurrentBag<string>? filesWithoutMatch,
+        SearchTally tally,
+        bool errorIfUnreadable,
+        out string text)
+    {
+        text = "";
+        switch (read.Kind)
+        {
+            case ReadKind.TooLarge:
+                stats?.IncrementSkippedTooLarge();
+                return true;
+            case ReadKind.Binary:
+                stats?.IncrementSkippedBinary();
+                return true;
+            case ReadKind.Unreadable:
+                stats?.IncrementSkippedUnreadable();
+                if (errorIfUnreadable)
+                {
+                    throw new SearchPathException($"Unreadable: {file.FullPath}", plan.NoMessages);
+                }
+
+                return true;
+        }
+
+        if (ByteConfirm.TryHandle(read.Span, file.RelativePath, plan, matches, out var byteMatched))
+        {
+            tally.File(byteMatched);
+            if (!byteMatched)
+            {
+                filesWithoutMatch?.Add(file.RelativePath);
+            }
+
+            return true;
+        }
+
+        // The byte automaton already scans. A literal prefilter would read the file again.
+        if (plan.BytePrograms == null && !plan.Invert && plan.Literals != null && plan.Literals.Misses(read.Span, plan.IgnoreCase))
+        {
+            tally.File(matched: false);
+            filesWithoutMatch?.Add(file.RelativePath);
+            return true;
+        }
+
+        if (MatchPlan.TryCollectAutomaton(read.Span, file.RelativePath, plan, matches, out var automatonMatched))
+        {
+            tally.File(automatonMatched);
+            if (!automatonMatched)
+            {
+                filesWithoutMatch?.Add(file.RelativePath);
+            }
+
+            return true;
+        }
+
+        if (MatchPlan.TryCollectBytes(read.Span, file.RelativePath, plan, matches, out var prefiltered))
+        {
+            tally.File(prefiltered);
+            if (!prefiltered)
+            {
+                filesWithoutMatch?.Add(file.RelativePath);
+            }
+
+            return true;
+        }
+
+        text = TextFiles.Decode(read.Span);
+        return false;
+    }
+
+    private static void CollectDecoded(
+        string text,
+        ConfirmFile file,
+        MatchPlan plan,
+        List<SearchMatch> matches,
+        ConcurrentBag<string>? filesWithoutMatch,
+        SearchTally tally)
+    {
         if (plan.Report == ReportMode.FilesWithoutMatch && !plan.CollectAll)
         {
             var hit = MatchPlan.HasMatch(text, plan);

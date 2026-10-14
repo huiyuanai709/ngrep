@@ -212,7 +212,7 @@ public class IndexProgressTests
     private static RunResult Run(params string[] args)
     {
         using var capture = new Capture();
-        var code = NgrepCli.Run(args);
+        var code = NgrepCli.Run(args).GetAwaiter().GetResult();
         return new RunResult(
             code,
             capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal),

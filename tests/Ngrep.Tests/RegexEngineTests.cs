@@ -126,20 +126,20 @@ public class RegexEngineTests
         File.WriteAllText(tree.File("a.txt"), "abcabc\nabc\n");
 
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["-E", @"(abc)\1", tree.Root, "-j", "1"]));
+        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["-E", @"(abc)\1", tree.Root, "-j", "1"]).GetAwaiter().GetResult());
         Assert.Contains("-P", capture.Stderr, StringComparison.Ordinal);
         Assert.Contains("non-backtracking", capture.Stderr, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["-E", "(?=abc)", tree.Root, "-j", "1"]));
+        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["-E", "(?=abc)", tree.Root, "-j", "1"]).GetAwaiter().GetResult());
         Assert.Contains("-P", capture.Stderr, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["-E", "(?>abc)", tree.Root, "-j", "1"]));
+        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["-E", "(?>abc)", tree.Root, "-j", "1"]).GetAwaiter().GetResult());
         Assert.Contains("atomic", capture.Stderr, StringComparison.OrdinalIgnoreCase);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-P", @"(abc)\1", tree.Root, "-j", "1"]));
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-P", @"(abc)\1", tree.Root, "-j", "1"]).GetAwaiter().GetResult());
         Assert.Contains("a.txt:1:1:abcabc", capture.Stdout, StringComparison.Ordinal);
 
         var back = MatchPlan.Create(new SearchQuery { Pattern = @"(abc)\1", Path = tree.Root, Regex = true, Backtracking = true });
@@ -155,7 +155,7 @@ public class RegexEngineTests
         using var tree = new TempDir();
         File.WriteAllText(tree.File("a.txt"), "abc\n");
         using var capture = new Capture();
-        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["-P", "-F", "abc", tree.Root]));
+        Assert.Equal(ExitCodes.Error, NgrepCli.Run(["-P", "-F", "abc", tree.Root]).GetAwaiter().GetResult());
         Assert.Contains("mutually exclusive", capture.Stderr, StringComparison.Ordinal);
     }
 
@@ -181,7 +181,7 @@ public class RegexEngineTests
             NoIgnore = true,
             Report = ReportMode.FilesWithMatches,
             MaxDegreeOfParallelism = 1,
-        });
+        }).GetAwaiter().GetResult();
         var early = Assert.Single(listed.Matches);
         Assert.Equal(1, early.Line);
         Assert.Equal("EARLY", early.Text);
@@ -193,7 +193,7 @@ public class RegexEngineTests
             ForceScan = true,
             NoIgnore = true,
             MaxDegreeOfParallelism = 1,
-        });
+        }).GetAwaiter().GetResult();
         var hit = Assert.Single(tail.Matches);
         Assert.Equal("TAILNEEDLE", hit.Text);
 
@@ -205,7 +205,7 @@ public class RegexEngineTests
             ForceScan = true,
             NoIgnore = true,
             MaxDegreeOfParallelism = 1,
-        });
+        }).GetAwaiter().GetResult();
         Assert.Equal(2, regex.Matches.Count);
         Assert.Contains(regex.Matches, match => match.Text == "EARLY");
         Assert.Contains(regex.Matches, match => match.Text == "TAILNEEDLE");

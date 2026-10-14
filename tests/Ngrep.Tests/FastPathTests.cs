@@ -116,7 +116,7 @@ public class FastPathTests
             WordRegexp = word,
             Report = report,
             MaxDegreeOfParallelism = 1,
-        });
+        }).GetAwaiter().GetResult();
     }
 
     private static string[] Texts(SearchOutcome outcome) =>
