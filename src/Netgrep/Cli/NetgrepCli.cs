@@ -134,7 +134,7 @@ internal static class NetgrepCli
         };
         var patternFile = new Option<string[]>("-f", "--file")
         {
-            Description = "Read patterns from a file, one per line. Empty lines and lines starting with # are skipped. A line starting with \\# is a pattern that starts with #. '-' reads stdin. Repeatable, OR-ed with -e and a positional pattern.",
+            Description = "Read patterns from a file, one per line. An empty line matches every line. A line starting with # is a pattern, not a comment. '-' reads stdin. Repeatable, OR-ed with -e and a positional pattern.",
             Arity = ArgumentArity.ZeroOrMore,
         };
         var word = new Option<bool>("-w", "--word-regexp")

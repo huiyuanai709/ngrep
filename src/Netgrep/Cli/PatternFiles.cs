@@ -1,8 +1,9 @@
 namespace Netgrep.Cli;
 
 /// <summary>
-/// Patterns from <c>-f</c> / <c>--file</c>. Empty lines and lines whose first character is
-/// <c>#</c> are skipped. A line that starts with <c>\#</c> is a pattern beginning with <c>#</c>.
+/// Patterns from <c>-f</c> / <c>--file</c>. One pattern per line. The newline is not part of the
+/// pattern. An empty line is an empty pattern (match every line). A line starting with <c>#</c>
+/// is that pattern, not a comment. <c>\#</c> is kept as written; it is not a comment escape.
 /// </summary>
 internal static class PatternFiles
 {
@@ -30,20 +31,16 @@ internal static class PatternFiles
             normalized = normalized[1..];
         }
 
-        foreach (var line in normalized.Split('\n'))
+        if (normalized.Length == 0)
         {
-            if (line.Length == 0 || line[0] == '#')
-            {
-                continue;
-            }
+            return patterns;
+        }
 
-            if (line.StartsWith("\\#", StringComparison.Ordinal))
-            {
-                patterns.Add(line[1..]);
-                continue;
-            }
-
-            patterns.Add(line);
+        var lines = normalized.Split('\n');
+        var count = normalized[^1] == '\n' ? lines.Length - 1 : lines.Length;
+        for (var i = 0; i < count; i++)
+        {
+            patterns.Add(lines[i]);
         }
 
         return patterns;

@@ -406,31 +406,55 @@ public class ParityTests
     }
 
     [Fact]
-    public void Pattern_file_skips_comments_and_combines_with_other_patterns()
+    public void Pattern_file_keeps_hash_lines_and_empty_lines_match_all()
     {
-        var parsed = PatternFiles.Parse("\uFEFF# comment\n\n\\#hash\n  spaced\nkeep\n");
-        Assert.Equal(["#hash", "  spaced", "keep"], parsed);
+        Assert.Equal(["# comment", "", "\\#hash", "  spaced", "keep"], PatternFiles.Parse("\uFEFF# comment\n\n\\#hash\n  spaced\nkeep\n"));
+        Assert.Empty(PatternFiles.Parse(""));
+        Assert.Equal([""], PatternFiles.Parse("\n"));
+        Assert.Equal(["netgrep"], PatternFiles.Parse("netgrep"));
+        Assert.Equal(["a", "b"], PatternFiles.Parse("a\r\nb\r\n"));
 
         using var tree = Temp();
         File.WriteAllText(tree.File("a.txt"), "alpha\n");
         File.WriteAllText(tree.File("b.txt"), "#hash\n");
         File.WriteAllText(tree.File("c.txt"), "netgrep\n");
+        File.WriteAllText(tree.File("d.txt"), "\\#hash\n");
         var pats = Path.Combine(Path.GetTempPath(), "netgrep-pats-" + Guid.NewGuid().ToString("n") + ".txt");
-        File.WriteAllText(pats, "# comment\n\n\\#hash\nnetgrep\n");
+        File.WriteAllText(pats, "#hash\nnetgrep\n");
         try
         {
             using var capture = new Capture();
             Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["-e", "alpha", "-f", pats, tree.Root, "-j", "1"]));
             var lines = capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim();
-            Assert.Equal("a.txt:1:1:alpha\nb.txt:1:1:#hash\nc.txt:1:1:netgrep", lines);
+            Assert.Equal("a.txt:1:1:alpha\nb.txt:1:1:#hash\nc.txt:1:1:netgrep\nd.txt:1:2:\\#hash", lines);
 
             capture.Clear();
             Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["alpha", "-f", pats, tree.Root, "-l", "-j", "1"]));
-            Assert.Equal("a.txt\nb.txt\nc.txt", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
+            Assert.Equal("a.txt\nb.txt\nc.txt\nd.txt", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
+
+            capture.Clear();
+            File.WriteAllText(pats, "\\#hash\n");
+            Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["-f", pats, tree.Root, "-j", "1"]));
+            Assert.Equal("d.txt:1:1:\\#hash", capture.Stdout.Trim());
+
+            capture.Clear();
+            Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["-f", pats, "--regex", tree.Root, "-l", "-j", "1"]));
+            Assert.Equal("b.txt\nd.txt", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
+
+            capture.Clear();
+            File.WriteAllText(pats, "\n");
+            Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["-f", pats, tree.Root, "-j", "1"]));
+            Assert.Equal(
+                "a.txt:1:1:alpha\nb.txt:1:1:#hash\nc.txt:1:1:netgrep\nd.txt:1:1:\\#hash",
+                capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
+
+            capture.Clear();
+            Assert.Equal(ExitCodes.NoMatches, NetgrepCli.Run(["-f", pats, tree.Root, "-v", "-l", "-j", "1"]));
+            Assert.Equal("", capture.Stdout.Trim());
 
             capture.Clear();
             var previousIn = Console.In;
-            Console.SetIn(new StringReader("netgrep\n# skip\n\n"));
+            Console.SetIn(new StringReader("netgrep\n#hash\n"));
             try
             {
                 Assert.Equal(ExitCodes.Success, NetgrepCli.Run(["-f", "-", tree.Root, "-l", "-j", "1"]));
@@ -440,16 +464,21 @@ public class ParityTests
                 Console.SetIn(previousIn);
             }
 
-            Assert.Equal("c.txt", capture.Stdout.Trim());
+            Assert.Equal("b.txt\nc.txt\nd.txt", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
 
             capture.Clear();
             Assert.Equal(ExitCodes.Error, NetgrepCli.Run(["-f", tree.File("missing.txt"), tree.Root]));
             Assert.Contains("Pattern file not found", capture.Stderr, StringComparison.Ordinal);
 
             capture.Clear();
-            File.WriteAllText(pats, "# only\n\n");
+            File.WriteAllText(pats, "");
             Assert.Equal(ExitCodes.Error, NetgrepCli.Run(["-f", pats, tree.Root]));
             Assert.Contains("Pattern file contains no patterns", capture.Stderr, StringComparison.Ordinal);
+
+            capture.Clear();
+            File.WriteAllText(pats, "# only\n");
+            Assert.Equal(ExitCodes.NoMatches, NetgrepCli.Run(["-f", pats, tree.Root, "-j", "1"]));
+            Assert.Equal("", capture.Stdout.Trim());
 
             capture.Clear();
             File.WriteAllText(pats, "n.t\n");
