@@ -5,6 +5,15 @@
 # two, and delete its git tag as well. A repository that already has v0.1.0
 # keeps that release when v0.2.0 is published, then drops v0.1.0 when a third
 # release is published.
+#
+# Instruction sets: each x64 RID publishes three Native AOT binaries.
+# IlcInstructionSet is a requirement, not a runtime light-up. The compiler
+# folds Avx2.IsSupported and Avx512BW.IsSupported to constants for the chosen
+# set, so a higher set will not start on an older CPU.
+#   (unset)     x86-64-v2 baseline. SSE2 scan. Runs without AVX2 or AVX-512.
+#   x86-64-v3   requires AVX2 (and the rest of v3). Asset suffix -avx2.
+#   x86-64-v4   requires AVX-512F/BW/CD/DQ/VL. Asset suffix -avx512.
+# arm64 (osx-arm64) publishes only the baseline. AVX2 and AVX-512 are skipped.
 
 name: Release
 
@@ -161,16 +170,47 @@ jobs:
           RID: ${{ matrix.rid }}
         run: |
           set -euo pipefail
-          dotnet publish src/Ngrep/Ngrep.csproj -c Release -r "$RID"
           mkdir -p dist
-          if [ "$RID" = "win-x64" ]; then
-            matches=(src/Ngrep/bin/Release/*/win-x64/publish/ngrep.exe)
-            cp "${matches[0]}" dist/ngrep-win-x64.exe
-          else
-            matches=(src/Ngrep/bin/Release/*/"$RID"/publish/ngrep)
-            cp "${matches[0]}" "dist/ngrep-${RID}"
-            chmod +x "dist/ngrep-${RID}"
-          fi
+
+          # suffix is empty for the x86-64-v2 baseline. isa empty means unset.
+          publish_one() {
+            local suffix="$1"
+            local isa="$2"
+            local out="build-out/${suffix:-baseline}"
+            local args=(src/Ngrep/Ngrep.csproj -c Release -r "$RID" -o "$out")
+            if [ -n "$isa" ]; then
+              args+=("/p:IlcInstructionSet=${isa}")
+            fi
+            dotnet publish "${args[@]}"
+
+            local bin="ngrep"
+            local asset="ngrep-${RID}"
+            if [ "$RID" = "win-x64" ]; then
+              bin="ngrep.exe"
+              if [ -n "$suffix" ]; then
+                asset="ngrep-win-x64-${suffix}.exe"
+              else
+                asset="ngrep-win-x64.exe"
+              fi
+            elif [ -n "$suffix" ]; then
+              asset="ngrep-${RID}-${suffix}"
+            fi
+            cp "${out}/${bin}" "dist/${asset}"
+            if [ "$RID" != "win-x64" ]; then
+              chmod +x "dist/${asset}"
+            fi
+          }
+
+          publish_one "" ""
+          case "$RID" in
+            linux-x64|win-x64|osx-x64)
+              publish_one avx2 x86-64-v3
+              publish_one avx512 x86-64-v4
+              ;;
+            *)
+              echo "Skipping AVX2 and AVX-512 for ${RID}; those instruction sets are x64-only."
+              ;;
+          esac
           ls -lh dist
 
       - uses: actions/upload-artifact@v4
@@ -202,7 +242,11 @@ jobs:
             echo "No release assets were built." >&2
             exit 1
           fi
-          for required in ngrep-linux-x64 ngrep-win-x64.exe ngrep-osx-arm64; do
+          for required in \
+            ngrep-linux-x64 ngrep-linux-x64-avx2 ngrep-linux-x64-avx512 \
+            ngrep-win-x64.exe ngrep-win-x64-avx2.exe ngrep-win-x64-avx512.exe \
+            ngrep-osx-arm64
+          do
             if [ ! -f "assets/${required}" ]; then
               echo "Missing required asset ${required}." >&2
               exit 1
@@ -213,6 +257,10 @@ jobs:
             echo "ngrep ${TAG}"
             echo
             echo "Native AOT binaries. The Windows asset ends in .exe."
+            echo "Names with no ISA suffix are the x86-64-v2 baseline (or arm64 for osx-arm64) and run without AVX2 or AVX-512."
+            echo "Names ending in -avx2 require x86-64-v3 (AVX2) and will not run without it."
+            echo "Names ending in -avx512 require x86-64-v4 (AVX-512) and will not run without it."
+            echo "osx-arm64 has no AVX assets."
             echo
             echo "Assets:"
             for file in "${files[@]}"; do
