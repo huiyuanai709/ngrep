@@ -73,7 +73,7 @@ public class SearchUxTests
             {
                 throw new TimeoutException("workers did not run concurrently");
             }
-        });
+        }, stopOnMatch: false);
         Assert.True(entered >= 4);
 
         using var canceled = new CancellationTokenSource();
