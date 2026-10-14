@@ -64,12 +64,17 @@ internal static class NgrepCli
         {
             Description = "Directory to index.",
         };
+        var indexQuiet = new Option<bool>("--quiet", "-q")
+        {
+            Description = "Silence index progress on stderr. The stdout summary is unchanged. Search -q is a different flag and suppresses match output.",
+        };
         var indexCommand = new Command("index", "Walk a tree and build or update the inverted index.");
         indexCommand.Arguments.Add(indexPath);
+        indexCommand.Options.Add(indexQuiet);
         indexCommand.SetAction(result =>
         {
             var path = result.GetRequiredValue(indexPath);
-            var built = Indexer.Build(path, result.GetValue(index));
+            var built = Indexer.Build(path, result.GetValue(index), showProgress: !result.GetValue(indexQuiet));
             MachineOutput.WriteIndex(built, OutputFormats.Parse(result.GetValue(format)));
             return ExitCodes.Success;
         });

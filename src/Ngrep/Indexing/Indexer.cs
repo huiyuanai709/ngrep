@@ -1,3 +1,4 @@
+using System.Globalization;
 using Ngrep.Ignore;
 using Ngrep.Text;
 
@@ -5,7 +6,7 @@ namespace Ngrep.Indexing;
 
 internal static class Indexer
 {
-    public static IndexResult Build(string root, string? indexDirectory = null)
+    public static IndexResult Build(string root, string? indexDirectory = null, bool showProgress = false)
     {
         root = Path.GetFullPath(root);
         if (!Directory.Exists(root))
@@ -29,6 +30,8 @@ internal static class Indexer
         var added = 0;
         var updated = 0;
         var unchanged = 0;
+        var removed = 0;
+        var examined = 0;
 
         // Hidden files stay in the index so --hidden can filter at search time.
         var files = TreeWalker.Enumerate(root, indexPath, stats, includeHidden: true)
@@ -37,94 +40,112 @@ internal static class Indexer
 
         foreach (var file in files)
         {
-            FileInfo info;
             try
             {
-                info = new FileInfo(file.FullPath);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                stats.IncrementSkippedUnreadable();
-                continue;
-            }
+                FileInfo info;
+                try
+                {
+                    info = new FileInfo(file.FullPath);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    stats.IncrementSkippedUnreadable();
+                    continue;
+                }
 
-            if (info.Length > TextFiles.MaxFileBytes)
-            {
-                stats.IncrementSkippedTooLarge();
-                continue;
-            }
+                if (info.Length > TextFiles.MaxFileBytes)
+                {
+                    stats.IncrementSkippedTooLarge();
+                    continue;
+                }
 
-            documents.TryGetValue(file.RelativePath, out var previous);
-            var mtime = new DateTimeOffset(info.LastWriteTimeUtc).ToUnixTimeMilliseconds();
-            if (previous != null && previous.Size == info.Length && previous.MtimeUnixMs == mtime)
-            {
+                documents.TryGetValue(file.RelativePath, out var previous);
+                var mtime = new DateTimeOffset(info.LastWriteTimeUtc).ToUnixTimeMilliseconds();
+                if (previous != null && previous.Size == info.Length && previous.MtimeUnixMs == mtime)
+                {
+                    seen.Add(file.RelativePath);
+                    unchanged++;
+                    continue;
+                }
+
+                byte[] bytes;
+                try
+                {
+                    bytes = File.ReadAllBytes(file.FullPath);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    stats.IncrementSkippedUnreadable();
+                    continue;
+                }
+
+                if (TextFiles.IsBinary(bytes))
+                {
+                    stats.IncrementSkippedBinary();
+                    continue;
+                }
+
+                var hash = TextFiles.Sha256Hex(bytes);
+                if (previous != null && previous.Sha256 == hash)
+                {
+                    previous.MtimeUnixMs = mtime;
+                    previous.Size = info.Length;
+                    seen.Add(file.RelativePath);
+                    unchanged++;
+                    continue;
+                }
+
+                var text = TextFiles.Decode(bytes);
+                var id = previous?.Id ?? nextId++;
+                if (previous != null)
+                {
+                    RemoveDoc(postings, previous.Id);
+                    updated++;
+                    WriteOutcome("updated", file.RelativePath);
+                }
+                else
+                {
+                    added++;
+                    WriteOutcome("added", file.RelativePath);
+                }
+
+                foreach (var gram in Trigrams.Extract(text))
+                {
+                    AddDoc(postings, gram, id);
+                }
+
+                documents[file.RelativePath] = new DocumentRecord
+                {
+                    Id = id,
+                    Path = file.RelativePath,
+                    Size = info.Length,
+                    MtimeUnixMs = mtime,
+                    Sha256 = hash,
+                    LineStarts = LineMap.Build(text),
+                };
                 seen.Add(file.RelativePath);
-                unchanged++;
-                continue;
             }
-
-            byte[] bytes;
-            try
+            finally
             {
-                bytes = File.ReadAllBytes(file.FullPath);
+                examined++;
+                if (showProgress && examined % 100 == 0 && examined != files.Count)
+                {
+                    WriteSummary();
+                }
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                stats.IncrementSkippedUnreadable();
-                continue;
-            }
-
-            if (TextFiles.IsBinary(bytes))
-            {
-                stats.IncrementSkippedBinary();
-                continue;
-            }
-
-            var hash = TextFiles.Sha256Hex(bytes);
-            if (previous != null && previous.Sha256 == hash)
-            {
-                previous.MtimeUnixMs = mtime;
-                previous.Size = info.Length;
-                seen.Add(file.RelativePath);
-                unchanged++;
-                continue;
-            }
-
-            var text = TextFiles.Decode(bytes);
-            var id = previous?.Id ?? nextId++;
-            if (previous != null)
-            {
-                RemoveDoc(postings, previous.Id);
-                updated++;
-            }
-            else
-            {
-                added++;
-            }
-
-            foreach (var gram in Trigrams.Extract(text))
-            {
-                AddDoc(postings, gram, id);
-            }
-
-            documents[file.RelativePath] = new DocumentRecord
-            {
-                Id = id,
-                Path = file.RelativePath,
-                Size = info.Length,
-                MtimeUnixMs = mtime,
-                Sha256 = hash,
-                LineStarts = LineMap.Build(text),
-            };
-            seen.Add(file.RelativePath);
         }
 
-        var removed = 0;
-        foreach (var path in documents.Keys.Where(path => !seen.Contains(path)).ToArray())
+        foreach (var path in documents.Keys.Where(path => !seen.Contains(path)).OrderBy(path => path, StringComparer.Ordinal).ToArray())
         {
             RemoveDoc(postings, documents[path].Id);
             documents.Remove(path);
             removed++;
+            WriteOutcome("removed", path);
+        }
+
+        if (showProgress)
+        {
+            WriteSummary();
         }
 
         var now = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture);
@@ -158,6 +179,33 @@ internal static class Indexer
             SkippedTooLarge = stats.SkippedTooLarge,
             SkippedUnreadable = stats.SkippedUnreadable,
         };
+
+        void WriteOutcome(string verb, string relativePath)
+        {
+            if (showProgress)
+            {
+                WriteProgressLine(verb + ": " + relativePath);
+            }
+        }
+
+        void WriteSummary()
+        {
+            var skipped = stats.SkippedBinary + stats.SkippedTooLarge + stats.SkippedUnreadable;
+            WriteProgressLine(
+                "indexed " + examined.ToString(CultureInfo.InvariantCulture)
+                + "/" + files.Count.ToString(CultureInfo.InvariantCulture)
+                + ", added " + added.ToString(CultureInfo.InvariantCulture)
+                + ", updated " + updated.ToString(CultureInfo.InvariantCulture)
+                + ", unchanged " + unchanged.ToString(CultureInfo.InvariantCulture)
+                + ", removed " + removed.ToString(CultureInfo.InvariantCulture)
+                + ", skipped " + skipped.ToString(CultureInfo.InvariantCulture));
+        }
+    }
+
+    private static void WriteProgressLine(string line)
+    {
+        Console.Error.WriteLine(line);
+        Console.Error.Flush();
     }
 
     private static void RemoveDoc(Dictionary<string, List<int>> postings, int id)

@@ -25,7 +25,7 @@ dotnet run --project src/Ngrep -- search ngrep testdata/sample --format ndjson
 ```text
 ngrep <pattern> [path] [search flags]
 ngrep search <pattern> [path] [search flags]
-ngrep index <path> [--index <dir>] [--format text|json|ndjson]
+ngrep index <path> [--index <dir>] [--format text|json|ndjson] [--quiet|-q]
 ngrep watch <path> [--index <dir>] [--format text|json|ndjson]
 ```
 
@@ -49,6 +49,8 @@ Search flags:
 ```
 
 `index` writes `<path>/.ngrep/index` unless `--index` is set. Running it again updates changed files and drops deleted ones (size + mtime, then SHA-256).
+
+While that walk runs, progress is printed on stderr in English. A new document is `added: path`, a replaced document is `updated: path`, and a document that is no longer in the tree is `removed: path`. Unchanged files, ignored files, and skipped files (binary, too large, or unreadable) do not get their own line. Every 100 files examined, and once after removals, a summary is printed: `indexed 120/500, added 3, updated 1, unchanged 116, removed 0, skipped 0`. The `indexed` counts are files the walker examined, not ignored files. `skipped` in that line is binary, too large, and unreadable. Stdout stays the final summary for `--format text`, `json`, or `ndjson`. `-q` / `--quiet` on `index` turns the stderr progress off and leaves that summary in place. It is a different flag from search `-q` / `--quiet` / `--silent`, which suppresses match output. `watch` does not print this progress.
 
 Search looks upward from `[path]` (default `.`) for `.ngrep/index`. When an index covers the path, ngrep builds a required-literal prefilter and intersects trigram postings before reading candidates. A literal, or a regex piece, can feed that filter when every alternative has a required substring of 3+ characters (`foo`, `foo.*bar`, `foo|bar`, `(ab){2}`, `n.grep`). The file is still read to confirm the real match, so a prefilter hit is not a result. Trigrams cannot help when an alternative is shorter than 3 (`ab`, `a|ngrep`, `foo*` which must allow `fo`), when the pattern can match with no required text (`.`, `a*`), when the syntax is not extracted (lookaround, backreferences), or when `-v` is set. Those queries read every indexed file. An ASCII required piece still rejects a file from its bytes before the text is decoded, including pieces shorter than 3. With no index, `--scan`, `--no-ignore`, `--no-ignore-vcs`, or a path outside the indexed root, ngrep scans contents and prints a one-line note on stderr. You do not pass `--scan` just because the tree has never been indexed. The index does not contain gitignored files, so the ignore flags always scan.
 
