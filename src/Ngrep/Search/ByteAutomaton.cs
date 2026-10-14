@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
@@ -1550,6 +1551,12 @@ internal sealed class ClassRunProgram : ByteProgram
 
     private unsafe void CollectRanges512(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits)
     {
+        if (_min == 8)
+        {
+            CollectMin8Ranges512(text, allowNewline, stopAtFirst, hits);
+            return;
+        }
+
         if (!Avx512BW.IsSupported || !_finder.TryRanges(out var ranges, out var lo0, out var hi0, out var lo1, out var hi1, out var lo2, out var hi2))
         {
             CollectScalar(text, allowNewline, stopAtFirst, hits);
@@ -1583,6 +1590,16 @@ internal sealed class ClassRunProgram : ByteProgram
                     continue;
                 }
 
+                if (TrySkipShortRuns(text, allowNewline, stopAtFirst, hits, bits, i, 64, ref i, out var stop))
+                {
+                    if (stop)
+                    {
+                        return;
+                    }
+
+                    continue;
+                }
+
                 if (!WalkChunk(text, allowNewline, stopAtFirst, hits, bits, i, 64, ref i))
                 {
                     return;
@@ -1598,6 +1615,12 @@ internal sealed class ClassRunProgram : ByteProgram
 
     private unsafe void CollectRanges256(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits)
     {
+        if (_min == 8)
+        {
+            CollectMin8Ranges256(text, allowNewline, stopAtFirst, hits);
+            return;
+        }
+
         if (!Avx2.IsSupported || !_finder.TryRanges(out var ranges, out var lo0, out var hi0, out var lo1, out var hi1, out var lo2, out var hi2))
         {
             CollectScalar(text, allowNewline, stopAtFirst, hits);
@@ -1631,6 +1654,16 @@ internal sealed class ClassRunProgram : ByteProgram
                     continue;
                 }
 
+                if (TrySkipShortRuns(text, allowNewline, stopAtFirst, hits, bits, i, 32, ref i, out var stop))
+                {
+                    if (stop)
+                    {
+                        return;
+                    }
+
+                    continue;
+                }
+
                 if (!WalkChunk(text, allowNewline, stopAtFirst, hits, bits, i, 32, ref i))
                 {
                     return;
@@ -1646,6 +1679,12 @@ internal sealed class ClassRunProgram : ByteProgram
 
     private unsafe void CollectRanges128(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits)
     {
+        if (_min == 8)
+        {
+            CollectMin8Ranges128(text, allowNewline, stopAtFirst, hits);
+            return;
+        }
+
         if (!Sse2.IsSupported || !_finder.TryRanges(out var ranges, out var lo0, out var hi0, out var lo1, out var hi1, out var lo2, out var hi2))
         {
             CollectScalar(text, allowNewline, stopAtFirst, hits);
@@ -1679,6 +1718,16 @@ internal sealed class ClassRunProgram : ByteProgram
                     continue;
                 }
 
+                if (TrySkipShortRuns(text, allowNewline, stopAtFirst, hits, bits, i, 16, ref i, out var stop))
+                {
+                    if (stop)
+                    {
+                        return;
+                    }
+
+                    continue;
+                }
+
                 if (!WalkChunk(text, allowNewline, stopAtFirst, hits, bits, i, 16, ref i))
                 {
                     return;
@@ -1690,6 +1739,499 @@ internal sealed class ClassRunProgram : ByteProgram
         {
             CollectScalarFrom(text, allowNewline, stopAtFirst, hits, i);
         }
+    }
+
+    /// <summary>
+    /// AVX-512 scan for a class repeated 8 times. The scanner itself never calls out,
+    /// so a miss stays in one register-resident loop. A real run returns to the walker.
+    /// </summary>
+    private unsafe void CollectMin8Ranges512(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits)
+    {
+        if (!Avx512BW.IsSupported || !_finder.TryRanges(out var ranges, out var lo0, out var hi0, out var lo1, out var hi1, out var lo2, out var hi2))
+        {
+            CollectScalar(text, allowNewline, stopAtFirst, hits);
+            return;
+        }
+
+        ref var origin = ref MemoryMarshal.GetReference(text);
+        var i = 0;
+        fixed (byte* basePtr = &origin)
+        {
+            var last = text.Length - 64;
+            while (true)
+            {
+                i = ScanMin8Avx512(basePtr, text.Length, i, ranges, lo0, hi0, lo1, hi1, lo2, hi2);
+                if ((uint)i > (uint)last)
+                {
+                    break;
+                }
+
+                var bits = ClassBits512(basePtr + i, ranges, lo0, hi0, lo1, hi1, lo2, hi2);
+                if (!HasRun8(bits))
+                {
+                    var end = i + 64;
+                    var need = 8 - EdgeSuffix(bits, 64);
+                    if (need > text.Length - end || !RunContinues(text, end, need))
+                    {
+                        i = end;
+                        continue;
+                    }
+                }
+
+                if (!WalkDense(text, allowNewline, stopAtFirst, hits, bits, i, 64, ref i))
+                {
+                    return;
+                }
+            }
+        }
+
+        if (i < text.Length)
+        {
+            CollectScalarFrom(text, allowNewline, stopAtFirst, hits, i);
+        }
+    }
+
+    private unsafe void CollectMin8Ranges256(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits)
+    {
+        if (!Avx2.IsSupported || !_finder.TryRanges(out var ranges, out var lo0, out var hi0, out var lo1, out var hi1, out var lo2, out var hi2))
+        {
+            CollectScalar(text, allowNewline, stopAtFirst, hits);
+            return;
+        }
+
+        ref var origin = ref MemoryMarshal.GetReference(text);
+        var i = 0;
+        fixed (byte* basePtr = &origin)
+        {
+            var last = text.Length - 32;
+            while (true)
+            {
+                i = ScanMin8Avx2(basePtr, text.Length, i, ranges, lo0, hi0, lo1, hi1, lo2, hi2);
+                if ((uint)i > (uint)last)
+                {
+                    break;
+                }
+
+                var bits = ClassBits256(basePtr + i, ranges, lo0, hi0, lo1, hi1, lo2, hi2);
+                if (!HasRun8(bits))
+                {
+                    var end = i + 32;
+                    var need = 8 - EdgeSuffix(bits, 32);
+                    if (need > text.Length - end || !RunContinues(text, end, need))
+                    {
+                        i = end;
+                        continue;
+                    }
+                }
+
+                if (!WalkDense(text, allowNewline, stopAtFirst, hits, bits, i, 32, ref i))
+                {
+                    return;
+                }
+            }
+        }
+
+        if (i < text.Length)
+        {
+            CollectScalarFrom(text, allowNewline, stopAtFirst, hits, i);
+        }
+    }
+
+    private unsafe void CollectMin8Ranges128(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits)
+    {
+        if (!Sse2.IsSupported || !_finder.TryRanges(out var ranges, out var lo0, out var hi0, out var lo1, out var hi1, out var lo2, out var hi2))
+        {
+            CollectScalar(text, allowNewline, stopAtFirst, hits);
+            return;
+        }
+
+        ref var origin = ref MemoryMarshal.GetReference(text);
+        var i = 0;
+        fixed (byte* basePtr = &origin)
+        {
+            var last = text.Length - 16;
+            while (true)
+            {
+                i = ScanMin8Sse2(basePtr, text.Length, i, ranges, lo0, hi0, lo1, hi1, lo2, hi2);
+                if ((uint)i > (uint)last)
+                {
+                    break;
+                }
+
+                var bits = ClassBits128(basePtr + i, ranges, lo0, hi0, lo1, hi1, lo2, hi2);
+                if (!HasRun8(bits))
+                {
+                    var end = i + 16;
+                    var need = 8 - EdgeSuffix(bits, 16);
+                    if (need > text.Length - end || !RunContinues(text, end, need))
+                    {
+                        i = end;
+                        continue;
+                    }
+                }
+
+                if (!WalkDense(text, allowNewline, stopAtFirst, hits, bits, i, 16, ref i))
+                {
+                    return;
+                }
+            }
+        }
+
+        if (i < text.Length)
+        {
+            CollectScalarFrom(text, allowNewline, stopAtFirst, hits, i);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    private static unsafe int ScanMin8Avx512(
+        byte* basePtr,
+        int length,
+        int i,
+        int ranges,
+        byte lo0,
+        byte hi0,
+        byte lo1,
+        byte hi1,
+        byte lo2,
+        byte hi2)
+    {
+        var last = length - 64;
+        if (ranges == 1)
+        {
+            var bias = Vector512.Create((byte)0x80);
+            var loV = Vector512.Create((byte)(lo0 ^ 0x80));
+            var hiV = Vector512.Create((byte)(hi0 ^ 0x80));
+            while (i <= last)
+            {
+                var biased = Avx512F.Xor(Avx512F.LoadVector512(basePtr + i), bias);
+                var ge = Avx512F.Or(Avx512BW.CompareEqual(biased, loV), Avx512BW.CompareGreaterThan(biased.AsSByte(), loV.AsSByte()).AsByte());
+                var le = Avx512F.Or(Avx512BW.CompareEqual(biased, hiV), Avx512BW.CompareGreaterThan(hiV.AsSByte(), biased.AsSByte()).AsByte());
+                var bits = Avx512F.And(ge, le).ExtractMostSignificantBits();
+                if (bits != 0 && MayHoldRun8(bits, 64, basePtr, i, length, lo0, hi0))
+                {
+                    return i;
+                }
+
+                i += 64;
+            }
+
+            return i;
+        }
+
+        while (i <= last)
+        {
+            var bits = ClassBits512(basePtr + i, ranges, lo0, hi0, lo1, hi1, lo2, hi2);
+            if (bits != 0 && (BitOperations.PopCount(bits) >= 8 || (bits & 0x8000_0000_0000_0000UL) != 0))
+            {
+                return i;
+            }
+
+            i += 64;
+        }
+
+        return i;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    private static unsafe int ScanMin8Avx2(
+        byte* basePtr,
+        int length,
+        int i,
+        int ranges,
+        byte lo0,
+        byte hi0,
+        byte lo1,
+        byte hi1,
+        byte lo2,
+        byte hi2)
+    {
+        var last = length - 32;
+        if (ranges == 1)
+        {
+            var bias = Vector256.Create((byte)0x80);
+            var loV = Vector256.Create((byte)(lo0 ^ 0x80));
+            var hiV = Vector256.Create((byte)(hi0 ^ 0x80));
+            while (i <= last)
+            {
+                var biased = Avx2.Xor(Avx.LoadVector256(basePtr + i), bias);
+                var ge = Avx2.Or(Avx2.CompareEqual(biased, loV), Avx2.CompareGreaterThan(biased.AsSByte(), loV.AsSByte()).AsByte());
+                var le = Avx2.Or(Avx2.CompareEqual(biased, hiV), Avx2.CompareGreaterThan(hiV.AsSByte(), biased.AsSByte()).AsByte());
+                var bits = (ulong)Avx2.And(ge, le).ExtractMostSignificantBits();
+                if (bits != 0 && MayHoldRun8(bits, 32, basePtr, i, length, lo0, hi0))
+                {
+                    return i;
+                }
+
+                i += 32;
+            }
+
+            return i;
+        }
+
+        while (i <= last)
+        {
+            var bits = ClassBits256(basePtr + i, ranges, lo0, hi0, lo1, hi1, lo2, hi2);
+            if (bits != 0 && (BitOperations.PopCount(bits) >= 8 || (bits & 0x8000_0000UL) != 0))
+            {
+                return i;
+            }
+
+            i += 32;
+        }
+
+        return i;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    private static unsafe int ScanMin8Sse2(
+        byte* basePtr,
+        int length,
+        int i,
+        int ranges,
+        byte lo0,
+        byte hi0,
+        byte lo1,
+        byte hi1,
+        byte lo2,
+        byte hi2)
+    {
+        var last = length - 16;
+        if (ranges == 1)
+        {
+            var bias = Vector128.Create((byte)0x80);
+            var loV = Vector128.Create((byte)(lo0 ^ 0x80));
+            var hiV = Vector128.Create((byte)(hi0 ^ 0x80));
+            while (i <= last)
+            {
+                var biased = Sse2.Xor(Sse2.LoadVector128(basePtr + i), bias);
+                var ge = Sse2.Or(Sse2.CompareEqual(biased, loV), Sse2.CompareGreaterThan(biased.AsSByte(), loV.AsSByte()).AsByte());
+                var le = Sse2.Or(Sse2.CompareEqual(biased, hiV), Sse2.CompareGreaterThan(hiV.AsSByte(), biased.AsSByte()).AsByte());
+                var bits = (ulong)Sse2.And(ge, le).ExtractMostSignificantBits();
+                if (bits != 0 && MayHoldRun8(bits, 16, basePtr, i, length, lo0, hi0))
+                {
+                    return i;
+                }
+
+                i += 16;
+            }
+
+            return i;
+        }
+
+        while (i <= last)
+        {
+            var bits = ClassBits128(basePtr + i, ranges, lo0, hi0, lo1, hi1, lo2, hi2);
+            if (bits != 0 && (BitOperations.PopCount(bits) >= 8 || (bits & 0x8000UL) != 0))
+            {
+                return i;
+            }
+
+            i += 16;
+        }
+
+        return i;
+    }
+
+    /// <summary>
+    /// True when this window might hold eight members. Fewer than eight hits cannot,
+    /// unless the run touches the last byte and the following byte stays in range.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe bool MayHoldRun8(ulong bits, int width, byte* basePtr, int index, int length, byte lo, byte hi)
+    {
+        if (BitOperations.PopCount(bits) >= 8)
+        {
+            return true;
+        }
+
+        if ((bits & (1UL << (width - 1))) == 0)
+        {
+            return false;
+        }
+
+        var next = index + width;
+        if ((uint)next >= (uint)length)
+        {
+            return false;
+        }
+
+        var n = basePtr[next];
+        return (uint)(n - lo) <= (uint)(hi - lo);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool HasRun8(ulong bits)
+    {
+        var run = bits;
+        run &= run >> 1;
+        run &= run >> 2;
+        run &= run >> 4;
+        return run != 0;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int EdgeSuffix(ulong bits, int width)
+    {
+        var aligned = width == 64 ? bits : bits << (64 - width);
+        return BitOperations.LeadingZeroCount(~aligned);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe ulong ClassBits512(byte* p, int ranges, byte lo0, byte hi0, byte lo1, byte hi1, byte lo2, byte hi2)
+    {
+        var bias = Vector512.Create((byte)0x80);
+        var biased = Avx512F.Xor(Avx512F.LoadVector512(p), bias);
+        var mask = ClassFinder.Range512(biased, lo0, hi0);
+        if (ranges > 1)
+        {
+            mask = Avx512F.Or(mask, ClassFinder.Range512(biased, lo1, hi1));
+        }
+
+        if (ranges > 2)
+        {
+            mask = Avx512F.Or(mask, ClassFinder.Range512(biased, lo2, hi2));
+        }
+
+        return mask.ExtractMostSignificantBits();
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe ulong ClassBits256(byte* p, int ranges, byte lo0, byte hi0, byte lo1, byte hi1, byte lo2, byte hi2)
+    {
+        var bias = Vector256.Create((byte)0x80);
+        var biased = Avx2.Xor(Avx.LoadVector256(p), bias);
+        var mask = ClassFinder.Range256(biased, lo0, hi0);
+        if (ranges > 1)
+        {
+            mask = Avx2.Or(mask, ClassFinder.Range256(biased, lo1, hi1));
+        }
+
+        if (ranges > 2)
+        {
+            mask = Avx2.Or(mask, ClassFinder.Range256(biased, lo2, hi2));
+        }
+
+        return (ulong)mask.ExtractMostSignificantBits();
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe ulong ClassBits128(byte* p, int ranges, byte lo0, byte hi0, byte lo1, byte hi1, byte lo2, byte hi2)
+    {
+        var bias = Vector128.Create((byte)0x80);
+        var biased = Sse2.Xor(Sse2.LoadVector128(p), bias);
+        var mask = ClassFinder.Range128(biased, lo0, hi0);
+        if (ranges > 1)
+        {
+            mask = Sse2.Or(mask, ClassFinder.Range128(biased, lo1, hi1));
+        }
+
+        if (ranges > 2)
+        {
+            mask = Sse2.Or(mask, ClassFinder.Range128(biased, lo2, hi2));
+        }
+
+        return (ulong)mask.ExtractMostSignificantBits();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool RunContinues(ReadOnlySpan<byte> text, int end, int need)
+    {
+        for (var k = 0; k < need; k++)
+        {
+            if (!In(text[end + k]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool WalkDense(
+        ReadOnlySpan<byte> text,
+        bool allowNewline,
+        bool stopAtFirst,
+        List<ByteMatch> hits,
+        ulong bits,
+        int chunk,
+        int width,
+        ref int i)
+    {
+        if (TrySkipShortRuns(text, allowNewline, stopAtFirst, hits, bits, chunk, width, ref i, out var stop))
+        {
+            return !stop;
+        }
+
+        return WalkChunk(text, allowNewline, stopAtFirst, hits, bits, chunk, width, ref i);
+    }
+
+    /// <summary>
+    /// Skips a chunk whose longest in-window run is shorter than the minimum.
+    /// A run that touches the right edge is finished in scalar so it can cross chunks.
+    /// Returns false when the caller should walk every member bit.
+    /// </summary>
+    private bool TrySkipShortRuns(
+        ReadOnlySpan<byte> text,
+        bool allowNewline,
+        bool stopAtFirst,
+        List<ByteMatch> hits,
+        ulong bits,
+        int chunk,
+        int width,
+        ref int i,
+        out bool stop)
+    {
+        stop = false;
+        if (_min <= 1 || _min > 64)
+        {
+            return false;
+        }
+
+        var acc = bits;
+        var shifted = bits;
+        for (var s = 1; s < _min; s++)
+        {
+            shifted >>= 1;
+            acc &= shifted;
+        }
+
+        if (acc != 0)
+        {
+            return false;
+        }
+
+        var suffix = 0;
+        for (var b = width - 1; b >= 0; b--)
+        {
+            if ((bits & (1UL << b)) == 0)
+            {
+                break;
+            }
+
+            suffix++;
+        }
+
+        if (suffix == 0)
+        {
+            i = chunk + width;
+            return true;
+        }
+
+        var start = chunk + width - suffix;
+        var end = chunk + width;
+        if (end < text.Length && In(text[end]))
+        {
+            while (end < text.Length && In(text[end]))
+            {
+                end++;
+            }
+        }
+
+        stop = EmitRun(text, allowNewline, stopAtFirst, hits, start, end);
+        i = end;
+        return true;
     }
 
     /// <summary>

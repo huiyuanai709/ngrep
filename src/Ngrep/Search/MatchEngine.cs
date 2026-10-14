@@ -244,11 +244,6 @@ internal sealed class MatchPlan
             return false;
         }
 
-        if (!Ascii.IsValid(bytes))
-        {
-            return false;
-        }
-
         var countOnly = plan.Report == ReportMode.FilesWithoutMatch && !plan.CollectAll;
         var hits = countOnly ? null : new List<Hit>();
         foreach (var program in plan.BytePrograms)
@@ -259,6 +254,8 @@ internal sealed class MatchPlan
             {
                 if (countOnly)
                 {
+                    // An ASCII pattern's bytes are the same in UTF-8, so a hit exists
+                    // whether or not a later byte is non-ASCII.
                     matched = true;
                     return true;
                 }
@@ -267,10 +264,13 @@ internal sealed class MatchPlan
                 hits!.Add(new Hit(candidate.Index, candidate.Length, value));
                 if (plan.StopAtFirst)
                 {
-                    EmitByteHits(bytes, relativePath, hits, matches);
-                    matched = true;
-                    return true;
+                    break;
                 }
+            }
+
+            if (plan.StopAtFirst && hits is { Count: > 0 })
+            {
+                break;
             }
         }
 
@@ -279,8 +279,21 @@ internal sealed class MatchPlan
             return true;
         }
 
-        EmitByteHits(bytes, relativePath, hits!, matches);
-        matched = hits!.Count > 0;
+        if (hits!.Count == 0)
+        {
+            matched = false;
+            return true;
+        }
+
+        // Columns are byte offsets only while the file is ASCII. A hit in a
+        // non-ASCII file is confirmed again on the decoded string.
+        if (!Ascii.IsValid(bytes))
+        {
+            return false;
+        }
+
+        EmitByteHits(bytes, relativePath, hits, matches);
+        matched = true;
         return true;
     }
 
