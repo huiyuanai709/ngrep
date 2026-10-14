@@ -1,2 +1,2 @@
-- ship netgrep
+- ship ngrep
 - keep the index incremental

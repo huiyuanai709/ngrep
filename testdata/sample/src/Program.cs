@@ -4,6 +4,6 @@ public static class Program
 {
     public static void Main()
     {
-        System.Console.WriteLine("netgrep sample");
+        System.Console.WriteLine("ngrep sample");
     }
 }

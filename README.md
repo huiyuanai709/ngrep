@@ -1,6 +1,6 @@
-# netgrep
+# ngrep
 
-netgrep is a small search CLI in the spirit of ripgrep: it walks a tree, honors `.gitignore`, and builds a trigram inverted index so later searches do not read every file. Output is stable text, JSON, or NDJSON for tools that want path, line, and column.
+ngrep is a small search CLI in the spirit of ripgrep: it walks a tree, honors `.gitignore`, and builds a trigram inverted index so later searches do not read every file. Output is stable text, JSON, or NDJSON for tools that want path, line, and column.
 
 The index format is [docs/index-format.md](docs/index-format.md). Ignore rules, command behavior, and library choices are in [DESIGN.md](DESIGN.md).
 
@@ -13,9 +13,9 @@ The index format is [docs/index-format.md](docs/index-format.md). Ignore rules, 
 ```bash
 dotnet build
 dotnet test
-dotnet run --project src/Netgrep -- index testdata/sample
-dotnet run --project src/Netgrep -- netgrep testdata/sample
-dotnet run --project src/Netgrep -- search netgrep testdata/sample --format ndjson
+dotnet run --project src/Ngrep -- index testdata/sample
+dotnet run --project src/Ngrep -- ngrep testdata/sample
+dotnet run --project src/Ngrep -- search ngrep testdata/sample --format ndjson
 ```
 
 `testdata/sample` is a tiny tree with a nested `.gitignore`, a binary file, and a log that should not match.
@@ -23,13 +23,13 @@ dotnet run --project src/Netgrep -- search netgrep testdata/sample --format ndjs
 ## Commands
 
 ```text
-netgrep <pattern> [path] [search flags]
-netgrep search <pattern> [path] [search flags]
-netgrep index <path> [--index <dir>] [--format text|json|ndjson]
-netgrep watch <path> [--index <dir>] [--format text|json|ndjson]
+ngrep <pattern> [path] [search flags]
+ngrep search <pattern> [path] [search flags]
+ngrep index <path> [--index <dir>] [--format text|json|ndjson]
+ngrep watch <path> [--index <dir>] [--format text|json|ndjson]
 ```
 
-`netgrep <pattern> [path]` is the same command as `netgrep search`. The first positional word is a subcommand only when it is `index`, `search`, or `watch`. To search for the literal `index`, run `netgrep search index` or `netgrep -- index`.
+`ngrep <pattern> [path]` is the same command as `ngrep search`. The first positional word is a subcommand only when it is `index`, `search`, or `watch`. To search for the literal `index`, run `ngrep search index` or `ngrep -- index`.
 
 Search flags:
 
@@ -47,15 +47,15 @@ Search flags:
 [-j|--threads <n>]
 ```
 
-`index` writes `<path>/.netgrep/index` unless `--index` is set. Running it again updates changed files and drops deleted ones (size + mtime, then SHA-256).
+`index` writes `<path>/.ngrep/index` unless `--index` is set. Running it again updates changed files and drops deleted ones (size + mtime, then SHA-256).
 
-Search looks upward from `[path]` (default `.`) for `.netgrep/index`. When an index covers the path, netgrep builds a required-literal prefilter and intersects trigram postings before reading candidates. A literal, or a regex piece, can feed that filter when every alternative has a required substring of 3+ characters (`foo`, `foo.*bar`, `foo|bar`, `(ab){2}`, `n.tgrep`). The file is still read to confirm the real match, so a prefilter hit is not a result. Trigrams cannot help when an alternative is shorter than 3 (`ab`, `a|netgrep`, `foo*` which must allow `fo`), when the pattern can match with no required text (`.`, `a*`), when the syntax is not extracted (lookaround, backreferences), or when `-v` is set. Those queries read every indexed file. An ASCII required piece still rejects a file from its bytes before the text is decoded, including pieces shorter than 3. With no index, `--scan`, `--no-ignore`, `--no-ignore-vcs`, or a path outside the indexed root, netgrep scans contents and prints a one-line note on stderr. You do not pass `--scan` just because the tree has never been indexed. The index does not contain gitignored files, so the ignore flags always scan.
+Search looks upward from `[path]` (default `.`) for `.ngrep/index`. When an index covers the path, ngrep builds a required-literal prefilter and intersects trigram postings before reading candidates. A literal, or a regex piece, can feed that filter when every alternative has a required substring of 3+ characters (`foo`, `foo.*bar`, `foo|bar`, `(ab){2}`, `n.grep`). The file is still read to confirm the real match, so a prefilter hit is not a result. Trigrams cannot help when an alternative is shorter than 3 (`ab`, `a|ngrep`, `foo*` which must allow `fo`), when the pattern can match with no required text (`.`, `a*`), when the syntax is not extracted (lookaround, backreferences), or when `-v` is set. Those queries read every indexed file. An ASCII required piece still rejects a file from its bytes before the text is decoded, including pieces shorter than 3. With no index, `--scan`, `--no-ignore`, `--no-ignore-vcs`, or a path outside the indexed root, ngrep scans contents and prints a one-line note on stderr. You do not pass `--scan` just because the tree has never been indexed. The index does not contain gitignored files, so the ignore flags always scan.
 
-Patterns are OR. `-e` / `--regexp` may be repeated. A positional pattern written before the first `-e` or `-f` is included; once either flag is present, the remaining positional argument is the path (`netgrep -e foo -e bar src`, `netgrep -f pats.txt src`). `--regex` applies to every pattern, including patterns read from a file. `-w` keeps a match only when both ends are word boundaries (a Unicode letter, digit, or `_` on one side and a non-word character or the end of the text on the other). `-v` prints each line that matches none of the patterns; `text` and `lineText` are that line and `column` is 1.
+Patterns are OR. `-e` / `--regexp` may be repeated. A positional pattern written before the first `-e` or `-f` is included; once either flag is present, the remaining positional argument is the path (`ngrep -e foo -e bar src`, `ngrep -f pats.txt src`). `--regex` applies to every pattern, including patterns read from a file. `-w` keeps a match only when both ends are word boundaries (a Unicode letter, digit, or `_` on one side and a non-word character or the end of the text on the other). `-v` prints each line that matches none of the patterns; `text` and `lineText` are that line and `column` is 1.
 
-`-f` / `--file` reads more patterns, one per line, and OR-s them after positional and `-e` patterns. Repeat the flag for several files. `-` reads stdin. The newline is not part of the pattern, and a trailing newline does not add an extra pattern. An empty line is an empty pattern and matches every line (one hit per line, column 1, `text` empty, `lineText` the line). A line whose first character is `#` is a normal pattern, including the `#`. Nothing in the file is a comment, and `\#` is not rewritten: without `--regex` the backslash is literal, and with `--regex` it is a regex escape (`\#` matches `#`). A missing or unreadable path exits 2 (`Pattern file not found`). A zero-length file that yields no lines, and no `-e` or positional pattern, exits 2 (`Pattern file contains no patterns`). `#` comments belong to ripgrep's config file (`RIPGREP_CONFIG_PATH`), which netgrep does not read.
+`-f` / `--file` reads more patterns, one per line, and OR-s them after positional and `-e` patterns. Repeat the flag for several files. `-` reads stdin. The newline is not part of the pattern, and a trailing newline does not add an extra pattern. An empty line is an empty pattern and matches every line (one hit per line, column 1, `text` empty, `lineText` the line). A line whose first character is `#` is a normal pattern, including the `#`. Nothing in the file is a comment, and `\#` is not rewritten: without `--regex` the backslash is literal, and with `--regex` it is a regex escape (`\#` matches `#`). A missing or unreadable path exits 2 (`Pattern file not found`). A zero-length file that yields no lines, and no `-e` or positional pattern, exits 2 (`Pattern file contains no patterns`). `#` comments belong to ripgrep's config file (`RIPGREP_CONFIG_PATH`), which ngrep does not read.
 
-`-g` is repeatable. A glob that starts with `!` excludes, same as ripgrep. If any glob does not start with `!`, a file must be selected by an include. When several globs match one path, the last one wins. Globs use gitignore syntax (`*`, `?`, `**`, `[abc]`) and run after `.gitignore`. They do not bring a gitignored file back. `netgrep foo -g '*.log'` still skips a gitignored log. `--no-ignore` and `--no-ignore-vcs` turn `.gitignore` off so those files are walked, and `-g` then filters that larger set (`--no-ignore -g '*.log'` prints the log). netgrep does not read `.ignore` or global git excludes, so the two flags do the same thing. `.git`, `.netgrep`, the index directory, and symlinks stay skipped either way.
+`-g` is repeatable. A glob that starts with `!` excludes, same as ripgrep. If any glob does not start with `!`, a file must be selected by an include. When several globs match one path, the last one wins. Globs use gitignore syntax (`*`, `?`, `**`, `[abc]`) and run after `.gitignore`. They do not bring a gitignored file back. `ngrep foo -g '*.log'` still skips a gitignored log. `--no-ignore` and `--no-ignore-vcs` turn `.gitignore` off so those files are walked, and `-g` then filters that larger set (`--no-ignore -g '*.log'` prints the log). ngrep does not read `.ignore` or global git excludes, so the two flags do the same thing. `.git`, `.ngrep`, the index directory, and symlinks stay skipped either way.
 
 `-t` selects built-in types (OR if repeated). `-T` excludes types. `--type-list` prints the set and exits 0. `--type-add name:*.ext[,*.ext]` adds globs (a bare extension means `*.ext`; `name:include:*.ext` is accepted). Type names are case-insensitive. Types compose with globs and with `.gitignore` the same way: ignored files stay ignored.
 
@@ -67,7 +67,7 @@ Patterns are OR. `-e` / `--regexp` may be repeated. A positional pattern written
 
 `-o` / `--only-matching` changes text output to `path:line:column:text`, the matched slice, one line per hit. JSON and NDJSON stay `path`, `line`, `column`, `text`, `lineText`. `text` was already the slice. Context flags still fill `before` / `after` in JSON; text `-o` does not print context lines.
 
-Hidden files and directories (any path component whose name starts with `.`) are skipped by default. `--hidden` searches them. Naming a file, or a directory, still searches that path: `netgrep pat .secret` reads `.secret`, and `netgrep pat .github` reads non-hidden children of `.github`. Hard skips stay skipped with or without `--hidden`, `--no-ignore`, or an explicit path: a directory named `.git` or `.netgrep`, the index directory, and symlinks. `-g` does not bring a skipped hidden path back (same rule as gitignore). A gitignore negation does not un-hide a dotfile; pass `--hidden`. `--no-ignore` does not imply `--hidden`. The index still stores hidden files so `--hidden` can use it. A content scan skips them in the walk unless the flag is set.
+Hidden files and directories (any path component whose name starts with `.`) are skipped by default. `--hidden` searches them. Naming a file, or a directory, still searches that path: `ngrep pat .secret` reads `.secret`, and `ngrep pat .github` reads non-hidden children of `.github`. Hard skips stay skipped with or without `--hidden`, `--no-ignore`, or an explicit path: a directory named `.git` or `.ngrep`, the index directory, and symlinks. `-g` does not bring a skipped hidden path back (same rule as gitignore). A gitignore negation does not un-hide a dotfile; pass `--hidden`. `--no-ignore` does not imply `--hidden`. The index still stores hidden files so `--hidden` can use it. A content scan skips them in the walk unless the flag is set.
 
 `--color` is `auto` (default), `always`, or `never`. `auto` colors text when stdout is a terminal, `NO_COLOR` is unset, and `TERM` is not `dumb`. `--color` alone means `auto`. JSON, NDJSON, and rgjson are never colored. Text uses magenta paths, green line numbers, blue columns, and bold red matches. There is no `--colors` spec.
 
@@ -89,7 +89,7 @@ Stdout formats are unchanged. “Files searched” counts files whose contents w
 
 `--format rgjson` is a separate search-only event stream (`begin`, `match`, `context`, `end`, `summary`). It does not replace `--format json` or `ndjson`. `lines.text` is the line plus a newline. `submatches[].start` / `end` are 0-based UTF-16 offsets into that line, not file byte offsets. `absolute_offset` is the 0-based UTF-16 index of the start of that line in the decoded text, not a file byte offset. `summary.data.stats.elapsed_ms` is wall time for the search. When `-A`, `-B`, or `-C` is set, surrounding lines are `type: context` events (deduped the same way as text context) and are not added to `--format json` match objects. A cross-line match keeps the full slice in `submatches[].match.text`; `end` stops at the first line. `index` and `watch` reject `rgjson` (exit 2).
 
-`-j` / `--threads` bounds confirmation workers (default: processor count, or `NETGREP_THREADS`). `1` forces a single worker.
+`-j` / `--threads` bounds confirmation workers (default: processor count, or `NGREP_THREADS`). `NETGREP_THREADS` is read only when `NGREP_THREADS` is unset. `1` forces a single worker.
 
 `watch` indexes once, then reindexes about 300 ms after a change. It is a thin `FileSystemWatcher` loop: it does not follow symlinks, it ignores its own index writes, and a `.gitignore` edit is just another incremental rebuild. Ctrl+C exits 0.
 
@@ -108,13 +108,13 @@ Errors are plain text on stderr. Stdout is only the selected format, including w
 Text (human):
 
 ```text
-src/Program.cs:7:35:        System.Console.WriteLine("netgrep sample");
+src/Program.cs:7:35:        System.Console.WriteLine("ngrep sample");
 ```
 
 NDJSON, one object per line, and each object inside `search --format json` → `matches`:
 
 ```json
-{"path":"src/Program.cs","line":7,"column":35,"text":"netgrep","lineText":"        System.Console.WriteLine(\"netgrep sample\");"}
+{"path":"src/Program.cs","line":7,"column":35,"text":"ngrep","lineText":"        System.Console.WriteLine(\"ngrep sample\");"}
 ```
 
 `line` and `column` are 1-based. `column` counts UTF-16 code units, which is the same as a Unicode code point for BMP text. `text` is the matched slice (`lineText` when `-v` is set). `lineText` is the full line without its newline. Paths use `/` and are relative to the index root (or to the scanned directory when there is no index).
@@ -127,26 +127,30 @@ When `-A`, `-B`, or `-C` is set, each match object also has `before` and `after`
 
 ## Index location
 
-Default: `<root>/.netgrep/index` (`manifest.json`, `documents.ndjson`, `postings.bin`). The walker does not index that directory. Override with `--index`.
+Default: `<root>/.ngrep/index` (`manifest.json`, `documents.ndjson`, `postings.bin`). The walker does not index that directory. Override with `--index`. A directory named `.netgrep` from an older build is not read; run `index` again to write `.ngrep`.
 
 ## Ignore rules
 
 - Nested `.gitignore` files apply, from the git root down to the file. Outside a git checkout, only `.gitignore` files under the path you passed are used.
-- `.git`, `.netgrep`, the index directory, and symlinks are always skipped.
+- `.git`, `.ngrep`, the index directory, and symlinks are always skipped.
 - Binary files (NUL in the first 8 KiB) and files larger than 32 MiB are skipped.
 - A parent directory that is ignored stays ignored; `!keep.txt` cannot resurrect a file inside `build/` if `build/` itself is ignored. `build/*` plus `!build/keep.txt` can. Details and the glob dialect are in [DESIGN.md](DESIGN.md).
 
-`testdata/sample/skip-me.log`, `src/Nested/scratch.tmp`, and `generated/out.txt` are force-added so the fixture is in git. netgrep still ignores them.
+`testdata/sample/skip-me.log`, `src/Nested/scratch.tmp`, and `generated/out.txt` are force-added so the fixture is in git. ngrep still ignores them.
 
 ## Native AOT
 
-PublishAot is on in `src/Netgrep/Netgrep.csproj`, along with invariant globalization and reflection-free JSON.
+PublishAot is on in `src/Ngrep/Ngrep.csproj`, along with invariant globalization and reflection-free JSON.
 
 ```bash
-dotnet publish src/Netgrep/Netgrep.csproj -c Release -r linux-x64
+dotnet publish src/Ngrep/Ngrep.csproj -c Release -r linux-x64
 ```
 
-The native binary is `src/Netgrep/bin/Release/net11.0/linux-x64/publish/netgrep`. `dotnet build` / `dotnet run` stay on the JIT, which is the right loop for development.
+That publish uses Satori GC (`PublishWithSatoriGC` 11.0.0-satori.38196422592.1). Satori applies only to the self-contained Native AOT publish. `dotnet test` and `dotnet run` stay on the stock JIT GC. Pass `/p:UseSatoriGC=false` to publish with the stock GC instead. `ServerGarbageCollection` stays false.
+
+The native binary is `src/Ngrep/bin/Release/net11.0/linux-x64/publish/ngrep`. `dotnet build` / `dotnet run` stay on the JIT, which is the right loop for development.
+
+To cut a release, set `<Version>` in `src/Ngrep/Ngrep.csproj` and push a tag `vX.Y.Z` with that same number (`v0.2.0` for version `0.2.0`). [`.github/workflows/release.yml`](.github/workflows/release.yml) builds Native AOT binaries and uploads `ngrep-linux-x64`, `ngrep-win-x64.exe`, `ngrep-osx-arm64`, and `ngrep-osx-x64` (when the macOS runner has an x64 toolchain) to the GitHub Release for that tag. Only the two newest releases are kept. After each publish the workflow deletes every older release and its tag. The workflow can also be run by hand with a version; it creates the tag when the tag is missing.
 
 `dotnet publish -c Release -r linux-x64` completed on this machine with the .NET 11 RC SDK and no trimmer warnings. The result is a stripped ELF (~4.5 MB) that is dynamically linked against the system libc, not a fully static musl binary. `index` and `search --format ndjson` were run from that binary.
 

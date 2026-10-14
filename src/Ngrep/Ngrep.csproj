@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Sdk Name="PublishWithSatoriGC" Version="11.0.0-satori.38196422592.1" />
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <AssemblyName>ngrep</AssemblyName>
+    <RootNamespace>Ngrep</RootNamespace>
+    <Version>0.2.0</Version>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <PublishAot>true</PublishAot>
+    <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
+    <StripSymbols>true</StripSymbols>
+    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+    <EventSourceSupport>false</EventSourceSupport>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <!-- Native AOT publish uses Satori GC. /p:UseSatoriGC=false restores the stock GC. -->
+    <UseSatoriGC Condition="'$(UseSatoriGC)' == ''">true</UseSatoriGC>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" Version="2.0.12" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ngrep.Tests" />
+  </ItemGroup>
+</Project>

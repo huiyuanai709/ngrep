@@ -1,6 +1,6 @@
-# netgrep index format v1
+# ngrep index format v1
 
-The index is a directory, by default `<root>/.netgrep/index`. `netgrep index --index <dir>` writes somewhere else. A rewrite is atomic on the same filesystem: files are written to `<index>.tmp`, the previous directory is renamed to `<index>.bak`, then the temp directory becomes `<index>`. A crash can leave `.bak`. Readers use `<index>` when `manifest.json` is there, and otherwise fall back to `<index>.bak`.
+The index is a directory, by default `<root>/.ngrep/index`. `ngrep index --index <dir>` writes somewhere else. An index left in `.netgrep` is not opened; index the tree again so it is written under `.ngrep`. A rewrite is atomic on the same filesystem: files are written to `<index>.tmp`, the previous directory is renamed to `<index>.bak`, then the temp directory becomes `<index>`. A crash can leave `.bak`. Readers use `<index>` when `manifest.json` is there, and otherwise fall back to `<index>.bak`.
 
 ## manifest.json
 
@@ -9,7 +9,7 @@ UTF-8 JSON object, indented, field names stable:
 | Field | Meaning |
 | --- | --- |
 | `formatVersion` | Integer. This document is version **1**. |
-| `tool` | `netgrep`. |
+| `tool` | `ngrep`. |
 | `root` | Absolute path of the indexed tree at build time. |
 | `createdUtc` | First build, `yyyy-MM-ddTHH:mm:ss.fffZ`. |
 | `updatedUtc` | Latest build, same format. |
@@ -62,7 +62,7 @@ A literal query of length >= 3 is answered by intersecting the posting lists of 
 
 ## Incremental updates
 
-`netgrep index` on an existing directory is a logical per-file update:
+`ngrep index` on an existing directory is a logical per-file update:
 
 - unchanged size and mtime: keep the document and its postings
 - same SHA-256: refresh size/mtime only
@@ -73,4 +73,4 @@ v1 rewrites `postings.bin` and `documents.ndjson` as a whole. The per-file work 
 
 ## What is not in the index
 
-The walker never enters `.git` or `.netgrep` directories, symlinks, or the index directory itself when it lives inside the tree. Gitignore rules drop files before they are hashed. A file whose first 8192 bytes contain a `NUL` is binary and is not a document. Files larger than 32 MiB are skipped.
+The walker never enters `.git` or `.ngrep` directories, symlinks, or the index directory itself when it lives inside the tree. Gitignore rules drop files before they are hashed. A file whose first 8192 bytes contain a `NUL` is binary and is not a document. Files larger than 32 MiB are skipped.
