@@ -411,7 +411,8 @@ internal static class Searcher
                 return;
             }
 
-            if (!plan.Invert && plan.Literals != null && plan.Literals.Misses(read.Span, plan.IgnoreCase))
+            // The byte automaton already scans. A literal prefilter would read the file again.
+            if (plan.BytePrograms == null && !plan.Invert && plan.Literals != null && plan.Literals.Misses(read.Span, plan.IgnoreCase))
             {
                 tally.File(matched: false);
                 filesWithoutMatch?.Add(file.RelativePath);

@@ -29,6 +29,12 @@ public class RegexEngineTests
             "foo.bar\nfooXbar\n",
             "NEEDLE\nNEEDLE9\n",
             new string('x', 180) + "abc NEEDLE9 foo bar\n" + new string('y', 90) + "ABCxyz",
+            new string('c', 7),
+            new string('c', 8),
+            new string('c', 20),
+            new string('x', 57) + new string('c', 7) + "yyyy",
+            new string('x', 60) + new string('c', 12) + new string('y', 40),
+            string.Concat(Enumerable.Repeat("cxxxxxxx", 40)),
         };
         var patterns = new[]
         {
@@ -49,6 +55,8 @@ public class RegexEngineTests
             @"\bword\b",
             @"token\s*=\s*[0-9]+",
             "[abc]{2}",
+            "[abc]{8}",
+            "[abc]{8,12}",
             "[A-Za-z]{3}",
             "n.t",
             @"foo\.bar",
@@ -95,6 +103,20 @@ public class RegexEngineTests
         program.Collect(bytes, dotAll, stopAtFirst: false, hits);
         var actual = hits.Select(hit => $"{hit.Index}:{hit.Length}:{text.Substring(hit.Index, hit.Length)}").ToArray();
         Assert.Equal(expected, actual);
+    }
+
+    [Theory]
+    [InlineData(56)]
+    [InlineData(57)]
+    [InlineData(60)]
+    [InlineData(63)]
+    [InlineData(64)]
+    [InlineData(70)]
+    public void Class_run_matches_across_a_simd_chunk_boundary(int pad)
+    {
+        var text = new string('x', pad) + new string('c', 8) + "y";
+        Byte_automaton_matches_nonbacktracking_spans("[abc]{8}", text, false);
+        Byte_automaton_matches_nonbacktracking_spans("[abc]{2,4}", text, false);
     }
 
     [Fact]
