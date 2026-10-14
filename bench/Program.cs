@@ -146,6 +146,36 @@ static void ScannerThroughput()
 
     clock.Stop();
     Console.WriteLine($"bcl_indexof_gbps={bytes / clock.Elapsed.TotalSeconds / 1e9:F2} found={found}");
+
+    if (Ngrep.Search.ByteAutomaton.TryCompile("[abc]{8}", new Ngrep.Search.ByteAutomaton.Options(false, false), out var classProgram))
+    {
+        var hits = new List<Ngrep.Search.ByteMatch>();
+        classProgram.Collect(data, false, false, hits);
+        clock.Restart();
+        for (var i = 0; i < iters; i++)
+        {
+            hits.Clear();
+            classProgram.Collect(data, false, false, hits);
+        }
+
+        clock.Stop();
+        Console.WriteLine($"class_run_miss_gbps={bytes / clock.Elapsed.TotalSeconds / 1e9:F2} hits={hits.Count} program={classProgram.GetType().Name}");
+    }
+
+    if (Ngrep.Search.ByteAutomaton.TryCompile("[A-Z]{8}", new Ngrep.Search.ByteAutomaton.Options(false, false), out var wideProgram))
+    {
+        var hits = new List<Ngrep.Search.ByteMatch>();
+        wideProgram.Collect(data, false, false, hits);
+        clock.Restart();
+        for (var i = 0; i < iters; i++)
+        {
+            hits.Clear();
+            wideProgram.Collect(data, false, false, hits);
+        }
+
+        clock.Stop();
+        Console.WriteLine($"wide_class_gbps={bytes / clock.Elapsed.TotalSeconds / 1e9:F2} hits={hits.Count} program={wideProgram.GetType().Name}");
+    }
 }
 
 static void WriteLarge(string root, int count, int bytesEach)

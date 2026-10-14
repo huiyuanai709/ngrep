@@ -100,6 +100,14 @@ internal sealed class ClassFinder
             return new ClassFinder(Kind.None, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, m0, m1, m2, m3);
         }
 
+        // A few inclusive ranges compile to a tight compare loop. Single-byte
+        // ranges ([abc]) take that path too: the member loop's per-byte branches
+        // were several times slower on a miss.
+        if (rangeCount is >= 1 and <= 3)
+        {
+            return new ClassFinder(Kind.Ranges, 0, 0, 0, 0, 0, 0, 0, 0, 0, rangeCount, lo0, hi0, lo1, hi1, lo2, hi2, m0, m1, m2, m3);
+        }
+
         if (memberCount <= 8)
         {
             return new ClassFinder(
@@ -117,12 +125,28 @@ internal sealed class ClassFinder
                 m0, m1, m2, m3);
         }
 
-        if (rangeCount is >= 1 and <= 3)
+        return new ClassFinder(Kind.Scalar, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, m0, m1, m2, m3);
+    }
+
+    public int RangeCount => _kind == Kind.Ranges ? _rangeCount : 0;
+
+    public bool TryRanges(out int count, out byte lo0, out byte hi0, out byte lo1, out byte hi1, out byte lo2, out byte hi2)
+    {
+        if (_kind != Kind.Ranges)
         {
-            return new ClassFinder(Kind.Ranges, 0, 0, 0, 0, 0, 0, 0, 0, 0, rangeCount, lo0, hi0, lo1, hi1, lo2, hi2, m0, m1, m2, m3);
+            count = 0;
+            lo0 = hi0 = lo1 = hi1 = lo2 = hi2 = 0;
+            return false;
         }
 
-        return new ClassFinder(Kind.Scalar, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, m0, m1, m2, m3);
+        count = _rangeCount;
+        lo0 = _lo0;
+        hi0 = _hi0;
+        lo1 = _lo1;
+        hi1 = _hi1;
+        lo2 = _lo2;
+        hi2 = _hi2;
+        return true;
     }
 
     public int Next(ReadOnlySpan<byte> text, int start)
@@ -495,17 +519,18 @@ internal sealed class ClassFinder
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Vector512<byte> Range512(Vector512<byte> biased, byte lo, byte hi)
+    internal static Vector512<byte> Range512(Vector512<byte> biased, byte lo, byte hi)
     {
         var loV = Vector512.Create((byte)(lo ^ 0x80));
         var hiV = Vector512.Create((byte)(hi ^ 0x80));
-        var ge = Avx512F.Or(Avx512BW.CompareEqual(biased, loV), Avx512BW.CompareGreaterThan(biased, loV));
-        var le = Avx512F.Or(Avx512BW.CompareEqual(biased, hiV), Avx512BW.CompareGreaterThan(hiV, biased));
+        // Byte CompareGreaterThan is unsigned. The 0x80 bias is a signed order, so compare as sbyte.
+        var ge = Avx512F.Or(Avx512BW.CompareEqual(biased, loV), Avx512BW.CompareGreaterThan(biased.AsSByte(), loV.AsSByte()).AsByte());
+        var le = Avx512F.Or(Avx512BW.CompareEqual(biased, hiV), Avx512BW.CompareGreaterThan(hiV.AsSByte(), biased.AsSByte()).AsByte());
         return Avx512F.And(ge, le);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Vector256<byte> Range256(Vector256<byte> biased, byte lo, byte hi)
+    internal static Vector256<byte> Range256(Vector256<byte> biased, byte lo, byte hi)
     {
         var loV = Vector256.Create((byte)(lo ^ 0x80));
         var hiV = Vector256.Create((byte)(hi ^ 0x80));
@@ -515,7 +540,7 @@ internal sealed class ClassFinder
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Vector128<byte> Range128(Vector128<byte> biased, byte lo, byte hi)
+    internal static Vector128<byte> Range128(Vector128<byte> biased, byte lo, byte hi)
     {
         var loV = Vector128.Create((byte)(lo ^ 0x80));
         var hiV = Vector128.Create((byte)(hi ^ 0x80));

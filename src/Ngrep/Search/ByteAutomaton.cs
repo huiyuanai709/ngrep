@@ -1,3 +1,7 @@
+using System.Numerics;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using Ngrep.Text;
 
 namespace Ngrep.Search;
@@ -1497,6 +1501,29 @@ internal sealed class ClassRunProgram : ByteProgram
 
     public override void Collect(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits)
     {
+        if (text.Length >= 64 && Avx512BW.IsSupported && _finder.RangeCount > 0)
+        {
+            CollectRanges512(text, allowNewline, stopAtFirst, hits);
+            return;
+        }
+
+        if (text.Length >= 32 && Avx2.IsSupported && _finder.RangeCount > 0)
+        {
+            CollectRanges256(text, allowNewline, stopAtFirst, hits);
+            return;
+        }
+
+        if (text.Length >= 16 && Sse2.IsSupported && _finder.RangeCount > 0)
+        {
+            CollectRanges128(text, allowNewline, stopAtFirst, hits);
+            return;
+        }
+
+        CollectScalar(text, allowNewline, stopAtFirst, hits);
+    }
+
+    private void CollectScalar(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits)
+    {
         var i = 0;
         while (i < text.Length)
         {
@@ -1512,53 +1539,302 @@ internal sealed class ClassRunProgram : ByteProgram
                 j++;
             }
 
-            var run = j - i;
-            if (run >= _min)
+            if (EmitRun(text, allowNewline, stopAtFirst, hits, i, j))
             {
-                if (!_lazy && _max < 0)
-                {
-                    AddHit(text, allowNewline, stopAtFirst, hits, i, run);
-                    if (stopAtFirst && hits.Count > 0)
-                    {
-                        return;
-                    }
-                }
-                else if (_lazy)
-                {
-                    var step = Math.Max(1, _min);
-                    for (var p = i; p + _min <= j; p += step)
-                    {
-                        AddHit(text, allowNewline, stopAtFirst, hits, p, _min);
-                        if (stopAtFirst && hits.Count > 0)
-                        {
-                            return;
-                        }
-                    }
-                }
-                else
-                {
-                    var p = i;
-                    while (p + _min <= j)
-                    {
-                        var take = Math.Min(_max, j - p);
-                        if (take < _min)
-                        {
-                            break;
-                        }
-
-                        AddHit(text, allowNewline, stopAtFirst, hits, p, take);
-                        if (stopAtFirst && hits.Count > 0)
-                        {
-                            return;
-                        }
-
-                        p += take;
-                    }
-                }
+                return;
             }
 
             i = j;
         }
+    }
+
+    private unsafe void CollectRanges512(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits)
+    {
+        if (!Avx512BW.IsSupported || !_finder.TryRanges(out var ranges, out var lo0, out var hi0, out var lo1, out var hi1, out var lo2, out var hi2))
+        {
+            CollectScalar(text, allowNewline, stopAtFirst, hits);
+            return;
+        }
+
+        ref var origin = ref MemoryMarshal.GetReference(text);
+        var i = 0;
+        fixed (byte* basePtr = &origin)
+        {
+            var bias = Vector512.Create((byte)0x80);
+            var last = text.Length - 64;
+            while (i <= last)
+            {
+                var biased = Avx512F.Xor(Avx512F.LoadVector512(basePtr + i), bias);
+                var mask = ClassFinder.Range512(biased, lo0, hi0);
+                if (ranges > 1)
+                {
+                    mask = Avx512F.Or(mask, ClassFinder.Range512(biased, lo1, hi1));
+                }
+
+                if (ranges > 2)
+                {
+                    mask = Avx512F.Or(mask, ClassFinder.Range512(biased, lo2, hi2));
+                }
+
+                var bits = mask.ExtractMostSignificantBits();
+                if (bits == 0)
+                {
+                    i += 64;
+                    continue;
+                }
+
+                if (!WalkChunk(text, allowNewline, stopAtFirst, hits, bits, i, 64, ref i))
+                {
+                    return;
+                }
+            }
+        }
+
+        if (i < text.Length)
+        {
+            CollectScalarFrom(text, allowNewline, stopAtFirst, hits, i);
+        }
+    }
+
+    private unsafe void CollectRanges256(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits)
+    {
+        if (!Avx2.IsSupported || !_finder.TryRanges(out var ranges, out var lo0, out var hi0, out var lo1, out var hi1, out var lo2, out var hi2))
+        {
+            CollectScalar(text, allowNewline, stopAtFirst, hits);
+            return;
+        }
+
+        ref var origin = ref MemoryMarshal.GetReference(text);
+        var i = 0;
+        fixed (byte* basePtr = &origin)
+        {
+            var bias = Vector256.Create((byte)0x80);
+            var last = text.Length - 32;
+            while (i <= last)
+            {
+                var biased = Avx2.Xor(Avx.LoadVector256(basePtr + i), bias);
+                var mask = ClassFinder.Range256(biased, lo0, hi0);
+                if (ranges > 1)
+                {
+                    mask = Avx2.Or(mask, ClassFinder.Range256(biased, lo1, hi1));
+                }
+
+                if (ranges > 2)
+                {
+                    mask = Avx2.Or(mask, ClassFinder.Range256(biased, lo2, hi2));
+                }
+
+                var bits = (ulong)mask.ExtractMostSignificantBits();
+                if (bits == 0)
+                {
+                    i += 32;
+                    continue;
+                }
+
+                if (!WalkChunk(text, allowNewline, stopAtFirst, hits, bits, i, 32, ref i))
+                {
+                    return;
+                }
+            }
+        }
+
+        if (i < text.Length)
+        {
+            CollectScalarFrom(text, allowNewline, stopAtFirst, hits, i);
+        }
+    }
+
+    private unsafe void CollectRanges128(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits)
+    {
+        if (!Sse2.IsSupported || !_finder.TryRanges(out var ranges, out var lo0, out var hi0, out var lo1, out var hi1, out var lo2, out var hi2))
+        {
+            CollectScalar(text, allowNewline, stopAtFirst, hits);
+            return;
+        }
+
+        ref var origin = ref MemoryMarshal.GetReference(text);
+        var i = 0;
+        fixed (byte* basePtr = &origin)
+        {
+            var bias = Vector128.Create((byte)0x80);
+            var last = text.Length - 16;
+            while (i <= last)
+            {
+                var biased = Sse2.Xor(Sse2.LoadVector128(basePtr + i), bias);
+                var mask = ClassFinder.Range128(biased, lo0, hi0);
+                if (ranges > 1)
+                {
+                    mask = Sse2.Or(mask, ClassFinder.Range128(biased, lo1, hi1));
+                }
+
+                if (ranges > 2)
+                {
+                    mask = Sse2.Or(mask, ClassFinder.Range128(biased, lo2, hi2));
+                }
+
+                var bits = (ulong)mask.ExtractMostSignificantBits();
+                if (bits == 0)
+                {
+                    i += 16;
+                    continue;
+                }
+
+                if (!WalkChunk(text, allowNewline, stopAtFirst, hits, bits, i, 16, ref i))
+                {
+                    return;
+                }
+            }
+        }
+
+        if (i < text.Length)
+        {
+            CollectScalarFrom(text, allowNewline, stopAtFirst, hits, i);
+        }
+    }
+
+    /// <summary>
+    /// Walks member bits inside one SIMD chunk. Returns false when the caller should stop.
+    /// A run that ends inside the chunk stays in the bitset. A run that touches the
+    /// chunk edge is extended in scalar and <paramref name="i"/> jumps to its end.
+    /// </summary>
+    private bool WalkChunk(
+        ReadOnlySpan<byte> text,
+        bool allowNewline,
+        bool stopAtFirst,
+        List<ByteMatch> hits,
+        ulong bits,
+        int chunk,
+        int width,
+        ref int i)
+    {
+        while (bits != 0)
+        {
+            var rel = BitOperations.TrailingZeroCount(bits);
+            var runLen = ConsecutiveOnes(bits, rel, width);
+            var start = chunk + rel;
+            var end = start + runLen;
+            if (rel + runLen == width && end < text.Length && In(text[end]))
+            {
+                while (end < text.Length && In(text[end]))
+                {
+                    end++;
+                }
+
+                if (EmitRun(text, allowNewline, stopAtFirst, hits, start, end))
+                {
+                    return false;
+                }
+
+                i = end;
+                return true;
+            }
+
+            if (EmitRun(text, allowNewline, stopAtFirst, hits, start, end))
+            {
+                return false;
+            }
+
+            var consumed = rel + runLen;
+            if (consumed >= width)
+            {
+                break;
+            }
+
+            bits &= ~((1UL << consumed) - 1);
+        }
+
+        i = chunk + width;
+        return true;
+    }
+
+    private static int ConsecutiveOnes(ulong bits, int rel, int width)
+    {
+        var shifted = bits >> rel;
+        var within = width - rel;
+        if (within < 64)
+        {
+            shifted &= (1UL << within) - 1;
+        }
+
+        var ones = BitOperations.TrailingZeroCount(~shifted);
+        return ones == 0 ? 1 : ones;
+    }
+
+    private void CollectScalarFrom(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits, int start)
+    {
+        var i = start;
+        while (i < text.Length)
+        {
+            if (!In(text[i]))
+            {
+                i++;
+                continue;
+            }
+
+            var j = i + 1;
+            while (j < text.Length && In(text[j]))
+            {
+                j++;
+            }
+
+            if (EmitRun(text, allowNewline, stopAtFirst, hits, i, j))
+            {
+                return;
+            }
+
+            i = j;
+        }
+    }
+
+    /// <summary>Emits the matches inside <c>[start, end)</c>. True when the search should stop.</summary>
+    private bool EmitRun(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits, int start, int end)
+    {
+        var run = end - start;
+        if (run < _min)
+        {
+            return false;
+        }
+
+        if (!_lazy && _max < 0)
+        {
+            AddHit(text, allowNewline, stopAtFirst, hits, start, run);
+            return stopAtFirst && hits.Count > 0;
+        }
+
+        if (_lazy)
+        {
+            var step = Math.Max(1, _min);
+            for (var p = start; p + _min <= end; p += step)
+            {
+                AddHit(text, allowNewline, stopAtFirst, hits, p, _min);
+                if (stopAtFirst && hits.Count > 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        var cursor = start;
+        while (cursor + _min <= end)
+        {
+            var take = Math.Min(_max, end - cursor);
+            if (take < _min)
+            {
+                break;
+            }
+
+            AddHit(text, allowNewline, stopAtFirst, hits, cursor, take);
+            if (stopAtFirst && hits.Count > 0)
+            {
+                return true;
+            }
+
+            cursor += take;
+        }
+
+        return false;
     }
 
     private bool In(byte value) => ByteAutomaton.MaskHas(_m0, _m1, _m2, _m3, value);
