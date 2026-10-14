@@ -111,8 +111,12 @@ internal sealed class MatchPlan
                 }
                 catch (NotSupportedException ex) when (nonBacktracking)
                 {
+                    // UseSystemResourceKeys makes ex.Message a resource id, so the
+                    // sentence below is the one the user reads. The inner exception
+                    // still carries the runtime's reason (backreference, lookaround,
+                    // atomic group, or the size limit).
                     throw new ArgumentException(
-                        $"'{patterns[i]}' is not supported by the non-backtracking engine ({ex.Message}). Use -P/--pcre for backreferences, lookaround, and atomic groups.",
+                        $"'{patterns[i]}' is not supported by the non-backtracking engine. Use -P/--pcre for backreferences, lookaround, and atomic groups.",
                         ex);
                 }
 
