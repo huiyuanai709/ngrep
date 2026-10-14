@@ -25,7 +25,7 @@ public class ParityTests
         using (var doc = JsonDocument.Parse(capture.Stdout))
         {
             var paths = doc.RootElement.GetProperty("paths").EnumerateArray().Select(item => item.GetString()).ToArray();
-            Assert.Equal(["a.txt"], paths);
+            Assert.Equal("a.txt", Assert.Single(paths));
         }
 
         capture.Clear();
@@ -366,7 +366,8 @@ public class ParityTests
         var events = capture.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)
             .Select(line => JsonDocument.Parse(line).RootElement)
             .ToArray();
-        Assert.Equal(["begin", "match", "end", "summary"], events.Select(item => item.GetProperty("type").GetString()).ToArray());
+        var types = events.Select(item => item.GetProperty("type").GetString() ?? "").ToArray();
+        Assert.Equal(new[] { "begin", "match", "end", "summary" }, types);
         var match = events[1].GetProperty("data");
         Assert.Equal("a.txt", match.GetProperty("path").GetProperty("text").GetString());
         Assert.Equal(1, match.GetProperty("line_number").GetInt32());
