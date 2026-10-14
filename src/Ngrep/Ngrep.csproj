@@ -27,5 +27,6 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Ngrep.Tests" />
+    <InternalsVisibleTo Include="Ngrep.Bench" />
   </ItemGroup>
 </Project>

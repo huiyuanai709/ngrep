@@ -221,6 +221,14 @@ internal static class ByteConfirm
             return false;
         }
 
+        // One hit per file is the common confirm. Counting newlines up to that
+        // hit avoids building a line-start table for the rest of the file.
+        if (!plan.WantsContext && hits.Count == 1)
+        {
+            EmitOne(span, relativePath, hits[0], matches);
+            return true;
+        }
+
         var starts = LineStarts(span);
         var lineCount = span.Length == 0 ? 0 : span[^1] == (byte)'\n' ? starts.Length - 1 : starts.Length;
         foreach (var hit in hits)
@@ -239,6 +247,39 @@ internal static class ByteConfirm
         }
 
         return true;
+    }
+
+    private static void EmitOne(ReadOnlySpan<byte> span, string relativePath, Hit hit, List<SearchMatch> matches)
+    {
+        var index = hit.Index;
+        var line = 1 + span[..index].Count((byte)'\n');
+        var start = index;
+        while (start > 0 && span[start - 1] != (byte)'\n')
+        {
+            start--;
+        }
+
+        var end = index + hit.Length;
+        while (end < span.Length && span[end] != (byte)'\n')
+        {
+            end++;
+        }
+
+        var textEnd = end;
+        if (textEnd > start && span[textEnd - 1] == (byte)'\r')
+        {
+            textEnd--;
+        }
+
+        matches.Add(new SearchMatch(
+            relativePath,
+            line,
+            index - start + 1,
+            AsciiText(span.Slice(index, hit.Length)),
+            AsciiText(span[start..textEnd]),
+            null,
+            null,
+            index));
     }
 
     private static int Find(SimdLiteralScanner scanner, ReadOnlySpan<byte> span, int from, int length, bool word)
@@ -424,14 +465,8 @@ internal static class ByteConfirm
 
         private bool OnRead(ReadOnlySpan<byte> span, bool endOfFile)
         {
-            if (!Active || _scanner == null)
+            if (!Active || _scanner == null || NonAscii)
             {
-                return false;
-            }
-
-            if (!Ascii.IsValid(span))
-            {
-                NonAscii = true;
                 return false;
             }
 
@@ -441,6 +476,8 @@ internal static class ByteConfirm
                 start = 0;
             }
 
+            // A miss is final for an ASCII needle, so the bytes are not validated.
+            // Only a hit checks that the prefix is ASCII, and only the new window is scanned.
             var rel = _scanner.IndexOfAny(span[start..]);
             if (rel < 0)
             {
@@ -449,7 +486,6 @@ internal static class ByteConfirm
             }
 
             var idx = start + rel;
-            // Columns follow bytes only when every byte before the match is ASCII.
             if (!Ascii.IsValid(span[..(idx + 1)]))
             {
                 NonAscii = true;

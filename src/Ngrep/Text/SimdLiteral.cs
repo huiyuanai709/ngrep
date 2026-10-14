@@ -50,6 +50,10 @@ internal sealed partial class SimdLiteralScanner
     private readonly byte _rareAlt;
     private readonly bool _rareFold;
     private readonly bool _covered;
+    private readonly int _filterAt;
+    private readonly byte _filter;
+    private readonly byte _filterAlt;
+    private readonly bool _filterFold;
     private readonly TeddyTables? _teddy;
 
     private SimdLiteralScanner(byte[][] needles, bool ignoreCase)
@@ -100,6 +104,31 @@ internal sealed partial class SimdLiteralScanner
 
             // Length 2 is fully covered by the end bytes. Length 3 with the middle byte is too.
             _covered = _one.Length <= 2 || (_useRare && _one.Length == 3);
+            _filterAt = 0;
+            _filter = _first;
+            _filterAlt = _firstAlt;
+            _filterFold = _firstFold;
+            var best = Rank(_first);
+            if (_useRare)
+            {
+                var rareRank = Rank(_rare);
+                if (rareRank < best)
+                {
+                    best = rareRank;
+                    _filterAt = _rareAt;
+                    _filter = _rare;
+                    _filterAlt = _rareAlt;
+                    _filterFold = _rareFold;
+                }
+            }
+
+            if (Rank(_last) < best)
+            {
+                _filterAt = _one.Length - 1;
+                _filter = _last;
+                _filterAlt = _lastAlt;
+                _filterFold = _lastFold;
+            }
         }
 
         var lists = new List<int>[256];
@@ -261,11 +290,27 @@ internal sealed partial class SimdLiteralScanner
             var lastAlt = Vector512.Create(_lastAlt);
             var rare = Vector512.Create(_rare);
             var rareAlt = Vector512.Create(_rareAlt);
+            var filter = Vector512.Create(_filter);
+            var filterAlt = Vector512.Create(_filterAlt);
+            var filterAt = _filterAt;
             var i = 0;
             if (lastVec >= 0)
             {
                 for (; i <= lastVec; i += 64)
                 {
+                    // One compare of the rarest probe byte. A miss skips the other loads.
+                    var primary = Avx512F.LoadVector512(basePtr + i + filterAt);
+                    var pm = Avx512BW.CompareEqual(primary, filter);
+                    if (_ignoreCase && _filterFold)
+                    {
+                        pm = Avx512F.Or(pm, Avx512BW.CompareEqual(primary, filterAlt));
+                    }
+
+                    if (pm.ExtractMostSignificantBits() == 0)
+                    {
+                        continue;
+                    }
+
                     var head = Avx512F.LoadVector512(basePtr + i);
                     var tail = Avx512F.LoadVector512(basePtr + i + len - 1);
                     var hm = Avx512BW.CompareEqual(head, first);
@@ -365,11 +410,26 @@ internal sealed partial class SimdLiteralScanner
             var lastAlt = Vector256.Create(_lastAlt);
             var rare = Vector256.Create(_rare);
             var rareAlt = Vector256.Create(_rareAlt);
+            var filter = Vector256.Create(_filter);
+            var filterAlt = Vector256.Create(_filterAlt);
+            var filterAt = _filterAt;
             var i = 0;
             if (lastVec >= 0)
             {
                 for (; i <= lastVec; i += 32)
                 {
+                    var primary = Avx.LoadVector256(basePtr + i + filterAt);
+                    var pm = Avx2.CompareEqual(primary, filter);
+                    if (_ignoreCase && _filterFold)
+                    {
+                        pm = Avx2.Or(pm, Avx2.CompareEqual(primary, filterAlt));
+                    }
+
+                    if ((uint)Avx2.MoveMask(pm) == 0)
+                    {
+                        continue;
+                    }
+
                     var head = Avx.LoadVector256(basePtr + i);
                     var tail = Avx.LoadVector256(basePtr + i + len - 1);
                     var hm = Avx2.CompareEqual(head, first);
@@ -469,11 +529,26 @@ internal sealed partial class SimdLiteralScanner
             var lastAlt = Vector128.Create(_lastAlt);
             var rare = Vector128.Create(_rare);
             var rareAlt = Vector128.Create(_rareAlt);
+            var filter = Vector128.Create(_filter);
+            var filterAlt = Vector128.Create(_filterAlt);
+            var filterAt = _filterAt;
             var i = 0;
             if (lastVec >= 0)
             {
                 for (; i <= lastVec; i += 16)
                 {
+                    var primary = Sse2.LoadVector128(basePtr + i + filterAt);
+                    var pm = Sse2.CompareEqual(primary, filter);
+                    if (_ignoreCase && _filterFold)
+                    {
+                        pm = Sse2.Or(pm, Sse2.CompareEqual(primary, filterAlt));
+                    }
+
+                    if ((uint)Sse2.MoveMask(pm) == 0)
+                    {
+                        continue;
+                    }
+
                     var head = Sse2.LoadVector128(basePtr + i);
                     var tail = Sse2.LoadVector128(basePtr + i + len - 1);
                     var hm = Sse2.CompareEqual(head, first);
@@ -566,11 +641,26 @@ internal sealed partial class SimdLiteralScanner
         var lastAlt = Vector128.Create(_lastAlt);
         var rare = Vector128.Create(_rare);
         var rareAlt = Vector128.Create(_rareAlt);
+        var filter = Vector128.Create(_filter);
+        var filterAlt = Vector128.Create(_filterAlt);
+        var filterAt = _filterAt;
         var i = 0;
         if (lastVec >= 0)
         {
             for (; i <= lastVec; i += 16)
             {
+                var primary = Vector128.LoadUnsafe(ref origin, (nuint)(i + filterAt));
+                var pm = Vector128.Equals(primary, filter);
+                if (_ignoreCase && _filterFold)
+                {
+                    pm = Vector128.BitwiseOr(pm, Vector128.Equals(primary, filterAlt));
+                }
+
+                if (pm.ExtractMostSignificantBits() == 0)
+                {
+                    continue;
+                }
+
                 var head = Vector128.LoadUnsafe(ref origin, (nuint)i);
                 var tail = Vector128.LoadUnsafe(ref origin, (nuint)(i + len - 1));
                 var hm = Vector128.Equals(head, first);
@@ -707,17 +797,22 @@ internal sealed partial class SimdLiteralScanner
         var last = haystack.Length - len;
         for (var i = start; i <= last; i++)
         {
-            if (!Probe(haystack[i], _first, _firstAlt, _firstFold))
+            if (!Probe(haystack[i + _filterAt], _filter, _filterAlt, _filterFold))
             {
                 continue;
             }
 
-            if (!Probe(haystack[i + len - 1], _last, _lastAlt, _lastFold))
+            if (_filterAt != 0 && !Probe(haystack[i], _first, _firstAlt, _firstFold))
             {
                 continue;
             }
 
-            if (_useRare && !Probe(haystack[i + _rareAt], _rare, _rareAlt, _rareFold))
+            if (_filterAt != len - 1 && !Probe(haystack[i + len - 1], _last, _lastAlt, _lastFold))
+            {
+                continue;
+            }
+
+            if (_useRare && _filterAt != _rareAt && !Probe(haystack[i + _rareAt], _rare, _rareAlt, _rareFold))
             {
                 continue;
             }

@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 using Ngrep.Text;
 
@@ -178,6 +179,157 @@ internal sealed class MatchPlan
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Confirms a line-prefiltered regex on ASCII bytes. Only candidate lines are decoded.
+    /// False when the file is not ASCII, context is required, or the literal filter cannot run.
+    /// </summary>
+    public static bool TryCollectBytes(
+        ReadOnlySpan<byte> bytes,
+        string relativePath,
+        MatchPlan plan,
+        List<SearchMatch> matches,
+        out bool matched)
+    {
+        matched = false;
+        if (!plan.UseLinePrefilter || plan.Invert || plan.WantsContext || plan.Literals == null || plan.Regexes == null)
+        {
+            return false;
+        }
+
+        if (!Ascii.IsValid(bytes))
+        {
+            return false;
+        }
+
+        var lineStarts = new List<int>();
+        if (!plan.Literals.CandidateLineStarts(bytes, plan.IgnoreCase, lineStarts))
+        {
+            return false;
+        }
+
+        var countOnly = plan.Report == ReportMode.FilesWithoutMatch && !plan.CollectAll;
+        var hits = countOnly ? null : new List<Hit>();
+        foreach (var lineStart in lineStarts)
+        {
+            var end = lineStart;
+            while (end < bytes.Length && bytes[end] != (byte)'\n')
+            {
+                end++;
+            }
+
+            var textEnd = end;
+            if (textEnd > lineStart && bytes[textEnd - 1] == (byte)'\r')
+            {
+                textEnd--;
+            }
+
+            var slice = Encoding.ASCII.GetString(bytes[lineStart..textEnd]);
+            if (countOnly)
+            {
+                if (SliceHits(slice, slice, 0, plan))
+                {
+                    matched = true;
+                    return true;
+                }
+
+                continue;
+            }
+
+            Hit? earliest = null;
+            for (var i = 0; i < plan.Regexes.Length; i++)
+            {
+                if (plan.Patterns[i].Length == 0)
+                {
+                    continue;
+                }
+
+                foreach (Match match in plan.Regexes[i].Matches(slice))
+                {
+                    if (!match.Success)
+                    {
+                        continue;
+                    }
+
+                    if (plan.Word && !WordBoundary.At(slice, match.Index, match.Length))
+                    {
+                        continue;
+                    }
+
+                    var hit = new Hit(lineStart + match.Index, match.Length, match.Value);
+                    if (earliest == null || hit.Index < earliest.Value.Index || (hit.Index == earliest.Value.Index && hit.Length < earliest.Value.Length))
+                    {
+                        earliest = hit;
+                    }
+
+                    if (!plan.StopAtFirst)
+                    {
+                        hits!.Add(hit);
+                    }
+                }
+            }
+
+            if (plan.StopAtFirst && earliest != null)
+            {
+                hits!.Add(earliest.Value);
+                EmitByteHits(bytes, relativePath, hits, matches);
+                matched = true;
+                return true;
+            }
+        }
+
+        if (countOnly)
+        {
+            return true;
+        }
+
+        EmitByteHits(bytes, relativePath, hits!, matches);
+        matched = hits!.Count > 0;
+        return true;
+    }
+
+    private static void EmitByteHits(ReadOnlySpan<byte> bytes, string relativePath, List<Hit> hits, List<SearchMatch> matches)
+    {
+        hits.Sort(static (left, right) =>
+        {
+            var index = left.Index.CompareTo(right.Index);
+            return index != 0 ? index : left.Length.CompareTo(right.Length);
+        });
+        var lineNo = 1;
+        var cursor = 0;
+        foreach (var hit in Dedup(hits))
+        {
+            var lineStart = hit.Index;
+            while (lineStart > 0 && bytes[lineStart - 1] != (byte)'\n')
+            {
+                lineStart--;
+            }
+
+            lineNo += bytes[cursor..lineStart].Count((byte)'\n');
+            cursor = lineStart;
+            var end = lineStart;
+            while (end < bytes.Length && bytes[end] != (byte)'\n')
+            {
+                end++;
+            }
+
+            var textEnd = end;
+            if (textEnd > lineStart && bytes[textEnd - 1] == (byte)'\r')
+            {
+                textEnd--;
+            }
+
+            matches.Add(new SearchMatch(
+                relativePath,
+                lineNo,
+                hit.Index - lineStart + 1,
+                hit.Value,
+                Encoding.ASCII.GetString(bytes[lineStart..textEnd]),
+                null,
+                null,
+                hit.Index));
+        }
     }
 
     public static void Collect(string text, string relativePath, MatchPlan plan, List<SearchMatch> matches)

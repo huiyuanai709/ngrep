@@ -181,6 +181,183 @@ internal sealed class LiteralQuery
         }
     }
 
+    /// <summary>
+    /// Start offsets of lines that contain the required ASCII literals. Sorted and unique.
+    /// False when a clause cannot be decided from bytes alone.
+    /// </summary>
+    public bool CandidateLineStarts(ReadOnlySpan<byte> bytes, bool ignoreCase, List<int> starts)
+    {
+        starts.Clear();
+        if (_orLengths != null)
+        {
+            var scanners = ignoreCase ? _eachInsensitive : _eachSensitive;
+            var any = ignoreCase ? _anyInsensitive : _anySensitive;
+            if (scanners == null)
+            {
+                AddLineStarts(bytes, any!, _orLengths[0], starts);
+                return true;
+            }
+
+            List<int>? orUnion = null;
+            for (var i = 0; i < scanners.Length; i++)
+            {
+                var found = new List<int>();
+                AddLineStarts(bytes, scanners[i], _orLengths[i], found);
+                orUnion = orUnion == null ? found : UnionSorted(orUnion, found);
+            }
+
+            if (orUnion != null)
+            {
+                starts.AddRange(orUnion);
+            }
+
+            return true;
+        }
+
+        List<int>? union = null;
+        foreach (var clause in _byteClauses)
+        {
+            if (clause.Always)
+            {
+                return false;
+            }
+
+            List<int>? acc = null;
+            var selective = 0;
+            foreach (var part in clause.Parts)
+            {
+                if (part.Kind != ByteKind.Ascii || part.Length < 2 || part.Sensitive == null || part.Insensitive == null)
+                {
+                    continue;
+                }
+
+                selective++;
+                var found = new List<int>();
+                AddLineStarts(bytes, ignoreCase ? part.Insensitive : part.Sensitive, part.Length, found);
+                acc = acc == null ? found : IntersectSorted(acc, found);
+            }
+
+            if (selective == 0)
+            {
+                return false;
+            }
+
+            if (acc == null || acc.Count == 0)
+            {
+                continue;
+            }
+
+            union = union == null ? acc : UnionSorted(union, acc);
+        }
+
+        if (union != null)
+        {
+            starts.AddRange(union);
+        }
+
+        return true;
+    }
+
+    private static void AddLineStarts(ReadOnlySpan<byte> bytes, SimdLiteralScanner scanner, int length, List<int> starts)
+    {
+        var from = 0;
+        var last = -1;
+        while (from <= bytes.Length - length)
+        {
+            var rel = scanner.IndexOfAny(bytes[from..]);
+            if (rel < 0)
+            {
+                return;
+            }
+
+            var index = from + rel;
+            var line = index;
+            while (line > 0 && bytes[line - 1] != (byte)'\n')
+            {
+                line--;
+            }
+
+            if (line != last)
+            {
+                starts.Add(line);
+                last = line;
+            }
+
+            var newline = bytes[index..].IndexOf((byte)'\n');
+            if (newline < 0)
+            {
+                return;
+            }
+
+            from = index + newline + 1;
+        }
+    }
+
+    private static List<int> IntersectSorted(List<int> left, List<int> right)
+    {
+        var acc = new List<int>(Math.Min(left.Count, right.Count));
+        var i = 0;
+        var j = 0;
+        while (i < left.Count && j < right.Count)
+        {
+            var compare = left[i].CompareTo(right[j]);
+            if (compare == 0)
+            {
+                acc.Add(left[i]);
+                i++;
+                j++;
+            }
+            else if (compare < 0)
+            {
+                i++;
+            }
+            else
+            {
+                j++;
+            }
+        }
+
+        return acc;
+    }
+
+    private static List<int> UnionSorted(List<int> left, List<int> right)
+    {
+        var acc = new List<int>(left.Count + right.Count);
+        var i = 0;
+        var j = 0;
+        while (i < left.Count && j < right.Count)
+        {
+            if (left[i] == right[j])
+            {
+                acc.Add(left[i]);
+                i++;
+                j++;
+            }
+            else if (left[i] < right[j])
+            {
+                acc.Add(left[i]);
+                i++;
+            }
+            else
+            {
+                acc.Add(right[j]);
+                j++;
+            }
+        }
+
+        for (; i < left.Count; i++)
+        {
+            acc.Add(left[i]);
+        }
+
+        for (; j < right.Count; j++)
+        {
+            acc.Add(right[j]);
+        }
+
+        return acc;
+    }
+
     private static int SelectiveParts(Clause clause)
     {
         var count = 0;

@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace Ngrep.Text;
 
@@ -38,75 +39,110 @@ internal static class TextFiles
     /// </summary>
     public static PooledBytes Read(string path, ReadStop? stop)
     {
+        byte[]? buffer = null;
         try
         {
-            using var stream = new FileStream(
+            using var handle = File.OpenHandle(
                 path,
                 FileMode.Open,
                 FileAccess.Read,
                 FileShare.Read,
-                bufferSize: 1 << 16,
                 FileOptions.SequentialScan);
-            if (stream.Length > MaxFileBytes)
+            var lengthLong = RandomAccess.GetLength(handle);
+            if (lengthLong > MaxFileBytes)
             {
                 return PooledBytes.TooLarge();
             }
 
-            var length = (int)stream.Length;
+            var length = (int)lengthLong;
             if (length == 0)
             {
                 return PooledBytes.Ok(null, 0);
             }
 
-            var buffer = ArrayPool<byte>.Shared.Rent(length);
+            buffer = ArrayPool<byte>.Shared.Rent(length);
             try
             {
+                // A full read is one syscall into the pooled buffer. -l checks each chunk
+                // so a hit can stop, and the chunk is large enough that a miss is not
+                // a long series of small reads.
+                var chunk = stop == null ? length : 1 << 20;
                 var offset = 0;
                 var checkedBinary = false;
                 while (offset < length)
                 {
-                    var want = Math.Min(1 << 16, length - offset);
-                    var read = stream.Read(buffer, offset, want);
-                    if (read == 0)
+                    var end = Math.Min(length, offset + chunk);
+                    if (!Fill(handle, buffer, ref offset, end))
                     {
                         break;
                     }
 
-                    offset += read;
                     if (!checkedBinary && (offset >= BinaryProbeLength || offset >= length))
                     {
                         checkedBinary = true;
                         if (IsBinary(buffer.AsSpan(0, offset)))
                         {
                             ArrayPool<byte>.Shared.Return(buffer);
+                            buffer = null;
                             return PooledBytes.Binary();
                         }
                     }
 
                     if (stop != null && checkedBinary && stop(buffer.AsSpan(0, offset), offset >= length))
                     {
-                        return PooledBytes.Ok(buffer, offset);
+                        var owned = buffer;
+                        buffer = null;
+                        return PooledBytes.Ok(owned, offset);
                     }
                 }
 
-                if (!checkedBinary && IsBinary(buffer.AsSpan(0, offset)))
+                if (!checkedBinary && IsBinary(buffer.AsSpan(0, Math.Min(offset, BinaryProbeLength))))
                 {
                     ArrayPool<byte>.Shared.Return(buffer);
+                    buffer = null;
                     return PooledBytes.Binary();
                 }
 
-                return PooledBytes.Ok(buffer, offset);
+                var done = buffer;
+                buffer = null;
+                return PooledBytes.Ok(done, offset);
             }
             catch
             {
-                ArrayPool<byte>.Shared.Return(buffer);
+                if (buffer != null)
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                    buffer = null;
+                }
+
                 throw;
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            if (buffer != null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+
             return PooledBytes.Unreadable();
         }
+    }
+
+    private static bool Fill(SafeFileHandle handle, byte[] buffer, ref int offset, int end)
+    {
+        while (offset < end)
+        {
+            var read = RandomAccess.Read(handle, buffer.AsSpan(offset, end - offset), offset);
+            if (read == 0)
+            {
+                return false;
+            }
+
+            offset += read;
+        }
+
+        return true;
     }
 }
 

@@ -421,6 +421,17 @@ internal static class Searcher
                 return;
             }
 
+            if (MatchPlan.TryCollectBytes(read.Span, file.RelativePath, plan, matches, out var prefiltered))
+            {
+                tally.File(prefiltered);
+                if (!prefiltered)
+                {
+                    filesWithoutMatch?.Add(file.RelativePath);
+                }
+
+                return;
+            }
+
             text = TextFiles.Decode(read.Span);
         }
         }
