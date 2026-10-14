@@ -302,7 +302,7 @@ internal static class SearchSyntax
         return expanded.ToArray();
     }
 
-    private const string BoolShorts = "iEFqnsxvwlcoU";
+    private const string BoolShorts = "iEFPqnsxvwlcoU";
 
     private const string ValueShorts = "efgtTABCj";
 

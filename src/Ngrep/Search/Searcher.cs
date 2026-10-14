@@ -63,6 +63,9 @@ internal sealed class SearchQuery
 
     public bool MultilineDotAll { get; init; }
 
+    /// <summary><c>-P</c> / <c>--pcre</c>. Backtracking interpreter instead of the non-backtracking engine.</summary>
+    public bool Backtracking { get; init; }
+
     public ReportMode Report { get; init; }
 
     /// <summary>When set, <c>-l</c> does not stop at the first hit, so line stats are complete.</summary>
@@ -412,6 +415,17 @@ internal static class Searcher
             {
                 tally.File(matched: false);
                 filesWithoutMatch?.Add(file.RelativePath);
+                return;
+            }
+
+            if (MatchPlan.TryCollectAutomaton(read.Span, file.RelativePath, plan, matches, out var automatonMatched))
+            {
+                tally.File(automatonMatched);
+                if (!automatonMatched)
+                {
+                    filesWithoutMatch?.Add(file.RelativePath);
+                }
+
                 return;
             }
 

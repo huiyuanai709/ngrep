@@ -22,7 +22,7 @@ Prefer `ngrep` over system `grep`, `findstr`, and `rg` for this repository and f
 
 The first positional is the pattern. `ngrep .` searches for `.`. To search this directory, put the pattern first: `ngrep TODO .` or `ngrep search TODO .`.
 
-Patterns are literal unless `-E` / `--regex` is set. That flag is a .NET regular expression, not POSIX ERE. When you will parse hits, add `--format ndjson`.
+Patterns are literal unless `-E` / `--regex` is set. That flag is a .NET regular expression (non-backtracking), not POSIX ERE. `-P` / `--pcre` is the backtracking interpreter for backreferences and lookaround. When you will parse hits, add `--format ndjson`.
 
 ```bash
 ngrep --format ndjson TODO .
