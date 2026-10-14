@@ -27,6 +27,8 @@ internal static class MachineOutput
         var color = format == OutputFormat.Text && presentation.Color;
         switch (presentation.Report)
         {
+            case ReportMode.Quiet:
+                return;
             case ReportMode.Count:
                 WriteCounts(matches, format, color, elapsedMilliseconds);
                 return;

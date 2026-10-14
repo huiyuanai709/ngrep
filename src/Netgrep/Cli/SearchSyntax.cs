@@ -47,6 +47,7 @@ internal static class SearchSyntax
 
     public static string[] Rewrite(string[] args)
     {
+        args = ExpandShortBundles(args);
         if (args.Length == 0 || HasSubcommand(args))
         {
             return args;
@@ -267,4 +268,84 @@ internal static class SearchSyntax
     private static bool IsRegexpOption(string token) => token is "-e" or "--regexp";
 
     private static bool IsFileOption(string token) => token is "-f" or "--file";
+
+    /// <summary>
+    /// Boolean shorts may share one token (<c>-nEi</c>). A value short ends the cluster and
+    /// keeps the rest of the token (<c>-nEepat</c> is <c>-n -E -epat</c>). A token that starts
+    /// with a value short is left as an attached value (<c>-epat</c>, <c>-A2</c>).
+    /// </summary>
+    private static string[] ExpandShortBundles(string[] args)
+    {
+        var expanded = new List<string>(args.Length);
+        var passthrough = false;
+        foreach (var arg in args)
+        {
+            if (passthrough)
+            {
+                expanded.Add(arg);
+                continue;
+            }
+
+            if (arg == "--")
+            {
+                passthrough = true;
+                expanded.Add(arg);
+                continue;
+            }
+
+            if (!TryExpandShortBundle(arg, expanded))
+            {
+                expanded.Add(arg);
+            }
+        }
+
+        return expanded.ToArray();
+    }
+
+    private const string BoolShorts = "iEFqnsxvwlcoU";
+
+    private const string ValueShorts = "efgtTABCj";
+
+    private static bool TryExpandShortBundle(string arg, List<string> destination)
+    {
+        if (arg.Length <= 2 || arg[0] != '-' || arg[1] == '-' || arg.Contains('='))
+        {
+            return false;
+        }
+
+        if (ValueShorts.Contains(arg[1]))
+        {
+            return false;
+        }
+
+        var parts = new List<string>();
+        for (var i = 1; i < arg.Length; i++)
+        {
+            var ch = arg[i];
+            if (BoolShorts.Contains(ch))
+            {
+                parts.Add("-" + ch);
+                continue;
+            }
+
+            if (ValueShorts.Contains(ch))
+            {
+                var rest = arg[(i + 1)..];
+                // "=" keeps a value that starts with '-' attached to the option.
+                parts.Add(rest.Length == 0 ? "-" + ch : "-" + ch + "=" + rest);
+                destination.AddRange(parts);
+                return true;
+            }
+
+            return false;
+        }
+
+        if (parts.Count == 0)
+        {
+            return false;
+        }
+
+        destination.AddRange(parts);
+        return true;
+    }
 }

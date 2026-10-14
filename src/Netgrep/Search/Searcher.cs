@@ -24,6 +24,7 @@ internal enum ReportMode
     FilesWithMatches,
     FilesWithoutMatch,
     Count,
+    Quiet,
 }
 
 internal sealed class SearchQuery
@@ -45,6 +46,12 @@ internal sealed class SearchQuery
     public bool WordRegexp { get; init; }
 
     public bool InvertMatch { get; init; }
+
+    /// <summary>Whole-line match (<c>-x</c>). The line text, with a trailing CR removed, must match.</summary>
+    public bool LineRegexp { get; init; }
+
+    /// <summary>Suppress missing-path and named-unreadable diagnostics (<c>-s</c>). Exit code stays 2.</summary>
+    public bool NoMessages { get; init; }
 
     public bool NoIgnore { get; init; }
 
@@ -136,7 +143,7 @@ internal static class Searcher
         var start = Path.GetFullPath(query.Path);
         if (!File.Exists(start) && !Directory.Exists(start))
         {
-            throw new DirectoryNotFoundException($"Path not found: {start}");
+            throw new SearchPathException($"Path not found: {start}", query.NoMessages);
         }
 
         if (HiddenPaths.ContainsHardSkip(start))
@@ -201,7 +208,7 @@ internal static class Searcher
         var root = index.Manifest.Root;
         if (!Directory.Exists(root))
         {
-            throw new DirectoryNotFoundException($"Indexed root does not exist: {root}");
+            throw new SearchPathException($"Indexed root does not exist: {root}", query.NoMessages);
         }
 
         var prefix = RelativeTo(root, start, out var outside, out var prefixIsFile);
@@ -263,7 +270,7 @@ internal static class Searcher
             files,
             degree,
             query.CancellationToken,
-            (file, local) => TryCollect(file, plan, local, stats: null, without, tally));
+            (file, local) => TryCollect(file, plan, local, stats: null, without, tally, errorIfUnreadable: prefixIsFile));
         return Finish(matches, usedIndex: true, note: null, degree, usedPrefilter, without, tally, clock);
     }
 
@@ -320,7 +327,7 @@ internal static class Searcher
             // includeHidden so a path the user named is not treated as skipped merely for being a dotfile.
             if ((!plan.ApplyGitIgnore || !IsIgnoredFile(parent, start)) && plan.Filter.Accepts(relative))
             {
-                TryCollect(new ConfirmFile(start, relative), plan, matches, stats: null, without, tally);
+                TryCollect(new ConfirmFile(start, relative), plan, matches, stats: null, without, tally, errorIfUnreadable: true);
             }
 
             return (matches, 1, without);
@@ -362,7 +369,8 @@ internal static class Searcher
         List<SearchMatch> matches,
         WalkStats? stats,
         ConcurrentBag<string>? filesWithoutMatch,
-        SearchTally tally)
+        SearchTally tally,
+        bool errorIfUnreadable = false)
     {
         string text;
         using (var read = TextFiles.Read(file.FullPath))
@@ -377,6 +385,11 @@ internal static class Searcher
                     return;
                 case ReadKind.Unreadable:
                     stats?.IncrementSkippedUnreadable();
+                    if (errorIfUnreadable)
+                    {
+                        throw new SearchPathException($"Unreadable: {file.FullPath}", plan.NoMessages);
+                    }
+
                     return;
             }
 
@@ -522,4 +535,19 @@ internal static class Searcher
         var column = left.Column.CompareTo(right.Column);
         return column != 0 ? column : left.Text.Length.CompareTo(right.Text.Length);
     }
+}
+
+/// <summary>
+/// The search path is missing, or a file the user named cannot be read.
+/// <see cref="Suppress"/> is <c>-s</c>: the message stays off stderr and the exit code is still 2.
+/// </summary>
+internal sealed class SearchPathException : Exception
+{
+    public SearchPathException(string message, bool suppress)
+        : base(message)
+    {
+        Suppress = suppress;
+    }
+
+    public bool Suppress { get; }
 }

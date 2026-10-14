@@ -35,9 +35,10 @@ Search flags:
 
 ```text
 [--index <dir>] [--format text|json|ndjson|rgjson]
-[--ignore-case|-i] [--regex] [--scan]
-[-e|--regexp <pattern>]... [-f|--file <path>]... [-w|--word-regexp] [-v|--invert-match]
-[-l|--files-with-matches] [--files-without-match] [-c|--count] [-o|--only-matching]
+[--ignore-case|-i] [-E|--extended-regexp|--regex] [-F|--fixed-strings] [--scan]
+[-e|--regexp <pattern>]... [-f|--file <path>]... [-w|--word-regexp] [-x|--line-regexp] [-v|--invert-match]
+[-l|--files-with-matches] [--files-without-match] [-c|--count] [-q|--quiet|--silent] [-o|--only-matching]
+[-n|--line-number] [-s|--no-messages]
 [--heading] [--no-heading] [--stats]
 [-g|--glob <glob>]... [-t|--type <type>]... [-T|--type-not <type>]...
 [--type-add <spec>]... [--type-list]
@@ -51,9 +52,11 @@ Search flags:
 
 Search looks upward from `[path]` (default `.`) for `.netgrep/index`. When an index covers the path, netgrep builds a required-literal prefilter and intersects trigram postings before reading candidates. A literal, or a regex piece, can feed that filter when every alternative has a required substring of 3+ characters (`foo`, `foo.*bar`, `foo|bar`, `(ab){2}`, `n.tgrep`). The file is still read to confirm the real match, so a prefilter hit is not a result. Trigrams cannot help when an alternative is shorter than 3 (`ab`, `a|netgrep`, `foo*` which must allow `fo`), when the pattern can match with no required text (`.`, `a*`), when the syntax is not extracted (lookaround, backreferences), or when `-v` is set. Those queries read every indexed file. An ASCII required piece still rejects a file from its bytes before the text is decoded, including pieces shorter than 3. With no index, `--scan`, `--no-ignore`, `--no-ignore-vcs`, or a path outside the indexed root, netgrep scans contents and prints a one-line note on stderr. You do not pass `--scan` just because the tree has never been indexed. The index does not contain gitignored files, so the ignore flags always scan.
 
-Patterns are OR. `-e` / `--regexp` may be repeated. A positional pattern written before the first `-e` or `-f` is included; once either flag is present, the remaining positional argument is the path (`netgrep -e foo -e bar src`, `netgrep -f pats.txt src`). `--regex` applies to every pattern, including patterns read from a file. `-w` keeps a match only when both ends are word boundaries (a Unicode letter, digit, or `_` on one side and a non-word character or the end of the text on the other). `-v` prints each line that matches none of the patterns; `text` and `lineText` are that line and `column` is 1.
+Patterns are fixed strings unless `-E` / `--extended-regexp` / `--regex` is set. That flag turns every pattern into a .NET regular expression, including patterns read from a file. It is not POSIX basic (BRE) or extended (ERE) syntax. `-F` / `--fixed-strings` selects the fixed-string default explicitly and is mutually exclusive with `-E` (exit 2). There is no BRE engine: `netgrep 'a\+'` searches for the four characters `a\+`, while POSIX `grep 'a\+'` searches for one or more `a`.
 
-`-f` / `--file` reads more patterns, one per line, and OR-s them after positional and `-e` patterns. Repeat the flag for several files. `-` reads stdin. The newline is not part of the pattern, and a trailing newline does not add an extra pattern. An empty line is an empty pattern and matches every line (one hit per line, column 1, `text` empty, `lineText` the line). A line whose first character is `#` is a normal pattern, including the `#`. Nothing in the file is a comment, and `\#` is not rewritten: without `--regex` the backslash is literal, and with `--regex` it is a regex escape (`\#` matches `#`). A missing or unreadable path exits 2 (`Pattern file not found`). A zero-length file that yields no lines, and no `-e` or positional pattern, exits 2 (`Pattern file contains no patterns`). `#` comments belong to ripgrep's config file (`RIPGREP_CONFIG_PATH`), which netgrep does not read.
+Patterns are OR. `-e` / `--regexp` may be repeated. A positional pattern written before the first `-e` or `-f` is included; once either flag is present, the remaining positional argument is the path (`netgrep -e foo -e bar src`, `netgrep -f pats.txt src`). `-w` keeps a match only when both ends are word boundaries (a Unicode letter, digit, or `_` on one side and a non-word character or the end of the text on the other). `-x` / `--line-regexp` keeps a match only when the entire line matches. The line is the same text netgrep prints: a trailing CR before LF is not part of the line. A literal must equal that text. A regex is run against that text anchored at both ends (`\A(?:pattern)\z`), so `a|aaa` matches a line `aaa`. A pattern that contains a newline does not match a single line, including with `-U`. `-v` prints each line that matches none of the patterns; `text` and `lineText` are that line and `column` is 1.
+
+`-f` / `--file` reads more patterns, one per line, and OR-s them after positional and `-e` patterns. Repeat the flag for several files. `-` reads stdin. The newline is not part of the pattern, and a trailing newline does not add an extra pattern. An empty line is an empty pattern and matches every line (one hit per line, column 1, `text` empty, `lineText` the line). With `-x`, that empty pattern matches only empty lines. A line whose first character is `#` is a normal pattern, including the `#`. Nothing in the file is a comment, and `\#` is not rewritten: without `--regex` the backslash is literal, and with `--regex` it is a regex escape (`\#` matches `#`). A missing or unreadable path exits 2 (`Pattern file not found`). A zero-length file that yields no lines, and no `-e` or positional pattern, exits 2 (`Pattern file contains no patterns`). `#` comments belong to ripgrep's config file (`RIPGREP_CONFIG_PATH`), which netgrep does not read.
 
 `-g` is repeatable. A glob that starts with `!` excludes, same as ripgrep. If any glob does not start with `!`, a file must be selected by an include. When several globs match one path, the last one wins. Globs use gitignore syntax (`*`, `?`, `**`, `[abc]`) and run after `.gitignore`. They do not bring a gitignored file back. `netgrep foo -g '*.log'` still skips a gitignored log. `--no-ignore` and `--no-ignore-vcs` turn `.gitignore` off so those files are walked, and `-g` then filters that larger set (`--no-ignore -g '*.log'` prints the log). netgrep does not read `.ignore` or global git excludes, so the two flags do the same thing. `.git`, `.netgrep`, the index directory, and symlinks stay skipped either way.
 
@@ -61,7 +64,11 @@ Patterns are OR. `-e` / `--regexp` may be repeated. A positional pattern written
 
 `-A`, `-B`, and `-C` add context in text output. `-C` sets both sides; `-A` and `-B` replace that side when they are also set. Context lines use `path-line-text`. Match lines stay `path:line:column:lineText`. A `--` line separates groups that do not touch. Overlapping context is not printed twice, and a context line that is itself a match is printed only as a match.
 
-`-l` / `--files-with-matches` prints one path per file that has a hit, and stops reading that file after the first hit. `--files-without-match` prints paths that were searched and had none. `-c` / `--count` prints `path:count`, where the count is matching lines (a line with two hits counts once). Files with a zero count are omitted. These three flags are mutually exclusive (exit 2). Text is paths or `path:count`. `--format json` is `{"paths":[...]}` or `{"counts":[{"path","count"}]}`. `--format ndjson` is one `{"path"}` or `{"path","count"}` object per line. That is not a match object: normal search JSON is unchanged.
+`-l` / `--files-with-matches` prints one path per file that has a hit, and stops reading that file after the first hit. `--files-without-match` prints paths that were searched and had none. `-c` / `--count` prints `path:count`, where the count is matching lines (a line with two hits counts once). Files with a zero count are omitted. `-q` / `--quiet` / `--silent` prints no match report on stdout (text, JSON, NDJSON, and rgjson). Exit 0 means some line matched, 1 means none, 2 means an error. These four flags are mutually exclusive (exit 2). POSIX allows only one of `-c`, `-l`, and `-q`; `--files-without-match` joins that set. Text for `-l` and `-c` is paths or `path:count`. `--format json` is `{"paths":[...]}` or `{"counts":[{"path","count"}]}`. `--format ndjson` is one `{"path"}` or `{"path","count"}` object per line. That is not a match object: normal search JSON is unchanged. `-q` does not hide the stderr scan note, and it does not stop the walk at the first matching file. It does stop reading each file at the first hit, unless `--stats` is set.
+
+`-n` / `--line-number` is accepted and does not change output. Text matches already include the 1-based line (`path:line:column:text`, or `line:column:text` under a heading). There is no flag to hide the line number or the column.
+
+`-s` / `--no-messages` suppresses stderr for a missing search path and for a file you named that cannot be read. The exit code is still 2. It does not hide usage errors, a bad regex, a missing `-f` file, or the scan note. A file that cannot be read while walking a directory is skipped with no message and does not change the exit code, with or without `-s`.
 
 `-v` changes what a hit is. `-l -v` lists files that contain at least one non-matching line. `--files-without-match -v` lists files whose every line matches (an empty file has no lines, so it is listed). `-c -v` counts non-matching lines. Exit 0 means the selected report was non-empty; exit 1 means it was empty.
 
@@ -97,11 +104,43 @@ Stdout formats are unchanged. “Files searched” counts files whose contents w
 
 | Code | When |
 | --- | --- |
-| 0 | Index or watch succeeded, search found at least one match, or `--type-list` / `--help` ran. |
+| 0 | Index or watch succeeded, search found at least one match (including `-q`), or `--type-list` / `--help` ran. |
 | 1 | Search finished and found no matches. |
 | 2 | Bad usage, missing path, invalid regex or glob, unknown type, canceled search, unreadable index, or another error. |
 
-Errors are plain text on stderr. Stdout is only the selected format, including when it is empty.
+Errors are plain text on stderr. Stdout is only the selected format, including when it is empty. `-q` leaves stdout empty. `-s` drops the missing-path and named-unreadable lines and still exits 2.
+
+### POSIX grep flags
+
+Classic `grep` without `-E` or `-F` uses POSIX basic regular expressions. netgrep does not. The default is fixed strings (GNU `grep -F`). `-E` selects .NET regular expressions. `-E` is not ripgrep's `--encoding`.
+
+Boolean short options can share one token (`-nEi`, `-xF`, `-q`). A value option ends the cluster. The rest of the token is its operand (`-nEepat` is `-n -E -e pat`). A token that starts with a value option is left unchanged (`-epat`, `-A2`, `-j1`), which is how those attached values already worked. Tokens after `--` are not flags. A pattern whose name is `index`, `search`, or `watch` still needs `netgrep search` or `netgrep --`.
+
+| POSIX | netgrep | Status |
+| --- | --- | --- |
+| `-E` | `-E`, `--extended-regexp`, `--regex` | .NET regex, not POSIX ERE |
+| `-F` | `-F`, `--fixed-strings` | Fixed strings. This is already the default. Exit 2 together with `-E` |
+| `-c` | `-c`, `--count` | Matching lines per file. Zero counts omitted |
+| `-l` | `-l`, `--files-with-matches` | Paths with a hit |
+| `-q` | `-q`, `--quiet`, `--silent` | No stdout match report. Exit 0 / 1 / 2 |
+| `-i` | `-i`, `--ignore-case` | Ordinal, culture-invariant |
+| `-n` | `-n`, `--line-number` | Accepted. Line numbers are always printed |
+| `-s` | `-s`, `--no-messages` | Hides missing-path and named-unreadable errors. Exit code unchanged |
+| `-v` | `-v`, `--invert-match` | Lines that do not match |
+| `-x` | `-x`, `--line-regexp` | The whole line must match |
+| `-e` | `-e`, `--regexp` | Repeatable pattern, OR |
+| `-f` | `-f`, `--file` | Pattern file, one pattern per line, OR |
+
+Dialect gaps that remain:
+
+- No POSIX BRE. Without `-E`, metacharacters are literal. `a\+` is four characters, not "one or more `a`".
+- `-E` is the .NET regex language, not POSIX ERE. .NET has lookaround and Unicode classes. POSIX collating elements and equivalence classes are absent. Escapes such as `\s` follow .NET. `^` and `$` are line anchors (`RegexOptions.Multiline`). `.` does not match a newline unless `--multiline-dotall`. User patterns are not compiled (`RegexOptions.Compiled` is not AOT-safe) and each match times out after five seconds.
+- `-n` cannot turn line numbers off. The column is always printed. There is no `-H` / `-h` filename switch and no `--no-line-number`.
+- `-q` does not suppress the stderr scan note (`no index found; scanned content` and the same family). It does not abort the process at the first matching file.
+- `-s` does not cover unreadable files discovered while walking a directory. Those stay skipped, with no diagnostic and no exit 2. `-s` also does not hide usage errors, bad regexes, or missing pattern files.
+- An unknown character in a short cluster is not expanded (`-nZ` is an error). Options after `--` are literals.
+- Search is always recursive. There is no `-r` and no non-recursive directory mode.
+- `-c`, `-l`, `-q`, and `--files-without-match` cannot be combined. POSIX only defines the first three.
 
 ### Match fields
 

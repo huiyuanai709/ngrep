@@ -39,7 +39,12 @@ internal sealed class MatchPlan
 
     public bool CollectAll { get; init; }
 
-    public bool StopAtFirst => Report == ReportMode.FilesWithMatches && !CollectAll;
+    public bool LineRegexp { get; init; }
+
+    public bool NoMessages { get; init; }
+
+    public bool StopAtFirst =>
+        (Report == ReportMode.FilesWithMatches || Report == ReportMode.Quiet) && !CollectAll;
 
     /// <summary>Regex matches may include a newline. Set by <c>-U</c> or <c>--multiline-dotall</c>.</summary>
     public bool CrossesLines => Multiline || MultilineDotAll;
@@ -68,7 +73,8 @@ internal sealed class MatchPlan
             regexes = new Regex[patterns.Length];
             for (var i = 0; i < patterns.Length; i++)
             {
-                regexes[i] = new Regex(patterns[i], options, TimeSpan.FromSeconds(5));
+                var source = query.LineRegexp ? AnchorWholeLine(patterns[i]) : patterns[i];
+                regexes[i] = new Regex(source, options, TimeSpan.FromSeconds(5));
             }
         }
 
@@ -95,8 +101,16 @@ internal sealed class MatchPlan
             MultilineDotAll = query.MultilineDotAll,
             IncludeHidden = query.IncludeHidden,
             CollectAll = query.Stats,
+            LineRegexp = query.LineRegexp,
+            NoMessages = query.NoMessages,
         };
     }
+
+    /// <summary>
+    /// Whole-line regex. The caller passes one line with the trailing CR already removed,
+    /// so <c>\A</c> and <c>\z</c> mean that line and not the file.
+    /// </summary>
+    private static string AnchorWholeLine(string pattern) => @"\A(?:" + pattern + @")\z";
 
     public static bool HasMatch(string text, MatchPlan plan)
     {
@@ -150,6 +164,12 @@ internal sealed class MatchPlan
                 }
             }
 
+            return;
+        }
+
+        if (plan.LineRegexp)
+        {
+            CollectLines(text, starts, lineCount, relativePath, plan, matches);
             return;
         }
 
@@ -245,8 +265,100 @@ internal sealed class MatchPlan
             hit.Index));
     }
 
+    private static void CollectLines(
+        string text,
+        int[] starts,
+        int lineCount,
+        string relativePath,
+        MatchPlan plan,
+        List<SearchMatch> matches)
+    {
+        for (var line = 1; line <= lineCount; line++)
+        {
+            if (!WholeLineHit(text, starts, line, plan, out var hit))
+            {
+                continue;
+            }
+
+            AddHit(text, starts, lineCount, relativePath, plan, hit, matches);
+            if (plan.StopAtFirst)
+            {
+                return;
+            }
+        }
+    }
+
+    private static Hit? FirstWholeLine(string text, MatchPlan plan)
+    {
+        var starts = LineMap.Build(text);
+        var lineCount = LineMap.LineCount(text, starts);
+        for (var line = 1; line <= lineCount; line++)
+        {
+            if (WholeLineHit(text, starts, line, plan, out var hit))
+            {
+                return hit;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// A hit whose span is the line text. <see cref="LineMap.LineText"/> already drops a trailing CR.
+    /// </summary>
+    private static bool WholeLineHit(string text, int[] starts, int line, MatchPlan plan, out Hit hit)
+    {
+        var lineText = LineMap.LineText(text, starts, line);
+        var start = line - 1 < starts.Length ? starts[line - 1] : 0;
+        hit = default;
+        if (!LineMatches(lineText, plan))
+        {
+            return false;
+        }
+
+        if (plan.Word && !WordBoundary.At(text, start, lineText.Length))
+        {
+            return false;
+        }
+
+        hit = new Hit(start, lineText.Length, lineText);
+        return true;
+    }
+
+    private static bool LineMatches(string lineText, MatchPlan plan)
+    {
+        if (plan.Regex)
+        {
+            foreach (var regex in plan.Regexes!)
+            {
+                if (regex.IsMatch(lineText))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        var comparison = plan.IgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        foreach (var pattern in plan.Patterns)
+        {
+            if (lineText.Equals(pattern, comparison))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static Hit? FirstHit(string text, MatchPlan plan)
     {
+        if (plan.LineRegexp)
+        {
+            return FirstWholeLine(text, plan);
+        }
+
         Hit? best = null;
         if (plan.Regex)
         {
@@ -361,6 +473,20 @@ internal sealed class MatchPlan
 
     private static void MarkMatchingLines(string text, int[] starts, MatchPlan plan, HashSet<int> lines)
     {
+        if (plan.LineRegexp)
+        {
+            var lineCount = LineMap.LineCount(text, starts);
+            for (var line = 1; line <= lineCount; line++)
+            {
+                if (WholeLineHit(text, starts, line, plan, out _))
+                {
+                    lines.Add(line);
+                }
+            }
+
+            return;
+        }
+
         if (plan.Regex)
         {
             foreach (var regex in plan.Regexes!)
