@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Netgrep.Ignore;
 using Netgrep.Indexing;
 using Netgrep.Text;
@@ -14,6 +15,14 @@ internal readonly record struct SearchMatch(
     string LineText,
     IReadOnlyList<ContextLine>? Before = null,
     IReadOnlyList<ContextLine>? After = null);
+
+internal enum ReportMode
+{
+    Matches,
+    FilesWithMatches,
+    FilesWithoutMatch,
+    Count,
+}
 
 internal sealed class SearchQuery
 {
@@ -38,6 +47,14 @@ internal sealed class SearchQuery
     public bool NoIgnore { get; init; }
 
     public bool NoIgnoreVcs { get; init; }
+
+    public bool IncludeHidden { get; init; }
+
+    public bool Multiline { get; init; }
+
+    public bool MultilineDotAll { get; init; }
+
+    public ReportMode Report { get; init; }
 
     public int BeforeContext { get; init; }
 
@@ -71,6 +88,8 @@ internal sealed class SearchOutcome
     public string Confirmation { get; init; } = "sequential";
 
     public int Workers { get; init; } = 1;
+
+    public IReadOnlyList<string> FilesWithoutMatch { get; init; } = [];
 }
 
 internal static class Searcher
@@ -84,6 +103,11 @@ internal static class Searcher
         if (!File.Exists(start) && !Directory.Exists(start))
         {
             throw new DirectoryNotFoundException($"Path not found: {start}");
+        }
+
+        if (HiddenPaths.ContainsHardSkip(start))
+        {
+            return Finish([], usedIndex: false, note: null, workers: 1, usedPrefilter: false, without: null);
         }
 
         var skipIndex = query.ForceScan || !plan.ApplyGitIgnore;
@@ -109,7 +133,7 @@ internal static class Searcher
 
         var note = ScanNote(query, indexSkipped: skipIndex && !query.ForceScan && IndexWouldApply(start, query));
         var scanned = ContentScan(start, plan, workers, query.CancellationToken);
-        return Finish(scanned.Matches, usedIndex: false, note, scanned.Workers, usedPrefilter: false);
+        return Finish(scanned.Matches, usedIndex: false, note, scanned.Workers, usedPrefilter: false, scanned.Without);
     }
 
     private static int ResolveWorkers(SearchQuery query)
@@ -150,25 +174,31 @@ internal static class Searcher
         if (outside)
         {
             var scanned = ContentScan(start, plan, workers, query.CancellationToken);
-            return Finish(scanned.Matches, usedIndex: false, "path is outside the indexed root; scanned content", scanned.Workers, usedPrefilter: false);
+            return Finish(scanned.Matches, usedIndex: false, "path is outside the indexed root; scanned content", scanned.Workers, usedPrefilter: false, scanned.Without);
         }
 
-        IEnumerable<DocumentRecord> candidates = index.Documents;
+        HashSet<int>? selectedIds = null;
         var usedPrefilter = false;
         if (plan.CanUseTrigrams && plan.Literals!.TrySelect(index.Postings, out var ids))
         {
             usedPrefilter = true;
-            candidates = index.Documents.Where(document => ids.Contains(document.Id));
-        }
-
-        if (prefix.Length > 0)
-        {
-            candidates = candidates.Where(document => Under(document.Path, prefix, prefixIsFile));
+            selectedIds = ids;
         }
 
         var files = new List<ConfirmFile>();
-        foreach (var document in candidates)
+        var without = plan.Report == ReportMode.FilesWithoutMatch ? new ConcurrentBag<string>() : null;
+        foreach (var document in index.Documents)
         {
+            if (prefix.Length > 0 && !Under(document.Path, prefix, prefixIsFile))
+            {
+                continue;
+            }
+
+            if (!plan.IncludeHidden && HiddenPaths.IsHiddenBelow(document.Path, prefix))
+            {
+                continue;
+            }
+
             if (!plan.Filter.Accepts(document.Path))
             {
                 continue;
@@ -180,6 +210,17 @@ internal static class Searcher
                 continue;
             }
 
+            if (selectedIds != null && !selectedIds.Contains(document.Id))
+            {
+                // A required literal is absent, so the file cannot match.
+                if (without != null)
+                {
+                    without.Add(document.Path);
+                }
+
+                continue;
+            }
+
             files.Add(new ConfirmFile(full, document.Path));
         }
 
@@ -188,8 +229,8 @@ internal static class Searcher
             files,
             degree,
             query.CancellationToken,
-            (file, local) => TryCollect(file, plan, local, stats: null));
-        return Finish(matches, usedIndex: true, note: null, degree, usedPrefilter);
+            (file, local) => TryCollect(file, plan, local, stats: null, without));
+        return Finish(matches, usedIndex: true, note: null, degree, usedPrefilter, without);
     }
 
     private static bool IndexWouldApply(string start, SearchQuery query)
@@ -229,19 +270,25 @@ internal static class Searcher
         return "no index found; scanned content";
     }
 
-    private static (List<SearchMatch> Matches, int Workers) ContentScan(string start, MatchPlan plan, int workers, CancellationToken cancellation)
+    private static (List<SearchMatch> Matches, int Workers, ConcurrentBag<string>? Without) ContentScan(
+        string start,
+        MatchPlan plan,
+        int workers,
+        CancellationToken cancellation)
     {
+        var without = plan.Report == ReportMode.FilesWithoutMatch ? new ConcurrentBag<string>() : null;
         if (File.Exists(start))
         {
             var parent = Path.GetDirectoryName(start) ?? start;
             var relative = Path.GetFileName(start);
             var matches = new List<SearchMatch>();
+            // includeHidden so a path the user named is not treated as skipped merely for being a dotfile.
             if ((!plan.ApplyGitIgnore || !IsIgnoredFile(parent, start)) && plan.Filter.Accepts(relative))
             {
-                TryCollect(new ConfirmFile(start, relative), plan, matches, stats: null);
+                TryCollect(new ConfirmFile(start, relative), plan, matches, stats: null, without);
             }
 
-            return (matches, 1);
+            return (matches, 1, without);
         }
 
         var stats = new WalkStats();
@@ -250,13 +297,13 @@ internal static class Searcher
             Enumerate(start, plan, stats),
             degree,
             cancellation,
-            (file, local) => TryCollect(file, plan, local, stats));
-        return (found, degree);
+            (file, local) => TryCollect(file, plan, local, stats, without));
+        return (found, degree, without);
     }
 
     private static IEnumerable<ConfirmFile> Enumerate(string start, MatchPlan plan, WalkStats stats)
     {
-        foreach (var file in TreeWalker.Enumerate(start, IndexPaths.DefaultFor(start), stats, plan.ApplyGitIgnore))
+        foreach (var file in TreeWalker.Enumerate(start, IndexPaths.DefaultFor(start), stats, plan.ApplyGitIgnore, plan.IncludeHidden))
         {
             if (!plan.Filter.Accepts(file.RelativePath))
             {
@@ -270,11 +317,16 @@ internal static class Searcher
     private static bool IsIgnoredFile(string walkRoot, string fullPath)
     {
         var stats = new WalkStats();
-        return !TreeWalker.Enumerate(walkRoot, null, stats).Any(file =>
+        return !TreeWalker.Enumerate(walkRoot, null, stats, applyGitIgnore: true, includeHidden: true).Any(file =>
             string.Equals(file.FullPath, fullPath, StringComparison.Ordinal));
     }
 
-    private static void TryCollect(ConfirmFile file, MatchPlan plan, List<SearchMatch> matches, WalkStats? stats)
+    private static void TryCollect(
+        ConfirmFile file,
+        MatchPlan plan,
+        List<SearchMatch> matches,
+        WalkStats? stats,
+        ConcurrentBag<string>? filesWithoutMatch)
     {
         string text;
         using (var read = TextFiles.Read(file.FullPath))
@@ -294,16 +346,33 @@ internal static class Searcher
 
             if (!plan.Invert && plan.Literals != null && plan.Literals.Misses(read.Span, plan.IgnoreCase))
             {
+                filesWithoutMatch?.Add(file.RelativePath);
                 return;
             }
 
             text = TextFiles.Decode(read.Span);
         }
 
+        if (plan.Report == ReportMode.FilesWithoutMatch)
+        {
+            if (!MatchPlan.HasMatch(text, plan))
+            {
+                filesWithoutMatch?.Add(file.RelativePath);
+            }
+
+            return;
+        }
+
         MatchPlan.Collect(text, file.RelativePath, plan, matches);
     }
 
-    private static SearchOutcome Finish(List<SearchMatch> matches, bool usedIndex, string? note, int workers, bool usedPrefilter)
+    private static SearchOutcome Finish(
+        List<SearchMatch> matches,
+        bool usedIndex,
+        string? note,
+        int workers,
+        bool usedPrefilter,
+        ConcurrentBag<string>? without)
     {
         matches.Sort(CompareMatches);
         return new SearchOutcome
@@ -314,7 +383,18 @@ internal static class Searcher
             UsedTrigramPrefilter = usedPrefilter,
             Confirmation = workers > 1 ? "parallel" : "sequential",
             Workers = workers,
+            FilesWithoutMatch = NormalizeWithout(without),
         };
+    }
+
+    private static string[] NormalizeWithout(ConcurrentBag<string>? without)
+    {
+        if (without == null || without.IsEmpty)
+        {
+            return [];
+        }
+
+        return without.Distinct(StringComparer.Ordinal).OrderBy(path => path, StringComparer.Ordinal).ToArray();
     }
 
     private static string RelativeTo(string root, string start, out bool outside, out bool prefixIsFile)

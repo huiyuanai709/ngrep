@@ -17,6 +17,14 @@ internal sealed class MatchPlan
 
     public required bool Invert { get; init; }
 
+    public ReportMode Report { get; init; }
+
+    public bool Multiline { get; init; }
+
+    public bool MultilineDotAll { get; init; }
+
+    public bool IncludeHidden { get; init; }
+
     public required int Before { get; init; }
 
     public required int After { get; init; }
@@ -29,6 +37,11 @@ internal sealed class MatchPlan
 
     public bool WantsContext => Before > 0 || After > 0;
 
+    public bool StopAtFirst => Report == ReportMode.FilesWithMatches;
+
+    /// <summary>Regex matches may include a newline. Set by <c>-U</c> or <c>--multiline-dotall</c>.</summary>
+    public bool CrossesLines => Multiline || MultilineDotAll;
+
     public bool CanUseTrigrams => !Invert && Literals is { TrigramSafe: true };
 
     public static MatchPlan Create(SearchQuery query)
@@ -37,10 +50,17 @@ internal sealed class MatchPlan
         Regex[]? regexes = null;
         if (query.Regex)
         {
-            var options = RegexOptions.CultureInvariant;
+            // Interpreter only. RegexOptions.Compiled is not AOT-safe for a user pattern.
+            // Multiline makes ^ and $ line anchors, matching grep. Singleline is dotall.
+            var options = RegexOptions.CultureInvariant | RegexOptions.Multiline;
             if (query.IgnoreCase)
             {
                 options |= RegexOptions.IgnoreCase;
+            }
+
+            if (query.MultilineDotAll)
+            {
+                options |= RegexOptions.Singleline;
             }
 
             regexes = new Regex[patterns.Length];
@@ -68,7 +88,38 @@ internal sealed class MatchPlan
             Filter = PathFilter.Create(query.Globs, query.Types, query.TypeNots, query.TypeAdds),
             Literals = LiteralQuery.FromPatterns(patterns, query.Regex),
             ApplyGitIgnore = !query.NoIgnore && !query.NoIgnoreVcs,
+            Report = query.Report,
+            Multiline = query.Multiline || query.MultilineDotAll,
+            MultilineDotAll = query.MultilineDotAll,
+            IncludeHidden = query.IncludeHidden,
         };
+    }
+
+    public static bool HasMatch(string text, MatchPlan plan)
+    {
+        if (!plan.Invert)
+        {
+            return FirstHit(text, plan) != null;
+        }
+
+        var starts = LineMap.Build(text);
+        var lineCount = LineMap.LineCount(text, starts);
+        if (lineCount == 0)
+        {
+            return false;
+        }
+
+        var matchingLines = new HashSet<int>();
+        MarkMatchingLines(text, starts, plan, matchingLines);
+        for (var line = 1; line <= lineCount; line++)
+        {
+            if (!matchingLines.Contains(line))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public static void Collect(string text, string relativePath, MatchPlan plan, List<SearchMatch> matches)
@@ -89,6 +140,20 @@ internal sealed class MatchPlan
                 var lineText = LineMap.LineText(text, starts, line);
                 var (before, after) = Context(text, starts, lineCount, line, plan);
                 matches.Add(new SearchMatch(relativePath, line, 1, lineText, lineText, before, after));
+                if (plan.StopAtFirst)
+                {
+                    return;
+                }
+            }
+
+            return;
+        }
+
+        if (plan.StopAtFirst)
+        {
+            if (FirstHit(text, plan) is { } first)
+            {
+                AddHit(text, starts, lineCount, relativePath, plan, first, matches);
             }
 
             return;
@@ -102,6 +167,11 @@ internal sealed class MatchPlan
                 foreach (Match match in regex.Matches(text))
                 {
                     if (!match.Success)
+                    {
+                        continue;
+                    }
+
+                    if (!plan.CrossesLines && ContainsLineBreak(text, match.Index, match.Length))
                     {
                         continue;
                     }
@@ -133,17 +203,118 @@ internal sealed class MatchPlan
         var deduped = Dedup(hits);
         foreach (var hit in deduped)
         {
-            var (line, column) = LineMap.Map(starts, hit.Index);
-            var (before, after) = Context(text, starts, lineCount, line, plan);
-            matches.Add(new SearchMatch(
-                relativePath,
-                line,
-                column,
-                hit.Value,
-                LineMap.LineText(text, starts, line),
-                before,
-                after));
+            AddHit(text, starts, lineCount, relativePath, plan, hit, matches);
         }
+    }
+
+    private static void AddHit(
+        string text,
+        int[] starts,
+        int lineCount,
+        string relativePath,
+        MatchPlan plan,
+        Hit hit,
+        List<SearchMatch> matches)
+    {
+        var (line, column) = LineMap.Map(starts, hit.Index);
+        var (before, after) = Context(text, starts, lineCount, line, plan);
+        matches.Add(new SearchMatch(
+            relativePath,
+            line,
+            column,
+            hit.Value,
+            LineMap.LineText(text, starts, line),
+            before,
+            after));
+    }
+
+    private static Hit? FirstHit(string text, MatchPlan plan)
+    {
+        Hit? best = null;
+        if (plan.Regex)
+        {
+            foreach (var regex in plan.Regexes!)
+            {
+                ConsiderFirstRegex(text, regex, plan, ref best);
+            }
+        }
+        else
+        {
+            var comparison = plan.IgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            foreach (var pattern in plan.Patterns)
+            {
+                ConsiderFirstLiteral(text, pattern, comparison, plan.Word, ref best);
+            }
+        }
+
+        return best;
+    }
+
+    private static void ConsiderFirstLiteral(string text, string pattern, StringComparison comparison, bool word, ref Hit? best)
+    {
+        if (pattern.Length == 0 || pattern.Length > text.Length)
+        {
+            return;
+        }
+
+        var limit = best?.Index ?? int.MaxValue;
+        var from = 0;
+        while (from <= text.Length - pattern.Length && from < limit)
+        {
+            var idx = text.IndexOf(pattern, from, comparison);
+            if (idx < 0 || idx >= limit)
+            {
+                return;
+            }
+
+            if (!word || WordBoundary.At(text, idx, pattern.Length))
+            {
+                best = new Hit(idx, pattern.Length, text.Substring(idx, pattern.Length));
+                return;
+            }
+
+            from = idx + 1;
+        }
+    }
+
+    private static void ConsiderFirstRegex(string text, Regex regex, MatchPlan plan, ref Hit? best)
+    {
+        var limit = best?.Index ?? int.MaxValue;
+        var from = 0;
+        while (from <= text.Length && from < limit)
+        {
+            var match = regex.Match(text, from);
+            if (!match.Success || match.Index >= limit)
+            {
+                return;
+            }
+
+            var crosses = ContainsLineBreak(text, match.Index, match.Length);
+            if ((plan.CrossesLines || !crosses) && (!plan.Word || WordBoundary.At(text, match.Index, match.Length)))
+            {
+                best = new Hit(match.Index, match.Length, match.Value);
+                return;
+            }
+
+            var next = match.Index + Math.Max(1, match.Length);
+            from = next <= from ? from + 1 : next;
+        }
+    }
+
+    private static bool ContainsLineBreak(string text, int index, int length)
+    {
+        if (length <= 0 || index < 0 || index >= text.Length)
+        {
+            return false;
+        }
+
+        var end = index + length;
+        if (end > text.Length)
+        {
+            end = text.Length;
+        }
+
+        return text.IndexOf('\n', index, end - index) >= 0;
     }
 
     private static string[] Combine(SearchQuery query)
@@ -182,7 +353,7 @@ internal sealed class MatchPlan
         {
             foreach (var regex in plan.Regexes!)
             {
-                MarkRegex(text, starts, regex, plan.Word, lines);
+                MarkRegex(text, starts, regex, plan, lines);
             }
 
             return;
@@ -213,14 +384,27 @@ internal sealed class MatchPlan
 
             if (!word || WordBoundary.At(text, idx, pattern.Length))
             {
-                lines.Add(LineMap.Map(starts, idx).Line);
-                var newline = text.IndexOf('\n', idx);
-                if (newline < 0)
+                var startLine = LineMap.Map(starts, idx).Line;
+                var endIndex = idx + pattern.Length - 1;
+                var endLine = LineMap.Map(starts, endIndex).Line;
+                for (var line = startLine; line <= endLine; line++)
                 {
-                    return;
+                    lines.Add(line);
                 }
 
-                from = newline + 1;
+                if (endLine == startLine)
+                {
+                    var newline = text.IndexOf('\n', idx);
+                    if (newline < 0)
+                    {
+                        return;
+                    }
+
+                    from = newline + 1;
+                    continue;
+                }
+
+                from = idx + Math.Max(1, pattern.Length);
                 continue;
             }
 
@@ -228,7 +412,7 @@ internal sealed class MatchPlan
         }
     }
 
-    private static void MarkRegex(string text, int[] starts, Regex regex, bool word, HashSet<int> lines)
+    private static void MarkRegex(string text, int[] starts, Regex regex, MatchPlan plan, HashSet<int> lines)
     {
         var from = 0;
         while (from <= text.Length)
@@ -239,22 +423,43 @@ internal sealed class MatchPlan
                 return;
             }
 
-            if (!word || WordBoundary.At(text, match.Index, match.Length))
+            var crosses = ContainsLineBreak(text, match.Index, match.Length);
+            var accept = (plan.CrossesLines || !crosses) && (!plan.Word || WordBoundary.At(text, match.Index, match.Length));
+            if (accept)
             {
-                lines.Add(LineMap.Map(starts, match.Index).Line);
-                if (match.Index >= text.Length)
+                var startLine = LineMap.Map(starts, match.Index).Line;
+                var endIndex = match.Length == 0 ? match.Index : match.Index + match.Length - 1;
+                if (text.Length == 0)
                 {
-                    return;
+                    endIndex = match.Index;
+                }
+                else if (endIndex >= text.Length)
+                {
+                    endIndex = text.Length - 1;
                 }
 
-                var newline = text.IndexOf('\n', match.Index);
-                if (newline < 0)
+                var endLine = text.Length == 0 ? startLine : LineMap.Map(starts, endIndex).Line;
+                for (var line = startLine; line <= endLine; line++)
                 {
-                    return;
+                    lines.Add(line);
                 }
 
-                from = newline + 1;
-                continue;
+                if (!crosses)
+                {
+                    if (match.Index >= text.Length)
+                    {
+                        return;
+                    }
+
+                    var newline = text.IndexOf('\n', match.Index);
+                    if (newline < 0)
+                    {
+                        return;
+                    }
+
+                    from = newline + 1;
+                    continue;
+                }
             }
 
             var next = match.Index + Math.Max(1, match.Length);
