@@ -43,8 +43,10 @@ public class SearchUxTests
         Assert.Equal("parallel", parallel.Confirmation);
         Assert.Equal(4, parallel.Workers);
         Assert.True(parallel.UsedIndex);
+        Assert.True(sequential.UsedTrigramPrefilter);
         Assert.Equal("parallel", scan.Confirmation);
         Assert.False(scan.UsedIndex);
+        Assert.False(scan.UsedTrigramPrefilter);
         Assert.Equal(12, sequential.Matches.Count);
         Assert.Equal(sequential.Matches, parallel.Matches);
         Assert.Equal(sequential.Matches.Select(m => (m.Path, m.Line, m.Column, m.Text)).ToArray(),
@@ -156,6 +158,8 @@ public class SearchUxTests
         Assert.Equal(["widget.foo"], custom);
 
         Assert.Empty(Paths(tree.Root, "-g", "*.log"));
+        Assert.Equal(["skip.log"], Paths(tree.Root, "--no-ignore", "-g", "*.log"));
+        Assert.Equal(["skip.log"], Paths(tree.Root, "--no-ignore-vcs", "-g", "*.log"));
 
         using var capture = new Capture();
         var unknown = NetgrepCli.Run(["netgrep", tree.Root, "-t", "nope"]);
@@ -292,6 +296,8 @@ public class SearchUxTests
         Assert.Contains("--word-regexp", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--invert-match", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--regexp", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--no-ignore", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--no-ignore-vcs", capture.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

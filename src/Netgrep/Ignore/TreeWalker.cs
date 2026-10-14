@@ -28,13 +28,14 @@ internal sealed class WalkStats
 
 internal static class TreeWalker
 {
-    public static IEnumerable<WalkedFile> Enumerate(string walkRoot, string? indexDirectory, WalkStats stats)
+    public static IEnumerable<WalkedFile> Enumerate(string walkRoot, string? indexDirectory, WalkStats stats, bool applyGitIgnore = true)
     {
         walkRoot = Path.GetFullPath(walkRoot);
         var scopeRoot = FindGitRoot(walkRoot) ?? walkRoot;
         var indexRelative = IndexRelative(walkRoot, indexDirectory);
         var stackFrames = new Stack<(string Full, string WalkRelative, IgnoreStack Ignores)>();
-        stackFrames.Push((walkRoot, "", LoadChain(scopeRoot, walkRoot)));
+        var rootIgnores = applyGitIgnore ? LoadChain(scopeRoot, walkRoot) : IgnoreStack.Empty;
+        stackFrames.Push((walkRoot, "", rootIgnores));
 
         while (stackFrames.Count > 0)
         {
@@ -83,7 +84,7 @@ internal static class TreeWalker
 
                 if (isDir)
                 {
-                    if (ignores.IsIgnored(scopeRelative, true))
+                    if (applyGitIgnore && ignores.IsIgnored(scopeRelative, true))
                     {
                         continue;
                     }
@@ -92,7 +93,7 @@ internal static class TreeWalker
                     continue;
                 }
 
-                if (ignores.IsIgnored(scopeRelative, false))
+                if (applyGitIgnore && ignores.IsIgnored(scopeRelative, false))
                 {
                     stats.IncrementSkippedIgnored();
                     continue;
@@ -105,10 +106,13 @@ internal static class TreeWalker
             {
                 var dir = directories[i];
                 var childIgnores = ignores;
-                var gitignore = Path.Combine(dir.Full, ".gitignore");
-                if (File.Exists(gitignore))
+                if (applyGitIgnore)
                 {
-                    childIgnores = ignores.Add(dir.ScopeRelative, File.ReadAllText(gitignore));
+                    var gitignore = Path.Combine(dir.Full, ".gitignore");
+                    if (File.Exists(gitignore))
+                    {
+                        childIgnores = ignores.Add(dir.ScopeRelative, File.ReadAllText(gitignore));
+                    }
                 }
 
                 stackFrames.Push((dir.Full, dir.WalkRelative, childIgnores));
