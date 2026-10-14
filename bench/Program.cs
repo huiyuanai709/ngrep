@@ -136,9 +136,18 @@ static void WriteSmall(string root, int files, int bytesEach)
 {
     var line = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx const token = 1;\n"u8;
     var body = new byte[bytesEach];
-    for (var offset = 0; offset + line.Length <= body.Length; offset += line.Length)
+    var filled = 0;
+    while (filled + line.Length <= body.Length)
     {
-        line.CopyTo(body.AsSpan(offset));
+        line.CopyTo(body.AsSpan(filled));
+        filled += line.Length;
+    }
+
+    // A zero tail is a NUL. ngrep only probes the first 8 KiB, so it would still
+    // search the file, while rg skips it as binary. Fill the remainder with text.
+    if (filled < body.Length)
+    {
+        body.AsSpan(filled).Fill((byte)'x');
     }
 
     for (var i = 0; i < files; i++)
