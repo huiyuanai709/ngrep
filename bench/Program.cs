@@ -45,6 +45,22 @@ try
     Print("regex_class_miss", classMiss);
     Print("files_with_matches", listed);
 
+    var asyncMiss = Time(root, "unlikely-token-zz", regex: false, asyncIo: true);
+    var asyncConfirm = Time(root, "NEEDLE", regex: false, asyncIo: true);
+    var asyncRegex = Time(root, "NEEDLE[0-9]", regex: true, asyncIo: true);
+    var asyncListed = Time(largeRoot, "EARLY", regex: false, filesWithMatches: true, asyncIo: true);
+    var asyncLargeMiss = Time(largeRoot, "unlikely-token-zz", regex: false, asyncIo: true);
+    var asyncLargeRegex = Time(largeRoot, "NEEDLE[0-9]", regex: true, asyncIo: true);
+    var asyncClass = Time(largeRoot, "[abc]{8}", regex: true, asyncIo: true);
+    Console.WriteLine("measure=async-in-process paired=yes");
+    Print("async_literal_miss", asyncMiss);
+    Print("async_literal_confirm", asyncConfirm);
+    Print("async_regex_prefilter", asyncRegex);
+    Print("async_large_miss", asyncLargeMiss);
+    Print("async_large_regex", asyncLargeRegex);
+    Print("async_regex_class_miss", asyncClass);
+    Print("async_files_with_matches", asyncListed);
+
     var rg = Which("rg", "/exec-daemon/rg");
     var grep = Which("grep");
     Console.WriteLine("measure=process+startup paired=yes");
@@ -67,6 +83,10 @@ try
         if (ngrepBin != null)
         {
             TimeTool("ngrep", ngrepBin, sample.Name, sample.Ngrep);
+            var asyncArgv = new string[sample.Ngrep.Length + 1];
+            asyncArgv[0] = "--async";
+            sample.Ngrep.CopyTo(asyncArgv, 1);
+            TimeTool("ngrep_async", ngrepBin, sample.Name, asyncArgv);
         }
 
         if (rg != null)
@@ -215,9 +235,9 @@ static void WriteLarge(string root, int count, int bytesEach)
     }
 }
 
-static (double Ms, int Files, int Matches) Time(string root, string pattern, bool regex, bool filesWithMatches = false)
+static (double Ms, int Files, int Matches) Time(string root, string pattern, bool regex, bool filesWithMatches = false, bool asyncIo = false)
 {
-    var query = Query(root, pattern, regex, filesWithMatches);
+    var query = Query(root, pattern, regex, filesWithMatches, asyncIo);
     Searcher.Search(query);
     var clock = Stopwatch.StartNew();
     var outcome = Searcher.Search(query);
@@ -225,7 +245,7 @@ static (double Ms, int Files, int Matches) Time(string root, string pattern, boo
     return (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.Matches.Count);
 }
 
-static SearchQuery Query(string root, string pattern, bool regex, bool filesWithMatches) => new()
+static SearchQuery Query(string root, string pattern, bool regex, bool filesWithMatches, bool asyncIo = false) => new()
 {
     Pattern = pattern,
     Path = root,
@@ -233,6 +253,7 @@ static SearchQuery Query(string root, string pattern, bool regex, bool filesWith
     ForceScan = true,
     NoIgnore = true,
     IncludeHidden = true,
+    AsyncIo = asyncIo,
     Report = filesWithMatches ? ReportMode.FilesWithMatches : ReportMode.Matches,
     MaxDegreeOfParallelism = Environment.ProcessorCount,
 };

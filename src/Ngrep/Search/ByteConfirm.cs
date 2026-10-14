@@ -54,6 +54,45 @@ internal static class ByteConfirm
         return state.Stop;
     }
 
+    /// <summary>
+    /// A stop callback that is not stored in the thread-static slot.
+    /// Async reads resume on another pool thread; <see cref="Adopt"/> binds this callback there before confirm.
+    /// </summary>
+    public static ReadStop? ArmFresh(MatchPlan plan)
+    {
+        if (!plan.StopAtFirst || plan.WantsContext || plan.Word || !CanHandle(plan))
+        {
+            return null;
+        }
+
+        if (!plan.Literals!.TryAsciiOr(plan.IgnoreCase, out var any, out _, out var lengths))
+        {
+            return null;
+        }
+
+        var max = 1;
+        foreach (var length in lengths)
+        {
+            if (length > max)
+            {
+                max = length;
+            }
+        }
+
+        var state = new StopState();
+        state.Arm(any, max);
+        return state.Stop;
+    }
+
+    /// <summary>Makes <see cref="TryHandle"/> see the stop state <paramref name="stop"/> closes over.</summary>
+    public static void Adopt(ReadStop? stop)
+    {
+        if (stop?.Target is StopState state)
+        {
+            _state = state;
+        }
+    }
+
     public static void Disarm()
     {
         if (_state != null)

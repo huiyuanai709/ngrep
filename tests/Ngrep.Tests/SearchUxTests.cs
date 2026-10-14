@@ -54,6 +54,55 @@ public class SearchUxTests
     }
 
     [Fact]
+    public void Async_io_matches_the_sync_scan()
+    {
+        using var tree = Temp();
+        File.WriteAllText(tree.File("a.txt"), "nope\nNEEDLE\n");
+        File.WriteAllText(tree.File("sub/b.txt"), "NEEDLE9\n");
+        File.WriteAllText(tree.File("sub/big.txt"), new string('x', 300 * 1024) + "\nNEEDLE\n");
+
+        static string[] Keys(SearchOutcome outcome) =>
+            outcome.Matches
+                .Select(m => $"{m.Path}:{m.Line}:{m.Column}:{m.Text}")
+                .OrderBy(s => s, StringComparer.Ordinal)
+                .ToArray();
+
+        void Same(string pattern, bool regex, bool list)
+        {
+            SearchOutcome Run(bool asyncIo, int workers) => Searcher.Search(new SearchQuery
+            {
+                Pattern = pattern,
+                Path = tree.Root,
+                Regex = regex,
+                ForceScan = true,
+                NoIgnore = true,
+                IncludeHidden = true,
+                AsyncIo = asyncIo,
+                Report = list ? ReportMode.FilesWithMatches : ReportMode.Matches,
+                MaxDegreeOfParallelism = workers,
+            });
+
+            var sync = Run(false, 2);
+            var one = Run(true, 1);
+            var many = Run(true, 4);
+            Assert.Equal("async", one.Confirmation);
+            Assert.Equal("async", many.Confirmation);
+            Assert.Equal(Keys(sync), Keys(one));
+            Assert.Equal(Keys(sync), Keys(many));
+            Assert.Equal(sync.FilesSearched, many.FilesSearched);
+        }
+
+        Same("NEEDLE", regex: false, list: false);
+        Same("NEEDLE[0-9]", regex: true, list: false);
+        Same("NEEDLE", regex: false, list: true);
+
+        using var capture = new Capture();
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--scan", "--no-ignore", "--hidden", "--async", "-E", "NEEDLE[0-9]", tree.Root, "-j", "2"]));
+        Assert.Contains("NEEDLE9", capture.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("async", capture.Stderr, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Scheduler_runs_workers_concurrently_and_honors_cancellation()
     {
         var files = Enumerable.Range(0, 8)

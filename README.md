@@ -35,7 +35,7 @@ Search flags:
 
 ```text
 [--index <dir>] [--format text|json|ndjson|rgjson]
-[--ignore-case|-i] [-E|--extended-regexp|--regex] [-F|--fixed-strings] [--scan]
+[--ignore-case|-i] [-E|--extended-regexp|--regex] [-F|--fixed-strings] [--scan] [--async]
 [-e|--regexp <pattern>]... [-f|--file <path>]... [-w|--word-regexp] [-x|--line-regexp] [-v|--invert-match]
 [-l|--files-with-matches] [--files-without-match] [-c|--count] [-q|--quiet|--silent] [-o|--only-matching]
 [-n|--line-number] [-s|--no-messages]

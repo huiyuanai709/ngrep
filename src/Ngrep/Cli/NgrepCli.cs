@@ -104,6 +104,10 @@ internal static class NgrepCli
         {
             Description = "Ignore any on-disk index and scan file contents.",
         };
+        var asyncIo = new Option<bool>("--async")
+        {
+            Description = "Schedule file reads on tasks (async I/O, then the same SIMD and byte-automaton confirm). Default is the synchronous worker path. Same Native AOT binary; files at or above 256 KiB still map.",
+        };
         var glob = new Option<string[]>("-g", "--glob")
         {
             Description = "Include or exclude files. Repeatable. A leading ! excludes (like ripgrep). The last matching glob wins. Globs filter after .gitignore and do not re-include ignored files.",
@@ -240,6 +244,7 @@ internal static class NgrepCli
         searchCommand.Options.Add(pcre);
         searchCommand.Options.Add(fixedStrings);
         searchCommand.Options.Add(scan);
+        searchCommand.Options.Add(asyncIo);
         searchCommand.Options.Add(glob);
         searchCommand.Options.Add(type);
         searchCommand.Options.Add(typeNot);
@@ -299,6 +304,7 @@ internal static class NgrepCli
                     regex,
                     pcre,
                     scan,
+                    asyncIo,
                     glob,
                     type,
                     typeNot,
@@ -387,6 +393,7 @@ internal static class NgrepCli
         Option<bool> regex,
         Option<bool> pcre,
         Option<bool> scan,
+        Option<bool> asyncIo,
         Option<string[]> glob,
         Option<string[]> type,
         Option<string[]> typeNot,
@@ -460,6 +467,7 @@ internal static class NgrepCli
                 Regex = result.GetValue(regex) || result.GetValue(pcre),
                 Backtracking = result.GetValue(pcre),
                 ForceScan = result.GetValue(scan),
+                AsyncIo = result.GetValue(asyncIo),
                 WordRegexp = result.GetValue(word),
                 InvertMatch = result.GetValue(invert),
                 LineRegexp = result.GetValue(lineRegexp),

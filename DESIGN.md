@@ -102,4 +102,6 @@ JSON is written with `Utf8JsonWriter` and read with `JsonDocument`. `JsonSeriali
 
 The executable targets `net11.0`, sets `PublishAot`, `InvariantGlobalization`, and turns off reflection-based JSON, EventSource, and metadata updates. Case folding is invariant lowercase, which is what the index stores. Culture-specific casing is intentionally unavailable.
 
+`--async` is an optional scheduling path in that same binary. Workers are tasks, file bytes come from `RandomAccess.ReadAsync`, and confirm still uses the synchronous SIMD literal scan and byte automaton. Directory listing stays synchronous. A file at or above 256 KiB is mapped once its length is known, because a map has no async form. The flag defaults off, so a release publish keeps the synchronous worker path as the one you get with no extra argument. The async APIs are shared-framework types (`Task`, `Channel`, `RandomAccess`) with no reflection and no `RegexOptions.Compiled`, so Native AOT compiles them into the default binary. There is no second publish flavor.
+
 `dotnet build` and `dotnet test` stay on the JIT. `dotnet publish -c Release` produces the native binary. Remaining gaps are listed in the README after that publish.

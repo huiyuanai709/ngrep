@@ -84,6 +84,34 @@ internal static class TextFiles
         }
     }
 
+    /// <summary>
+    /// Asynchronous copy of <see cref="Read(string, ReadStop?)"/>. Buffers come from the array pool
+    /// so a continuation can resume on another thread. Files at or above <see cref="MmapThreshold"/>
+    /// still map once the length is known; mapping has no async equivalent.
+    /// </summary>
+    public static async ValueTask<PooledBytes> ReadAsync(string path, ReadStop? stop, CancellationToken cancellation)
+    {
+        SafeFileHandle? handle = null;
+        try
+        {
+            handle = File.OpenHandle(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            return await ReadFromAsync(handle, stop, cancellation);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return PooledBytes.Unreadable();
+        }
+        finally
+        {
+            handle?.Dispose();
+        }
+    }
+
     private interface IFileBytes
     {
         int ReadAt(byte[] buffer, int offset, int count, long position);
@@ -249,6 +277,122 @@ internal static class TextFiles
             if (!owned)
             {
                 Release(ref buffer, scratch);
+            }
+        }
+    }
+
+    private static async ValueTask<PooledBytes> ReadFromAsync(SafeFileHandle handle, ReadStop? stop, CancellationToken cancellation)
+    {
+        var first = 64 * 1024;
+        byte[]? buffer = null;
+        var owned = false;
+        try
+        {
+            buffer = ArrayPool<byte>.Shared.Rent(first);
+            var offset = 0;
+            var checkedBinary = false;
+            var knownLength = -1L;
+            while (true)
+            {
+                cancellation.ThrowIfCancellationRequested();
+                if (offset == buffer.Length)
+                {
+                    var lengthLong = knownLength >= 0 ? knownLength : RandomAccess.GetLength(handle);
+                    if (lengthLong < 0)
+                    {
+                        return PooledBytes.Unreadable();
+                    }
+
+                    knownLength = lengthLong;
+                    if (lengthLong > MaxFileBytes)
+                    {
+                        return PooledBytes.TooLarge();
+                    }
+
+                    if (lengthLong <= offset)
+                    {
+                        break;
+                    }
+
+                    if (lengthLong >= MmapThreshold
+                        && lengthLong <= int.MaxValue
+                        && TryMap(handle, (int)lengthLong, stop, out var mapped))
+                    {
+                        return mapped;
+                    }
+
+                    var target = stop == null
+                        ? (int)lengthLong
+                        : (int)Math.Min(lengthLong, offset + (1L << 20));
+                    var grown = ArrayPool<byte>.Shared.Rent(target);
+                    buffer.AsSpan(0, offset).CopyTo(grown);
+                    ArrayPool<byte>.Shared.Return(buffer);
+                    buffer = grown;
+                }
+
+                var want = buffer.Length - offset;
+                if (knownLength >= 0)
+                {
+                    var remain = (int)Math.Min(want, knownLength - offset);
+                    want = remain;
+                }
+
+                if (want <= 0)
+                {
+                    break;
+                }
+
+                var read = await RandomAccess.ReadAsync(handle, buffer.AsMemory(offset, want), offset, cancellation);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                offset += read;
+                var endOfFile = read < buffer.Length - (offset - read) || (knownLength >= 0 && offset >= knownLength);
+                if (offset < buffer.Length)
+                {
+                    endOfFile = true;
+                }
+
+                if (!checkedBinary && (offset >= BinaryProbeLength || endOfFile))
+                {
+                    checkedBinary = true;
+                    if (IsBinary(buffer.AsSpan(0, offset)))
+                    {
+                        return PooledBytes.Binary();
+                    }
+                }
+
+                if (stop != null && checkedBinary && stop(buffer.AsSpan(0, offset), endOfFile))
+                {
+                    owned = true;
+                    return PooledBytes.Ok(buffer, offset, scratch: false);
+                }
+
+                if (endOfFile)
+                {
+                    break;
+                }
+            }
+
+            if (!checkedBinary && IsBinary(buffer.AsSpan(0, Math.Min(offset, BinaryProbeLength))))
+            {
+                return PooledBytes.Binary();
+            }
+
+            owned = true;
+            return PooledBytes.Ok(buffer, offset, scratch: false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return PooledBytes.Unreadable();
+        }
+        finally
+        {
+            if (!owned && buffer != null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
             }
         }
     }
