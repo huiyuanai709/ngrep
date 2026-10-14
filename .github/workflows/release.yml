@@ -25,7 +25,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: netgrep-release
+  group: ngrep-release
   cancel-in-progress: false
 
 defaults:
@@ -64,9 +64,9 @@ jobs:
               echo "Using existing ${tag} at ${sha}."
             else
               sha=$(git rev-parse HEAD)
-              csproj=$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' src/Netgrep/Netgrep.csproj | head -1)
+              csproj=$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' src/Ngrep/Ngrep.csproj | head -1)
               if [ "$ver" != "$csproj" ]; then
-                echo "Refusing to create ${tag}: src/Netgrep/Netgrep.csproj Version is ${csproj}." >&2
+                echo "Refusing to create ${tag}: src/Ngrep/Ngrep.csproj Version is ${csproj}." >&2
                 exit 1
               fi
               # GITHUB_TOKEN tag pushes do not start a second workflow run.
@@ -84,9 +84,9 @@ jobs:
           fi
 
           git checkout --detach "$sha"
-          csproj=$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' src/Netgrep/Netgrep.csproj | head -1)
+          csproj=$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' src/Ngrep/Ngrep.csproj | head -1)
           if [ "${tag#v}" != "$csproj" ]; then
-            echo "Tag ${tag} does not match src/Netgrep/Netgrep.csproj Version ${csproj}." >&2
+            echo "Tag ${tag} does not match src/Ngrep/Ngrep.csproj Version ${csproj}." >&2
             exit 1
           fi
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
@@ -97,7 +97,7 @@ jobs:
           global-json-file: global.json
 
       - name: Test
-        run: dotnet test tests/Netgrep.Tests/Netgrep.Tests.csproj -c Release --nologo
+        run: dotnet test tests/Ngrep.Tests/Ngrep.Tests.csproj -c Release --nologo
 
   build:
     needs: prepare
@@ -142,7 +142,7 @@ jobs:
           set -euo pipefail
           available=true
           if [ "$RID" = "osx-x64" ]; then
-            if ! printf 'int main(void){return 0;}\n' | clang -arch x86_64 -x c -o "${RUNNER_TEMP}/netgrep-x64-probe" -; then
+            if ! printf 'int main(void){return 0;}\n' | clang -arch x86_64 -x c -o "${RUNNER_TEMP}/ngrep-x64-probe" -; then
               echo "osx-x64 cross toolchain is not available on this runner; skipping."
               available=false
             fi
@@ -161,22 +161,22 @@ jobs:
           RID: ${{ matrix.rid }}
         run: |
           set -euo pipefail
-          dotnet publish src/Netgrep/Netgrep.csproj -c Release -r "$RID"
+          dotnet publish src/Ngrep/Ngrep.csproj -c Release -r "$RID"
           mkdir -p dist
           if [ "$RID" = "win-x64" ]; then
-            matches=(src/Netgrep/bin/Release/*/win-x64/publish/netgrep.exe)
-            cp "${matches[0]}" dist/netgrep-win-x64.exe
+            matches=(src/Ngrep/bin/Release/*/win-x64/publish/ngrep.exe)
+            cp "${matches[0]}" dist/ngrep-win-x64.exe
           else
-            matches=(src/Netgrep/bin/Release/*/"$RID"/publish/netgrep)
-            cp "${matches[0]}" "dist/netgrep-${RID}"
-            chmod +x "dist/netgrep-${RID}"
+            matches=(src/Ngrep/bin/Release/*/"$RID"/publish/ngrep)
+            cp "${matches[0]}" "dist/ngrep-${RID}"
+            chmod +x "dist/ngrep-${RID}"
           fi
           ls -lh dist
 
       - uses: actions/upload-artifact@v4
         if: steps.probe.outputs.available == 'true' && steps.publish.outcome == 'success'
         with:
-          name: netgrep-${{ matrix.rid }}
+          name: ngrep-${{ matrix.rid }}
           path: dist/*
           if-no-files-found: error
 
@@ -186,7 +186,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: netgrep-*
+          pattern: ngrep-*
           merge-multiple: true
           path: assets
 
@@ -202,7 +202,7 @@ jobs:
             echo "No release assets were built." >&2
             exit 1
           fi
-          for required in netgrep-linux-x64 netgrep-win-x64.exe netgrep-osx-arm64; do
+          for required in ngrep-linux-x64 ngrep-win-x64.exe ngrep-osx-arm64; do
             if [ ! -f "assets/${required}" ]; then
               echo "Missing required asset ${required}." >&2
               exit 1
@@ -210,7 +210,7 @@ jobs:
           done
           notes=$(mktemp)
           {
-            echo "netgrep ${TAG}"
+            echo "ngrep ${TAG}"
             echo
             echo "Native AOT binaries. The Windows asset ends in .exe."
             echo

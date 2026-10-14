@@ -1,3 +1,3 @@
 # Sample tree
 
-This tree is indexed by netgrep.
+This tree is indexed by ngrep.

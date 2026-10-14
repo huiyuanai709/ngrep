@@ -1,6 +1,6 @@
-# netgrep design
+# ngrep design
 
-netgrep is a local search CLI. `index` walks a tree and writes a trigram inverted index. `search` intersects those postings and then reads candidate files to print path, line, and column. `watch` rebuilds that index when the tree changes. Nothing leaves the machine.
+ngrep is a local search CLI. `index` walks a tree and writes a trigram inverted index. `search` intersects those postings and then reads candidate files to print path, line, and column. `watch` rebuilds that index when the tree changes. Nothing leaves the machine.
 
 The on-disk layout is specified in [docs/index-format.md](docs/index-format.md). This note covers the commands, ignore rules, and library choices.
 
@@ -8,10 +8,10 @@ The on-disk layout is specified in [docs/index-format.md](docs/index-format.md).
 
 | Command | Behavior |
 | --- | --- |
-| `netgrep index <path>` | Walk `<path>`, update `<path>/.netgrep/index` (or `--index`). Exit 0 on success. |
-| `netgrep <pattern> [path]` | Same as `search`. The words `index`, `search`, and `watch` are subcommands; `netgrep -- index` searches for the pattern `index`. |
-| `netgrep search <pattern> [path]` | Query an index discovered by walking parents for `.netgrep/index`. If none exists, `--scan` is set, `--no-ignore` / `--no-ignore-vcs` is set, or `<path>` is outside the indexed root, scan file contents. |
-| `netgrep watch <path>` | Build an index, then watch the tree with `FileSystemWatcher`. Events are debounced (300 ms) into one incremental `index` pass. Writes under the index directory, `<root>/.netgrep`, and `<root>/.git` do not retrigger a build. Ctrl+C stops the process with exit 0. |
+| `ngrep index <path>` | Walk `<path>`, update `<path>/.ngrep/index` (or `--index`). Exit 0 on success. |
+| `ngrep <pattern> [path]` | Same as `search`. The words `index`, `search`, and `watch` are subcommands; `ngrep -- index` searches for the pattern `index`. |
+| `ngrep search <pattern> [path]` | Query an index discovered by walking parents for `.ngrep/index`. A `.netgrep` directory is not discovered. If none exists, `--scan` is set, `--no-ignore` / `--no-ignore-vcs` is set, or `<path>` is outside the indexed root, scan file contents. |
+| `ngrep watch <path>` | Build an index, then watch the tree with `FileSystemWatcher`. Events are debounced (300 ms) into one incremental `index` pass. Writes under the index directory, `<root>/.ngrep`, and `<root>/.git` do not retrigger a build. Ctrl+C stops the process with exit 0. |
 
 Shared options: `--format text|json|ndjson|rgjson`, `--index <dir>`. `rgjson` is search-only; `index` and `watch` exit 2 if it is set. Search also has `--ignore-case` / `-i`, `--regex`, `--scan`, `--no-ignore`, `--no-ignore-vcs`, `--hidden`, `-e` / `--regexp` (repeatable, OR), `-f` / `--file` (pattern files, OR), `-w` / `--word-regexp`, `-v` / `--invert-match`, `-l` / `--files-with-matches`, `--files-without-match`, `-c` / `--count`, `-o` / `--only-matching`, `--heading`, `--no-heading`, `--stats`, `-g` / `--glob`, `-t` / `--type`, `-T` / `--type-not`, `--type-add`, `--type-list`, `-A` / `-B` / `-C`, `-U` / `--multiline`, `--multiline-dotall`, `--color auto|always|never`, and `-j` / `--threads`.
 
@@ -19,7 +19,7 @@ Shared options: `--format text|json|ndjson|rgjson`, `--index <dir>`. `rgjson` is
 
 `-l`, `--files-without-match`, and `-c` select a report. More than one is exit 2. `-l` keeps the first hit in each file (leftmost index) and prints paths, unless `--stats` is set, in which case every hit is collected so the stderr line count is complete and the path list is unchanged. `--files-without-match` prints searched paths with no hit. When the trigram prefilter is safe, documents that miss the required literal are paths without a match and are not read. `-c` counts distinct matching lines per file and omits zeros. `-v` inverts the hit before that report: a file of only matching lines is a `--files-without-match` hit, and `-c -v` counts the other lines. Exit 0/1 follows whether that report printed anything. `-o` replaces `lineText` with `text` in text output only. Machine match objects are not renamed.
 
-`-f` / `--file` appends patterns after positional and `-e` patterns. Each file is one pattern per line. The newline is not part of the pattern. An empty line matches every line (one hit per line at column 1). A line starting with `#` is that pattern, not a comment. `\#` is kept as written. `--regex` applies to those patterns too, so `\#` then matches `#`. `-` is stdin. A missing path is exit 2. A zero-length file with no other pattern is exit 2. A positional before the first `-e` or `-f` is a pattern; after either flag, the positional is the path, so `netgrep -f pats.txt index` searches the path `index`.
+`-f` / `--file` appends patterns after positional and `-e` patterns. Each file is one pattern per line. The newline is not part of the pattern. An empty line matches every line (one hit per line at column 1). A line starting with `#` is that pattern, not a comment. `\#` is kept as written. `--regex` applies to those patterns too, so `\#` then matches `#`. `-` is stdin. A missing path is exit 2. A zero-length file with no other pattern is exit 2. A positional before the first `-e` or `-f` is a pattern; after either flag, the positional is the path, so `ngrep -f pats.txt index` searches the path `index`.
 
 Text headings: when stdout is a terminal and more than one file’s contents were read, match lines drop the path prefix and a path heading is printed first, with a blank line between files. `--heading` forces that. `--no-heading` keeps `path:line:column:text` and wins if both are set. JSON, NDJSON, and rgjson ignore both flags. Column stays in the heading form (`line:column:text`).
 
@@ -29,13 +29,13 @@ Text headings: when stdout is a terminal and more than one file’s contents wer
 
 Regex options are `CultureInvariant` and `Multiline` (line anchors), plus `IgnoreCase` and, for `--multiline-dotall`, `Singleline`. Never `Compiled`. Without `-U` / dotall, a match whose span contains `\n` is discarded. With them, the span is kept. `line` / `column` / `lineText` stay on the first line; `text` is the whole slice. `-v` marks every overlapped line. `-U` does not change a non-regex substring search.
 
-Globs follow gitignore syntax via the same interpreter regexes (no `RegexOptions.Compiled`). A leading `!` excludes. With at least one include glob, paths start excluded. The last matching glob wins. `-t` names are OR; `-T` names are excluded after that. `--type-add name:*.a,*.b` appends globs (bare `ext` means `*.ext`). Filters run after gitignore. They never re-include an ignored path, including when the query uses the index (ignored files were not indexed). `--no-ignore` and `--no-ignore-vcs` skip `.gitignore` and force a content scan, because the index has no ignored documents. netgrep has no other ignore files, so the flags match. `.git`, `.netgrep`, the index directory, and symlinks are still skipped. `--type-list` prints `name: *.ext, ...` and exits 0.
+Globs follow gitignore syntax via the same interpreter regexes (no `RegexOptions.Compiled`). A leading `!` excludes. With at least one include glob, paths start excluded. The last matching glob wins. `-t` names are OR; `-T` names are excluded after that. `--type-add name:*.a,*.b` appends globs (bare `ext` means `*.ext`). Filters run after gitignore. They never re-include an ignored path, including when the query uses the index (ignored files were not indexed). `--no-ignore` and `--no-ignore-vcs` skip `.gitignore` and force a content scan, because the index has no ignored documents. ngrep has no other ignore files, so the flags match. `.git`, `.ngrep`, the index directory, and symlinks are still skipped. `--type-list` prints `name: *.ext, ...` and exits 0.
 
 Context is stored on the match as optional `before` / `after` arrays and is omitted from JSON when the user did not ask for it. Text context lines are `path-line-text`, or `line-text` under a heading. Groups that are not contiguous are split with `--`. A line that is both context and a match is printed once, as a match.
 
 Exit codes stay 0 / 1 / 2. `--type-list` is 0. A canceled search is 2 (`search canceled` on stderr).
 
-`search` paths in the output are relative to the **index root** when an index is used (so `search netgrep src` still prints `src/App.cs`). A content scan prints paths relative to the directory that was scanned. Separators are `/`. Globs and types are matched against that same relative path. A path the user passed is searched even when that path is hidden. Components under it that start with `.` still need `--hidden`.
+`search` paths in the output are relative to the **index root** when an index is used (so `search ngrep src` still prints `src/App.cs`). A content scan prints paths relative to the directory that was scanned. Separators are `/`. Globs and types are matched against that same relative path. A path the user passed is searched even when that path is hidden. Components under it that start with `.` still need `--hidden`.
 
 `--format rgjson` writes one JSON object per line with `type` of `begin`, `context`, `match`, `end`, or `summary`. `context` is emitted only when context was requested. `absolute_offset` is the UTF-16 index of the line start in the decoded text. `summary.data.stats.elapsed_ms` is wall time. Match field names inside `--format json` / `ndjson` stay `path`, `line`, `column`, `text`, `lineText`. `rgjson` is not that object, and those objects do not gain `absolute_offset`.
 
@@ -45,7 +45,7 @@ Exit codes: `0` success (index or watch finished, or search found a match), `1` 
 
 ## Confirmation
 
-After the candidate set is known, netgrep reads file bytes on worker threads and searches each file independently. `-j` / `--threads` wins when it is set. Otherwise `NETGREP_THREADS`, otherwise `Environment.ProcessorCount`. `SearchQuery.MaxDegreeOfParallelism` is that width (`0` means the environment default). One worker, or a single candidate file from an index, stays sequential. The outcome records `Confirmation` of `parallel` or `sequential` and the worker count. Those fields are not machine output.
+After the candidate set is known, ngrep reads file bytes on worker threads and searches each file independently. `-j` / `--threads` wins when it is set. Otherwise `NGREP_THREADS`, otherwise `NETGREP_THREADS` when the new name is unset, otherwise `Environment.ProcessorCount`. `SearchQuery.MaxDegreeOfParallelism` is that width (`0` means the environment default). One worker, or a single candidate file from an index, stays sequential. The outcome records `Confirmation` of `parallel` or `sequential` and the worker count. Those fields are not machine output.
 
 The gitignore walk is single-threaded. For a content scan the walker is the producer on a bounded `BlockingCollection` so directory enumeration overlaps reads. Index confirmation queues the posting candidates the same way. `Parallel.ForEach` is not required; cancellation cancels the queue so a blocked producer or worker unblocks. Ctrl+C hooks `Console.CancelKeyPress` and exits 2.
 
@@ -63,7 +63,7 @@ Indexing and content scan share one walker.
 
 Hard skips, even if a gitignore negation, `--hidden`, or `--no-ignore` would bring them back:
 
-- any directory named `.git` or `.netgrep` (including when that directory is the path you passed)
+- any directory named `.git` or `.ngrep` (including when that directory is the path you passed)
 - the index directory, when it sits inside the walk
 - symlinks (not followed)
 
@@ -86,9 +86,9 @@ Binary files (a `NUL` in the first 8192 bytes) and files over 32 MiB are not ind
 
 ## Libraries
 
-- **System.CommandLine 2.0.12** defines `index`, `search`, and `watch`. A leading positional that is not one of those words is rewritten to `search`, so `netgrep <pattern> [path]` works. Handlers take `ParseResult` and call `GetValue`, which stays on the trim-safe 2.0 API (no reflection-based model binding). `string[]` options collect repeated flags; the search binder walks tokens so `-e` values are not mistaken for the path.
+- **System.CommandLine 2.0.12** defines `index`, `search`, and `watch`. A leading positional that is not one of those words is rewritten to `search`, so `ngrep <pattern> [path]` works. Handlers take `ParseResult` and call `GetValue`, which stays on the trim-safe 2.0 API (no reflection-based model binding). `string[]` options collect repeated flags; the search binder walks tokens so `-e` values are not mistaken for the path.
 - **`FileSystemWatcher`** is the watch backend. It is in the shared framework and works with Native AOT. The MVP does not coalesce bursts beyond a 300 ms flag, and it does not raise the inotify watch limit.
-- **Gitignore is in-tree.** [MAB.DotIgnore](https://github.com/markashleybell/MAB.DotIgnore) is the usual NuGet parser, and it compiles every pattern with `RegexOptions.Compiled`, which Native AOT cannot generate. It also merges rules into one list, so a nested `*.log` would leak out of its directory. netgrep compiles gitignore globs with the regex interpreter (`RegexOptions.CultureInvariant`, no `Compiled`) and keeps each file's rules on a stack.
+- **Gitignore is in-tree.** [MAB.DotIgnore](https://github.com/markashleybell/MAB.DotIgnore) is the usual NuGet parser, and it compiles every pattern with `RegexOptions.Compiled`, which Native AOT cannot generate. It also merges rules into one list, so a nested `*.log` would leak out of its directory. ngrep compiles gitignore globs with the regex interpreter (`RegexOptions.CultureInvariant`, no `Compiled`) and keeps each file's rules on a stack.
 
 JSON is written with `Utf8JsonWriter` and read with `JsonDocument`. `JsonSerializer` reflection is disabled in the project file. Regex search uses the interpreter too, with a five-second timeout, not `RegexOptions.Compiled` and not a source-generated pattern (the pattern is user input). `RegexOptions.Multiline` and `Singleline` are interpreter flags and stay on the AOT path.
 
