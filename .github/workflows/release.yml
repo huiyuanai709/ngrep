@@ -224,6 +224,15 @@ jobs:
     needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
+      # gh release create runs git to locate the repository. Checkout supplies
+      # .git; every gh release command also passes -R so a missing checkout
+      # still targets this repository.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
       - uses: actions/download-artifact@v4
         with:
           pattern: ngrep-*
@@ -233,6 +242,7 @@ jobs:
       - name: Publish release and keep the two newest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           set -euo pipefail
@@ -270,17 +280,17 @@ jobs:
             echo "Only the two newest GitHub releases are kept. Older releases and their tags are deleted after this publish."
           } > "$notes"
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${files[@]}" --clobber
-            gh release edit "$TAG" --title "$TAG" --notes-file "$notes"
+          if gh -R "$GH_REPO" release view "$TAG" >/dev/null 2>&1; then
+            gh -R "$GH_REPO" release upload "$TAG" "${files[@]}" --clobber
+            gh -R "$GH_REPO" release edit "$TAG" --title "$TAG" --notes-file "$notes"
           else
-            gh release create "$TAG" "${files[@]}" --title "$TAG" --notes-file "$notes"
+            gh -R "$GH_REPO" release create "$TAG" "${files[@]}" --title "$TAG" --notes-file "$notes"
           fi
 
           found=false
           tags=()
           for _ in 1 2 3 4 5; do
-            mapfile -t tags < <(gh release list --limit 100 --exclude-drafts --json tagName,publishedAt \
+            mapfile -t tags < <(gh -R "$GH_REPO" release list --limit 100 --exclude-drafts --json tagName,publishedAt \
               --jq '[.[] | select(.publishedAt != null)] | sort_by(.publishedAt) | reverse | .[].tagName')
             found=false
             for rel in "${tags[@]}"; do
@@ -307,5 +317,5 @@ jobs:
               continue
             fi
             echo "Deleting release and tag ${rel}."
-            gh release delete "$rel" --yes --cleanup-tag
+            gh -R "$GH_REPO" release delete "$rel" --yes --cleanup-tag
           done
