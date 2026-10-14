@@ -298,6 +298,15 @@ public class SearchUxTests
         Assert.Contains("--regexp", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--no-ignore", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--no-ignore-vcs", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--files-with-matches", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--files-without-match", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--count", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--only-matching", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--hidden", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--color", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--multiline", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--multiline-dotall", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("rgjson", capture.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -34,12 +34,15 @@ netgrep watch <path> [--index <dir>] [--format text|json|ndjson]
 Search flags:
 
 ```text
-[--index <dir>] [--format text|json|ndjson]
+[--index <dir>] [--format text|json|ndjson|rgjson]
 [--ignore-case|-i] [--regex] [--scan]
 [-e|--regexp <pattern>]... [-w|--word-regexp] [-v|--invert-match]
+[-l|--files-with-matches] [--files-without-match] [-c|--count] [-o|--only-matching]
 [-g|--glob <glob>]... [-t|--type <type>]... [-T|--type-not <type>]...
 [--type-add <spec>]... [--type-list]
 [-A|--after-context <n>] [-B|--before-context <n>] [-C|--context <n>]
+[-U|--multiline] [--multiline-dotall] [--hidden]
+[--color auto|always|never]
 [-j|--threads <n>]
 ```
 
@@ -54,6 +57,20 @@ Patterns are OR. `-e` / `--regexp` may be repeated. A positional pattern written
 `-t` selects built-in types (OR if repeated). `-T` excludes types. `--type-list` prints the set and exits 0. `--type-add name:*.ext[,*.ext]` adds globs (a bare extension means `*.ext`; `name:include:*.ext` is accepted). Type names are case-insensitive. Types compose with globs and with `.gitignore` the same way: ignored files stay ignored.
 
 `-A`, `-B`, and `-C` add context in text output. `-C` sets both sides; `-A` and `-B` replace that side when they are also set. Context lines use `path-line-text`. Match lines stay `path:line:column:lineText`. A `--` line separates groups that do not touch. Overlapping context is not printed twice, and a context line that is itself a match is printed only as a match.
+
+`-l` / `--files-with-matches` prints one path per file that has a hit, and stops reading that file after the first hit. `--files-without-match` prints paths that were searched and had none. `-c` / `--count` prints `path:count`, where the count is matching lines (a line with two hits counts once). Files with a zero count are omitted. These three flags are mutually exclusive (exit 2). Text is paths or `path:count`. `--format json` is `{"paths":[...]}` or `{"counts":[{"path","count"}]}`. `--format ndjson` is one `{"path"}` or `{"path","count"}` object per line. That is not a match object: normal search JSON is unchanged.
+
+`-v` changes what a hit is. `-l -v` lists files that contain at least one non-matching line. `--files-without-match -v` lists files whose every line matches (an empty file has no lines, so it is listed). `-c -v` counts non-matching lines. Exit 0 means the selected report was non-empty; exit 1 means it was empty.
+
+`-o` / `--only-matching` changes text output to `path:line:column:text`, the matched slice, one line per hit. JSON and NDJSON stay `path`, `line`, `column`, `text`, `lineText`. `text` was already the slice. Context flags still fill `before` / `after` in JSON; text `-o` does not print context lines.
+
+Hidden files and directories (any path component whose name starts with `.`) are skipped by default. `--hidden` searches them. Naming a file, or a directory, still searches that path: `netgrep pat .secret` reads `.secret`, and `netgrep pat .github` reads non-hidden children of `.github`. Hard skips stay skipped with or without `--hidden`, `--no-ignore`, or an explicit path: a directory named `.git` or `.netgrep`, the index directory, and symlinks. `-g` does not bring a skipped hidden path back (same rule as gitignore). A gitignore negation does not un-hide a dotfile; pass `--hidden`. `--no-ignore` does not imply `--hidden`. The index still stores hidden files so `--hidden` can use it. A content scan skips them in the walk unless the flag is set.
+
+`--color` is `auto` (default), `always`, or `never`. `auto` colors text when stdout is a terminal, `NO_COLOR` is unset, and `TERM` is not `dumb`. `--color` alone means `auto`. JSON, NDJSON, and rgjson are never colored. Text uses magenta paths, green line numbers, blue columns, and bold red matches. There is no `--colors` spec.
+
+`-U` / `--multiline` lets a **regex** include a newline. `--multiline-dotall` implies `-U` and lets `.` match a newline (`RegexOptions.Singleline`). Either way `^` and `$` are line anchors (`RegexOptions.Multiline`), including when `-U` is off, so `^bar$` matches a line rather than only the whole file. Without `-U`, a match that contains a newline is dropped, including a pattern that turns dotall on itself such as `(?s)foo.bar`. User patterns never use `RegexOptions.Compiled`. A non-regex pattern is an exact substring, so a newline in that pattern already matches and `-U` does not change it. `-v` treats every line overlapped by a cross-line match as a matching line.
+
+`--format rgjson` is a separate search-only event stream (`begin`, `match`, `end`, `summary`). It does not replace `--format json` or `ndjson`. `lines.text` is the matched line plus a newline. `submatches[].start` / `end` are 0-based UTF-16 offsets into that line, not file byte offsets. There is no `absolute_offset`, elapsed time, or byte count. A cross-line match keeps the full slice in `submatches[].match.text`; `end` stops at the first line. Context events are not emitted. `index` and `watch` reject `rgjson` (exit 2).
 
 `-j` / `--threads` bounds confirmation workers (default: processor count, or `NETGREP_THREADS`). `1` forces a single worker.
 
@@ -121,9 +138,9 @@ Confirmation reads candidate files on a pool of workers. Bytes come from `ArrayP
 Still short of ripgrep:
 
 - User regexes run on the interpreter. `RegexOptions.Compiled` is not used, because the pattern is data and Native AOT cannot compile it. There is no Teddy scan and no regex DFA.
-- Trigrams are three characters. A short alternative, a pattern that can match without a literal, lookaround, and backreferences still read every candidate. `-v` does too: a file that lacks the pattern is a hit, so postings cannot drop it.
-- `-g` does not re-include a gitignored path. `--no-ignore` / `--no-ignore-vcs` opt out of `.gitignore` instead. There is no `--hidden` (dotfiles other than `.git` and `.netgrep` are already searched).
-- There is no multiline mode, pattern file, `-l` / `-c` / `-o`, color, heading, or ripgrep JSON event stream.
+- Trigrams are three characters. A short alternative, a pattern that can match without a literal, lookaround, and backreferences still read every candidate. `-v` does too: a file that lacks the pattern is a hit, so postings cannot drop it. `--files-without-match` records those drops as paths without reading them when the prefilter is safe.
+- `-g` does not re-include a gitignored path or a hidden path. `--no-ignore` / `--no-ignore-vcs` opt out of `.gitignore` only. `--hidden` is separate. A gitignore whitelist does not un-hide a dotfile. Hidden means a name starting with `.`, not the Windows hidden attribute.
+- There is no pattern file (`-f`), heading (`--heading`), or `--stats`. `--format rgjson` is a small event stream, not ripgrep's full JSON (no context events, no absolute byte offsets, no timings). `-c` always prints `path:count`, including for a single file. There is no `--include-zero` and no `--colors` customization.
 
 AOT notes:
 

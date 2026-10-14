@@ -42,11 +42,11 @@ internal static class NetgrepCli
     {
         var format = new Option<string>("--format")
         {
-            Description = "Output format: text, json, or ndjson.",
+            Description = "Output format: text, json, ndjson, or rgjson. rgjson is a search-only event stream.",
             DefaultValueFactory = _ => "text",
             Recursive = true,
         };
-        format.AcceptOnlyFromAmong("text", "json", "ndjson");
+        format.AcceptOnlyFromAmong("text", "json", "ndjson", "rgjson");
 
         var index = new Option<string>("--index")
         {
@@ -152,6 +152,40 @@ internal static class NetgrepCli
         {
             Description = "Workers for file reads. Default is the processor count, or NETGREP_THREADS.",
         };
+        var filesWith = new Option<bool>("--files-with-matches", "-l")
+        {
+            Description = "Print only the paths of files with at least one match.",
+        };
+        var filesWithout = new Option<bool>("--files-without-match")
+        {
+            Description = "Print only the paths of searched files with no matches. With -v, a match is a line that failed the pattern.",
+        };
+        var count = new Option<bool>("--count", "-c")
+        {
+            Description = "Print the number of matching lines per file (path:count). With -v, count lines that do not match. A line with several hits counts once. Zero counts are omitted.",
+        };
+        var onlyMatching = new Option<bool>("--only-matching", "-o")
+        {
+            Description = "Text output prints the matched text instead of the whole line. JSON and NDJSON keep path, line, column, text, and lineText; text is already the match.",
+        };
+        var hidden = new Option<bool>("--hidden")
+        {
+            Description = "Search hidden files and directories (a name starting with '.'). .git, .netgrep, the index directory, and symlinks stay skipped.",
+        };
+        var color = new Option<string>("--color")
+        {
+            Description = "When to color text output: auto, always, or never. auto colors a terminal unless NO_COLOR is set or TERM=dumb. JSON, NDJSON, and rgjson are never colored.",
+            DefaultValueFactory = _ => "auto",
+            Arity = ArgumentArity.ZeroOrOne,
+        };
+        var multiline = new Option<bool>("--multiline", "-U")
+        {
+            Description = "Let a regex match span lines. ^ and $ are line anchors either way. '.' does not match a newline unless --multiline-dotall. No RegexOptions.Compiled.",
+        };
+        var multilineDotAll = new Option<bool>("--multiline-dotall")
+        {
+            Description = "Let '.' match a newline. Implies --multiline.",
+        };
 
         var searchCommand = new Command("search", "Query the index, or scan contents when no index covers the path.");
         searchCommand.Arguments.Add(positionals);
@@ -172,6 +206,14 @@ internal static class NetgrepCli
         searchCommand.Options.Add(noIgnore);
         searchCommand.Options.Add(noIgnoreVcs);
         searchCommand.Options.Add(threads);
+        searchCommand.Options.Add(filesWith);
+        searchCommand.Options.Add(filesWithout);
+        searchCommand.Options.Add(count);
+        searchCommand.Options.Add(onlyMatching);
+        searchCommand.Options.Add(hidden);
+        searchCommand.Options.Add(color);
+        searchCommand.Options.Add(multiline);
+        searchCommand.Options.Add(multilineDotAll);
         searchCommand.SetAction(result =>
         {
             using var cts = new CancellationTokenSource();
@@ -213,6 +255,14 @@ internal static class NetgrepCli
                     noIgnore,
                     noIgnoreVcs,
                     threads,
+                    filesWith,
+                    filesWithout,
+                    count,
+                    onlyMatching,
+                    hidden,
+                    color,
+                    multiline,
+                    multilineDotAll,
                     cts.Token);
             }
             catch (OperationCanceledException)
@@ -285,6 +335,14 @@ internal static class NetgrepCli
         Option<bool> noIgnore,
         Option<bool> noIgnoreVcs,
         Option<int> threads,
+        Option<bool> filesWith,
+        Option<bool> filesWithout,
+        Option<bool> count,
+        Option<bool> onlyMatching,
+        Option<bool> hidden,
+        Option<string> color,
+        Option<bool> multiline,
+        Option<bool> multilineDotAll,
         CancellationToken cancellationToken)
     {
         var showTypes = result.GetValue(typeList);
@@ -300,6 +358,7 @@ internal static class NetgrepCli
         }
 
         var bound = SearchSyntax.Bind(result, typeList: false);
+        var report = BindReport(result, filesWith, filesWithout, count);
         var beforeCount = ContextCount(result, before, context);
         var afterCount = ContextCount(result, after, context);
         if (beforeCount < 0 || afterCount < 0)
@@ -307,6 +366,8 @@ internal static class NetgrepCli
             throw new ArgumentException("Context length must be >= 0.");
         }
 
+        var parsedFormat = OutputFormats.Parse(result.GetValue(format));
+        var colorOn = parsedFormat == OutputFormat.Text && TextColor.Enabled(TextColor.Parse(result.GetValue(color)));
         var outcome = Searcher.Search(new SearchQuery
         {
             Pattern = bound.Patterns[0],
@@ -320,6 +381,10 @@ internal static class NetgrepCli
             InvertMatch = result.GetValue(invert),
             NoIgnore = result.GetValue(noIgnore),
             NoIgnoreVcs = result.GetValue(noIgnoreVcs),
+            IncludeHidden = result.GetValue(hidden),
+            Multiline = result.GetValue(multiline),
+            MultilineDotAll = result.GetValue(multilineDotAll),
+            Report = report,
             BeforeContext = beforeCount,
             AfterContext = afterCount,
             Globs = Values(result, glob),
@@ -330,8 +395,48 @@ internal static class NetgrepCli
             CancellationToken = cancellationToken,
         });
         MachineOutput.Note(outcome.Note);
-        MachineOutput.WriteMatches(outcome.Matches, OutputFormats.Parse(result.GetValue(format)));
-        return outcome.Matches.Count > 0 ? ExitCodes.Success : ExitCodes.NoMatches;
+        MachineOutput.WriteMatches(
+            outcome.Matches,
+            parsedFormat,
+            new SearchPresentation(report, result.GetValue(onlyMatching), colorOn),
+            outcome.FilesWithoutMatch);
+        var produced = report == ReportMode.FilesWithoutMatch
+            ? outcome.FilesWithoutMatch.Count > 0
+            : outcome.Matches.Count > 0;
+        return produced ? ExitCodes.Success : ExitCodes.NoMatches;
+    }
+
+    private static ReportMode BindReport(
+        System.CommandLine.ParseResult result,
+        Option<bool> filesWith,
+        Option<bool> filesWithout,
+        Option<bool> count)
+    {
+        var with = result.GetValue(filesWith);
+        var without = result.GetValue(filesWithout);
+        var counts = result.GetValue(count);
+        var selected = (with ? 1 : 0) + (without ? 1 : 0) + (counts ? 1 : 0);
+        if (selected > 1)
+        {
+            throw new ArgumentException("-l/--files-with-matches, --files-without-match, and -c/--count are mutually exclusive.");
+        }
+
+        if (with)
+        {
+            return ReportMode.FilesWithMatches;
+        }
+
+        if (without)
+        {
+            return ReportMode.FilesWithoutMatch;
+        }
+
+        if (counts)
+        {
+            return ReportMode.Count;
+        }
+
+        return ReportMode.Matches;
     }
 
     private static string[] Values(System.CommandLine.ParseResult result, Option<string[]> option) =>

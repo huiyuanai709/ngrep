@@ -5,6 +5,7 @@ internal enum OutputFormat
     Text,
     Json,
     Ndjson,
+    RgJson,
 }
 
 internal static class OutputFormats
@@ -16,7 +17,8 @@ internal static class OutputFormats
             "text" => OutputFormat.Text,
             "json" => OutputFormat.Json,
             "ndjson" => OutputFormat.Ndjson,
-            _ => throw new ArgumentException($"Unknown format '{value}'. Expected text, json, or ndjson."),
+            "rgjson" => OutputFormat.RgJson,
+            _ => throw new ArgumentException($"Unknown format '{value}'. Expected text, json, ndjson, or rgjson."),
         };
     }
 }

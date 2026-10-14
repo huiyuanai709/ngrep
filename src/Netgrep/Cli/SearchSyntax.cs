@@ -40,6 +40,7 @@ internal static class SearchSyntax
         "--regexp",
         "-j",
         "--threads",
+        "--color",
     };
 
     public static string[] Rewrite(string[] args)

@@ -28,7 +28,12 @@ internal sealed class WalkStats
 
 internal static class TreeWalker
 {
-    public static IEnumerable<WalkedFile> Enumerate(string walkRoot, string? indexDirectory, WalkStats stats, bool applyGitIgnore = true)
+    public static IEnumerable<WalkedFile> Enumerate(
+        string walkRoot,
+        string? indexDirectory,
+        WalkStats stats,
+        bool applyGitIgnore = true,
+        bool includeHidden = false)
     {
         walkRoot = Path.GetFullPath(walkRoot);
         var scopeRoot = FindGitRoot(walkRoot) ?? walkRoot;
@@ -78,6 +83,13 @@ internal static class TreeWalker
                 var scopeRelative = ScopeRelative(scopeRoot, entry);
 
                 if (isDir && (name is ".git" or ".netgrep" || IsIndexPath(childWalk, indexRelative)))
+                {
+                    continue;
+                }
+
+                // Dotfiles are skipped unless the caller asked for them. .gitignore is still
+                // read from disk when a directory is entered; the file itself is not a hit.
+                if (!includeHidden && name.Length > 0 && name[0] == '.')
                 {
                     continue;
                 }

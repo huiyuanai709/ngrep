@@ -30,7 +30,8 @@ internal static class Indexer
         var updated = 0;
         var unchanged = 0;
 
-        var files = TreeWalker.Enumerate(root, indexPath, stats)
+        // Hidden files stay in the index so --hidden can filter at search time.
+        var files = TreeWalker.Enumerate(root, indexPath, stats, includeHidden: true)
             .OrderBy(f => f.RelativePath, StringComparer.Ordinal)
             .ToList();
 
