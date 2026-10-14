@@ -142,14 +142,7 @@ internal static class LineMap
     public static int[] Build(string text)
     {
         var starts = new List<int> { 0 };
-        for (var i = 0; i < text.Length; i++)
-        {
-            if (text[i] == '\n')
-            {
-                starts.Add(i + 1);
-            }
-        }
-
+        SimdNewline.Append(text, starts);
         return starts.ToArray();
     }
 
