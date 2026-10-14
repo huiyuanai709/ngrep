@@ -4,23 +4,26 @@ using Ngrep.Ignore;
 using Ngrep.Search;
 using Ngrep.Text;
 
-// Cold-scan microbench. Two corpora:
-//   small files — open/walk cost of a literal miss
-//   large source-like files — confirm, regex prefilter, and -l early stop
-// Prints the same rg commands when rg is on PATH.
+// Warm-scan microbench. Corpora stay separate so every tool searches the same tree:
+//   root — small files plus large/ (literal miss, confirm, regex)
+//   root/large — large files only
+//   a sibling tiny tree — walk/ignore, created after the paired timings
+// In-process rows are Searcher only. Process rows warm once, then time once.
+// Optional args[1] is an ngrep binary (Native AOT) timed as a subprocess.
 var files = args.Length > 0 && int.TryParse(args[0], out var parsed) ? parsed : 2500;
+var ngrepBin = args.Length > 1 && File.Exists(args[1]) ? Path.GetFullPath(args[1]) : null;
 var smallBytes = 32 * 1024;
 var largeCount = 8;
 var largeBytes = 8 * 1024 * 1024;
 var root = Directory.CreateTempSubdirectory("ngrep-bench-").FullName;
 var largeRoot = Path.Combine(root, "large");
+var tiny = Directory.CreateTempSubdirectory("ngrep-bench-tiny-").FullName;
 try
 {
     WriteSmall(root, files, smallBytes);
     WriteLarge(largeRoot, largeCount, largeBytes);
 
     ScannerThroughput();
-    Warm(root, "unlikely-token-zz");
     var miss = Time(root, "unlikely-token-zz", regex: false);
     var confirm = Time(root, "NEEDLE", regex: false);
     var regex = Time(root, "NEEDLE[0-9]", regex: true);
@@ -30,6 +33,7 @@ try
     var largeRegex = Time(largeRoot, "NEEDLE[0-9]", regex: true);
     var classMiss = Time(largeRoot, "[abc]{8}", regex: true);
 
+    Console.WriteLine("measure=in-process paired=yes");
     Console.WriteLine($"small_files={files} bytes_each={smallBytes} total_mib={files * (long)smallBytes / (1024 * 1024)}");
     Print("literal_miss", miss);
     Print("literal_confirm", confirm);
@@ -41,55 +45,68 @@ try
     Print("regex_class_miss", classMiss);
     Print("files_with_matches", listed);
 
-    var tiny = Path.Combine(root, "tiny");
+    var rg = Which("rg", "/exec-daemon/rg");
+    var grep = Which("grep");
+    Console.WriteLine("measure=process+startup paired=yes");
+    Console.WriteLine($"rg={rg ?? "missing"}");
+    Console.WriteLine($"grep={grep ?? "missing"}");
+    if (grep != null)
+    {
+        Console.WriteLine($"grep_version={FirstLine(grep, ["--version"])}");
+    }
+
+    if (rg != null)
+    {
+        Console.WriteLine($"rg_version={FirstLine(rg, ["--version"])}");
+    }
+
+    Console.WriteLine($"ngrep_bin={ngrepBin ?? "missing"}");
+    var cases = PairedCases(root, largeRoot);
+    foreach (var sample in cases)
+    {
+        if (ngrepBin != null)
+        {
+            TimeTool("ngrep", ngrepBin, sample.Name, sample.Ngrep);
+        }
+
+        if (rg != null)
+        {
+            TimeTool("rg", rg, sample.Name, sample.Rg);
+        }
+
+        if (grep != null)
+        {
+            TimeTool("grep", grep, sample.Name, sample.Grep);
+        }
+    }
+
     var tinyFiles = WriteTiny(tiny, dirs: 40, sub: 20, perDir: 15);
-    WarmTiny(tiny, "unlikely-token-zz");
     var tinyMiss = TimeTiny(tiny, "unlikely-token-zz", ignore: true, quiet: false, list: false);
     var tinyNoIgnore = TimeTiny(tiny, "unlikely-token-zz", ignore: false, quiet: false, list: false);
     var tinyQuiet = TimeTiny(tiny, "NEEDLE", ignore: true, quiet: true, list: false);
     var tinyList = TimeTiny(tiny, "token", ignore: true, quiet: false, list: true);
     var walkMs = TimeWalk(tiny, gitignore: true);
-    Console.WriteLine($"tiny_files={tinyFiles}");
+    Console.WriteLine($"tiny_files={tinyFiles} tiny_root={tiny}");
     Print("tiny_ignore_miss", tinyMiss);
     Print("tiny_noignore_miss", tinyNoIgnore);
     Print("tiny_quiet_hit", tinyQuiet);
     Print("tiny_list_hit", tinyList);
     Console.WriteLine($"tiny_walk_ms={walkMs:F1}");
-
-    var rg = WhichRg();
     if (rg != null)
     {
-        var rgMiss = TimeRg(rg, root, ["-F", "--no-ignore", "-uu", "unlikely-token-zz", root]);
-        var rgConfirm = TimeRg(rg, root, ["-F", "--no-ignore", "-uu", "NEEDLE", root]);
-        var rgRegex = TimeRg(rg, root, ["--no-ignore", "-uu", "NEEDLE[0-9]", root]);
-        var rgList = TimeRg(rg, largeRoot, ["-F", "-l", "--no-ignore", "-uu", "EARLY", largeRoot]);
-        var rgTiny = TimeRg(rg, tiny, ["-F", "--no-heading", "unlikely-token-zz", tiny]);
-        var rgTinyU = TimeRg(rg, tiny, ["-F", "--no-ignore", "-uu", "--no-heading", "unlikely-token-zz", tiny]);
-        var rgQuiet = TimeRg(rg, tiny, ["-F", "-q", "NEEDLE", tiny]);
-        var rgFiles = TimeRg(rg, tiny, ["-F", "-l", "token", tiny]);
-        var rgLargeMiss = TimeRg(rg, largeRoot, ["-F", "--no-ignore", "-uu", "unlikely-token-zz", largeRoot]);
-        var rgLargeRegex = TimeRg(rg, largeRoot, ["--no-ignore", "-uu", "NEEDLE[0-9]", largeRoot]);
-        var rgClass = TimeRg(rg, largeRoot, ["--no-ignore", "-uu", "[abc]{8}", largeRoot]);
-        Console.WriteLine($"rg={rg}");
-        Console.WriteLine($"rg_tiny_ignore_miss_ms={rgTiny:F1}");
-        Console.WriteLine($"rg_tiny_noignore_miss_ms={rgTinyU:F1}");
-        Console.WriteLine($"rg_tiny_quiet_hit_ms={rgQuiet:F1}");
-        Console.WriteLine($"rg_tiny_list_hit_ms={rgFiles:F1}");
-        Console.WriteLine($"rg_literal_miss_ms={rgMiss:F1}");
-        Console.WriteLine($"rg_literal_confirm_ms={rgConfirm:F1}");
-        Console.WriteLine($"rg_regex_ms={rgRegex:F1}");
-        Console.WriteLine($"rg_files_with_matches_ms={rgList:F1}");
-        Console.WriteLine($"rg_large_miss_ms={rgLargeMiss:F1}");
-        Console.WriteLine($"rg_large_regex_ms={rgLargeRegex:F1}");
-        Console.WriteLine($"rg_regex_class_miss_ms={rgClass:F1}");
+        TimeTool("rg", rg, "tiny_ignore_miss", ["-F", "--no-heading", "unlikely-token-zz", tiny]);
+        TimeTool("rg", rg, "tiny_noignore_miss", ["-F", "--no-ignore", "-uu", "--no-heading", "unlikely-token-zz", tiny]);
+        TimeTool("rg", rg, "tiny_quiet_hit", ["-F", "-q", "NEEDLE", tiny]);
+        TimeTool("rg", rg, "tiny_list_hit", ["-F", "-l", "token", tiny]);
     }
 
     Console.WriteLine("hyperfine example (after `dotnet publish -c Release -r linux-x64`):");
-    Console.WriteLine($"  hyperfine -w 1 -r 3 'rg -F --no-ignore -uu unlikely-token-zz {root}' '<publish>/ngrep --scan unlikely-token-zz {root}'");
+    Console.WriteLine($"  hyperfine -w 1 -r 3 'rg -F --no-ignore -uu unlikely-token-zz {root}' '<publish>/ngrep --scan --no-ignore --hidden unlikely-token-zz {root}'");
 }
 finally
 {
     Directory.Delete(root, recursive: true);
+    Directory.Delete(tiny, recursive: true);
 }
 
 static void Print(string name, (double Ms, int Files, int Matches) sample) =>
@@ -198,9 +215,6 @@ static void WriteLarge(string root, int count, int bytesEach)
     }
 }
 
-static void Warm(string root, string pattern) =>
-    Searcher.Search(Query(root, pattern, false, false));
-
 static (double Ms, int Files, int Matches) Time(string root, string pattern, bool regex, bool filesWithMatches = false)
 {
     var query = Query(root, pattern, regex, filesWithMatches);
@@ -223,32 +237,81 @@ static SearchQuery Query(string root, string pattern, bool regex, bool filesWith
     MaxDegreeOfParallelism = Environment.ProcessorCount,
 };
 
-static string? WhichRg()
+static string? Which(string name, params string[] preferred)
 {
-    foreach (var candidate in new[] { "/exec-daemon/rg", "rg" })
+    foreach (var candidate in preferred)
     {
         if (candidate.Contains('/') && File.Exists(candidate))
         {
             return candidate;
         }
+    }
 
-        var path = Environment.GetEnvironmentVariable("PATH");
-        if (path == null)
-        {
-            continue;
-        }
+    var path = Environment.GetEnvironmentVariable("PATH");
+    if (path == null)
+    {
+        return null;
+    }
 
-        foreach (var dir in path.Split(':', StringSplitOptions.RemoveEmptyEntries))
+    foreach (var dir in path.Split(':', StringSplitOptions.RemoveEmptyEntries))
+    {
+        var full = Path.Combine(dir, name);
+        if (File.Exists(full))
         {
-            var full = Path.Combine(dir, "rg");
-            if (File.Exists(full))
-            {
-                return full;
-            }
+            return full;
         }
     }
 
     return null;
+}
+
+static (string Name, string[] Rg, string[] Grep, string[] Ngrep)[] PairedCases(string root, string largeRoot) =>
+[
+    ("literal_miss",
+        ["-F", "--no-ignore", "-uu", "unlikely-token-zz", root],
+        ["-F", "-r", "unlikely-token-zz", root],
+        ["--scan", "--no-ignore", "--hidden", "unlikely-token-zz", root]),
+    ("literal_confirm",
+        ["-F", "--no-ignore", "-uu", "NEEDLE", root],
+        ["-F", "-r", "NEEDLE", root],
+        ["--scan", "--no-ignore", "--hidden", "NEEDLE", root]),
+    ("regex_prefilter",
+        ["--no-ignore", "-uu", "NEEDLE[0-9]", root],
+        ["-E", "-r", "NEEDLE[0-9]", root],
+        ["-E", "--scan", "--no-ignore", "--hidden", "NEEDLE[0-9]", root]),
+    ("large_miss",
+        ["-F", "--no-ignore", "-uu", "unlikely-token-zz", largeRoot],
+        ["-F", "-r", "unlikely-token-zz", largeRoot],
+        ["--scan", "--no-ignore", "--hidden", "unlikely-token-zz", largeRoot]),
+    ("large_regex",
+        ["--no-ignore", "-uu", "NEEDLE[0-9]", largeRoot],
+        ["-E", "-r", "NEEDLE[0-9]", largeRoot],
+        ["-E", "--scan", "--no-ignore", "--hidden", "NEEDLE[0-9]", largeRoot]),
+    ("regex_class_miss",
+        ["--no-ignore", "-uu", "[abc]{8}", largeRoot],
+        ["-E", "-r", "[abc]{8}", largeRoot],
+        ["-E", "--scan", "--no-ignore", "--hidden", "[abc]{8}", largeRoot]),
+    ("files_with_matches",
+        ["-F", "-l", "--no-ignore", "-uu", "EARLY", largeRoot],
+        ["-F", "-l", "-r", "EARLY", largeRoot],
+        ["--scan", "--no-ignore", "--hidden", "-l", "EARLY", largeRoot]),
+];
+
+static void TimeTool(string name, string bin, string sample, string[] argv)
+{
+    var ms = TimeProcess(bin, argv);
+    Console.WriteLine($"{name}_{sample}_ms={ms:F1}");
+    Console.WriteLine($"argv_{name}_{sample}={bin} {string.Join(' ', argv)}");
+}
+
+static string FirstLine(string bin, string[] argv)
+{
+    var info = StartInfo(bin, argv);
+    using var process = Process.Start(info)!;
+    var line = process.StandardOutput.ReadLine() ?? "";
+    process.StandardError.ReadToEnd();
+    process.WaitForExit();
+    return line.Trim();
 }
 
 static int WriteTiny(string root, int dirs, int sub, int perDir)
@@ -309,13 +372,12 @@ static int WriteTiny(string root, int dirs, int sub, int perDir)
     return n;
 }
 
-static void WarmTiny(string root, string pattern) =>
-    Searcher.Search(TinyQuery(root, pattern, ignore: true, quiet: false, list: false));
-
 static (double Ms, int Files, int Matches) TimeTiny(string root, string pattern, bool ignore, bool quiet, bool list)
 {
+    var query = TinyQuery(root, pattern, ignore, quiet, list);
+    Searcher.Search(query);
     var clock = Stopwatch.StartNew();
-    var outcome = Searcher.Search(TinyQuery(root, pattern, ignore, quiet, list));
+    var outcome = Searcher.Search(query);
     clock.Stop();
     return (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.Matches.Count);
 }
@@ -346,26 +408,37 @@ static SearchQuery TinyQuery(string root, string pattern, bool ignore, bool quie
     MaxDegreeOfParallelism = Environment.ProcessorCount,
 };
 
-static double TimeRg(string rg, string workDir, string[] args)
+static double TimeProcess(string bin, string[] argv)
 {
-    var info = new ProcessStartInfo
-    {
-        FileName = rg,
-        WorkingDirectory = workDir,
-        RedirectStandardOutput = true,
-        RedirectStandardError = true,
-        UseShellExecute = false,
-    };
-    foreach (var arg in args)
-    {
-        info.ArgumentList.Add(arg);
-    }
-
+    RunProcess(bin, argv);
     var clock = Stopwatch.StartNew();
+    RunProcess(bin, argv);
+    clock.Stop();
+    return clock.Elapsed.TotalMilliseconds;
+}
+
+static void RunProcess(string bin, string[] argv)
+{
+    var info = StartInfo(bin, argv);
     using var process = Process.Start(info)!;
     process.StandardOutput.ReadToEnd();
     process.StandardError.ReadToEnd();
     process.WaitForExit();
-    clock.Stop();
-    return clock.Elapsed.TotalMilliseconds;
+}
+
+static ProcessStartInfo StartInfo(string bin, string[] argv)
+{
+    var info = new ProcessStartInfo
+    {
+        FileName = bin,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+    };
+    foreach (var arg in argv)
+    {
+        info.ArgumentList.Add(arg);
+    }
+
+    return info;
 }
