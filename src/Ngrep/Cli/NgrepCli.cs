@@ -447,6 +447,32 @@ internal static class NgrepCli
         var parsedFormat = OutputFormats.Parse(result.GetValue(format));
         var colorOn = parsedFormat == OutputFormat.Text && TextColor.Enabled(TextColor.Parse(result.GetValue(color)));
         var wantStats = result.GetValue(stats);
+        var forceHeading = result.GetValue(heading);
+        var suppressHeading = result.GetValue(noHeading);
+        var autoHeading = parsedFormat == OutputFormat.Text
+            && report == ReportMode.Matches
+            && !suppressHeading
+            && !forceHeading
+            && TextColor.IsTerminal();
+        var useHeading = parsedFormat == OutputFormat.Text
+            && report == ReportMode.Matches
+            && !suppressHeading
+            && forceHeading;
+        MachineOutput.MatchStream? stream = null;
+        SearchEvents? events = null;
+        if (report != ReportMode.Quiet)
+        {
+            stream = new MachineOutput.MatchStream(
+                parsedFormat,
+                new SearchPresentation(report, result.GetValue(onlyMatching), colorOn, useHeading),
+                autoHeading);
+            events = new SearchEvents
+            {
+                Note = MachineOutput.Note,
+                Batch = stream.File,
+            };
+        }
+
         SearchOutcome outcome;
         try
         {
@@ -479,6 +505,7 @@ internal static class NgrepCli
                 TypeAdds = adds,
                 MaxDegreeOfParallelism = ThreadCount(result, threads),
                 CancellationToken = cancellationToken,
+                Events = events,
             });
         }
         catch (SearchPathException ex)
@@ -490,27 +517,34 @@ internal static class NgrepCli
 
             return ExitCodes.Error;
         }
-        var forceHeading = result.GetValue(heading);
-        var suppressHeading = result.GetValue(noHeading);
-        var useHeading = parsedFormat == OutputFormat.Text
-            && report == ReportMode.Matches
-            && !suppressHeading
-            && (forceHeading || (TextColor.IsTerminal() && outcome.FilesSearched > 1));
-        MachineOutput.Note(outcome.Note);
-        MachineOutput.WriteMatches(
-            outcome.Matches,
-            parsedFormat,
-            new SearchPresentation(report, result.GetValue(onlyMatching), colorOn, useHeading),
-            outcome.FilesWithoutMatch,
-            outcome.ElapsedMilliseconds);
+
+        if (stream != null)
+        {
+            stream.Complete(outcome);
+        }
+        else
+        {
+            var quietHeading = parsedFormat == OutputFormat.Text
+                && report == ReportMode.Matches
+                && !suppressHeading
+                && (forceHeading || (TextColor.IsTerminal() && outcome.FilesSearched > 1));
+            MachineOutput.Note(outcome.Note);
+            MachineOutput.WriteMatches(
+                outcome.Matches,
+                parsedFormat,
+                new SearchPresentation(report, result.GetValue(onlyMatching), colorOn, quietHeading),
+                outcome.FilesWithoutMatch,
+                outcome.ElapsedMilliseconds);
+        }
+
         if (wantStats)
         {
             MachineOutput.WriteStats(outcome);
         }
 
         var produced = report == ReportMode.FilesWithoutMatch
-            ? outcome.FilesWithoutMatch.Count > 0
-            : outcome.Matches.Count > 0;
+            ? outcome.WithoutCount > 0
+            : outcome.MatchCount > 0;
         return produced ? ExitCodes.Success : ExitCodes.NoMatches;
     }
 

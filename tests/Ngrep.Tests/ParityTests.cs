@@ -590,6 +590,22 @@ public class ParityTests
     }
 
     [Fact]
+    public void Parallel_index_search_still_prints_paths_in_order()
+    {
+        using var tree = Temp();
+        File.WriteAllText(tree.File("a.txt"), "netgrep\n");
+        File.WriteAllText(tree.File("m.txt"), "netgrep\n");
+        File.WriteAllText(tree.File("z.txt"), "netgrep\n");
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["index", tree.Root, "-q"]).GetAwaiter().GetResult());
+
+        using var capture = new Capture();
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "-j", "4"]).GetAwaiter().GetResult());
+        Assert.Equal(
+            "a.txt:1:1:netgrep\nm.txt:1:1:netgrep\nz.txt:1:1:netgrep\n",
+            capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Hidden_path_rules_match_the_prefix_model()
     {
         Assert.False(HiddenPaths.IsHidden("src/App.cs"));

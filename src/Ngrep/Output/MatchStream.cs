@@ -1,0 +1,477 @@
+using System.Text;
+using System.Text.Json;
+using Ngrep.Search;
+
+namespace Ngrep.Output;
+
+internal static partial class MachineOutput
+{
+    /// <summary>
+    /// Writes search hits as files finish, in the order batches arrive.
+    /// Call <see cref="Complete"/> after the search so JSON arrays and the rgjson summary close.
+    /// </summary>
+    internal sealed class MatchStream
+    {
+        private readonly OutputFormat _format;
+        private readonly SearchPresentation _presentation;
+        private readonly bool _holdAutoHeading;
+        private bool _useHeading;
+        private List<SearchMatch>? _held;
+        private string? _headingPath;
+        private bool _headingStarted;
+        private bool _jsonStarted;
+        private bool _jsonAny;
+        private int _examined;
+        private int _rgFiles;
+        private int _rgMatches;
+        private int _rgLines;
+
+        public MatchStream(OutputFormat format, SearchPresentation presentation, bool holdAutoHeading)
+        {
+            _format = format;
+            _presentation = presentation;
+            _holdAutoHeading = holdAutoHeading && format == OutputFormat.Text && presentation.Report == ReportMode.Matches;
+            _useHeading = presentation.Heading;
+        }
+
+        public void File(SearchBatch batch)
+        {
+            if (batch.PrefilterMiss)
+            {
+                if (_presentation.Report == ReportMode.FilesWithoutMatch)
+                {
+                    Without(batch.Path);
+                }
+
+                return;
+            }
+
+            if (!batch.Examined)
+            {
+                return;
+            }
+
+            switch (_presentation.Report)
+            {
+                case ReportMode.Quiet:
+                    return;
+                case ReportMode.FilesWithoutMatch:
+                    if (!batch.Matched)
+                    {
+                        Without(batch.Path);
+                    }
+
+                    return;
+                case ReportMode.FilesWithMatches:
+                    if (batch.Matches.Count > 0)
+                    {
+                        Paths(batch);
+                    }
+
+                    return;
+                case ReportMode.Count:
+                    if (batch.Matches.Count > 0)
+                    {
+                        Counts(batch.Matches);
+                    }
+
+                    return;
+            }
+
+            if (!_holdAutoHeading)
+            {
+                if (batch.Matches.Count > 0)
+                {
+                    WriteMatchFile(batch.Matches);
+                }
+
+                return;
+            }
+
+            _examined++;
+            if (_held != null && _examined >= 2)
+            {
+                _useHeading = true;
+                WriteMatchFile(_held);
+                _held = null;
+            }
+
+            if (batch.Matches.Count == 0)
+            {
+                return;
+            }
+
+            if (_examined == 1)
+            {
+                _held = batch.Matches;
+                return;
+            }
+
+            _useHeading = true;
+            WriteMatchFile(batch.Matches);
+        }
+
+        public void Complete(SearchOutcome outcome)
+        {
+            if (_held != null)
+            {
+                WriteMatchFile(_held);
+                _held = null;
+            }
+
+            switch (_presentation.Report)
+            {
+                case ReportMode.Quiet:
+                    return;
+                case ReportMode.Count when _format == OutputFormat.Json:
+                    CloseJson("counts");
+                    return;
+                case ReportMode.FilesWithMatches when _format == OutputFormat.Json:
+                case ReportMode.FilesWithoutMatch when _format == OutputFormat.Json:
+                    CloseJson("paths");
+                    return;
+                case ReportMode.Matches when _format == OutputFormat.Json:
+                    CloseJson("matches");
+                    return;
+                case ReportMode.Matches when _format == OutputFormat.RgJson:
+                case ReportMode.FilesWithMatches when _format == OutputFormat.RgJson:
+                case ReportMode.Count when _format == OutputFormat.RgJson:
+                    WriteRgSummary(_rgFiles, _rgMatches, _rgLines, outcome.ElapsedMilliseconds);
+                    return;
+                case ReportMode.FilesWithoutMatch when _format == OutputFormat.RgJson:
+                    WriteRgSummary(_rgFiles, matches: 0, matchedLines: 0, outcome.ElapsedMilliseconds);
+                    return;
+            }
+        }
+
+        private void Without(string path)
+        {
+            switch (_format)
+            {
+                case OutputFormat.Text:
+                    Console.WriteLine(_presentation.Color ? Paint(path, TextColor.Path) : path);
+                    break;
+                case OutputFormat.Ndjson:
+                    Console.WriteLine(PathJson(path));
+                    break;
+                case OutputFormat.Json:
+                    JsonString(path);
+                    break;
+                case OutputFormat.RgJson:
+                    WriteRgBegin(path);
+                    WriteRgEnd(path, matches: 0, matchedLines: 0);
+                    _rgFiles++;
+                    break;
+            }
+
+            Console.Out.Flush();
+        }
+
+        private void Paths(SearchBatch batch)
+        {
+            var path = batch.Path;
+            switch (_format)
+            {
+                case OutputFormat.Text:
+                    Console.WriteLine(_presentation.Color ? Paint(path, TextColor.Path) : path);
+                    break;
+                case OutputFormat.Ndjson:
+                    Console.WriteLine(PathJson(path));
+                    break;
+                case OutputFormat.Json:
+                    JsonString(path);
+                    break;
+                case OutputFormat.RgJson:
+                    WriteRgFile(batch.Matches);
+                    break;
+            }
+
+            Console.Out.Flush();
+        }
+
+        private void Counts(IReadOnlyList<SearchMatch> matches)
+        {
+            var path = matches[0].Path;
+            var lines = new HashSet<int>();
+            foreach (var match in matches)
+            {
+                lines.Add(match.Line);
+            }
+
+            switch (_format)
+            {
+                case OutputFormat.Text:
+                    if (!_presentation.Color)
+                    {
+                        Console.WriteLine($"{path}:{lines.Count}");
+                    }
+                    else
+                    {
+                        Console.WriteLine(string.Concat(
+                            Paint(path, TextColor.Path),
+                            ":",
+                            Paint(lines.Count.ToString(System.Globalization.CultureInfo.InvariantCulture), TextColor.Line)));
+                    }
+
+                    break;
+                case OutputFormat.Ndjson:
+                    Console.WriteLine(CountJson(path, lines.Count));
+                    break;
+                case OutputFormat.Json:
+                    JsonValue(CountJson(path, lines.Count));
+                    break;
+                case OutputFormat.RgJson:
+                    WriteRgBegin(path);
+                    WriteRgEnd(path, matches.Count, lines.Count);
+                    _rgFiles++;
+                    _rgMatches += matches.Count;
+                    _rgLines += lines.Count;
+                    break;
+            }
+
+            Console.Out.Flush();
+        }
+
+        private void WriteMatchFile(IReadOnlyList<SearchMatch> matches)
+        {
+            switch (_format)
+            {
+                case OutputFormat.Text:
+                    WriteTextFile(matches);
+                    break;
+                case OutputFormat.Ndjson:
+                    foreach (var match in matches)
+                    {
+                        Console.WriteLine(MatchJson(match));
+                    }
+
+                    break;
+                case OutputFormat.Json:
+                    foreach (var match in matches)
+                    {
+                        JsonValue(MatchJson(match));
+                    }
+
+                    break;
+                case OutputFormat.RgJson:
+                    WriteRgFile(matches);
+                    break;
+            }
+
+            Console.Out.Flush();
+        }
+
+        private void WriteTextFile(IReadOnlyList<SearchMatch> matches)
+        {
+            if (_presentation.OnlyMatching || matches.All(static match => match.Before == null && match.After == null))
+            {
+                foreach (var match in matches)
+                {
+                    EnsureHeading(match.Path);
+                    WriteMatchLine(match, _presentation.OnlyMatching, _presentation.Color, includePath: !_useHeading);
+                }
+
+                return;
+            }
+
+            var fileMatches = new HashSet<int>();
+            foreach (var match in matches)
+            {
+                fileMatches.Add(match.Line);
+            }
+
+            var path = matches[0].Path;
+            var lastLine = 0;
+            var printed = false;
+            EnsureHeading(path);
+            foreach (var match in matches)
+            {
+                if (match.Before == null && match.After == null)
+                {
+                    WriteMatchLine(match, onlyMatching: false, _presentation.Color, includePath: !_useHeading);
+                    continue;
+                }
+
+                var before = match.Before ?? [];
+                var upcoming = NextVisible(before, fileMatches, match.Line);
+                if (printed && upcoming > lastLine + 1)
+                {
+                    Console.WriteLine("--");
+                }
+
+                foreach (var line in before)
+                {
+                    if (line.Line <= lastLine || fileMatches.Contains(line.Line))
+                    {
+                        continue;
+                    }
+
+                    WriteContextLine(match.Path, line.Line, line.Text, _presentation.Color, includePath: !_useHeading);
+                    lastLine = line.Line;
+                    printed = true;
+                }
+
+                WriteMatchLine(match, onlyMatching: false, _presentation.Color, includePath: !_useHeading);
+                if (match.Line > lastLine)
+                {
+                    lastLine = match.Line;
+                }
+
+                printed = true;
+                foreach (var line in match.After ?? [])
+                {
+                    if (line.Line <= lastLine || fileMatches.Contains(line.Line))
+                    {
+                        continue;
+                    }
+
+                    WriteContextLine(match.Path, line.Line, line.Text, _presentation.Color, includePath: !_useHeading);
+                    lastLine = line.Line;
+                }
+            }
+        }
+
+        private void EnsureHeading(string path)
+        {
+            if (!_useHeading || string.Equals(_headingPath, path, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            if (_headingStarted)
+            {
+                Console.WriteLine();
+            }
+
+            Console.WriteLine(_presentation.Color ? Paint(path, TextColor.Path) : path);
+            _headingPath = path;
+            _headingStarted = true;
+        }
+
+        private void WriteRgFile(IReadOnlyList<SearchMatch> matches)
+        {
+            if (matches.Count == 0)
+            {
+                return;
+            }
+
+            var path = matches[0].Path;
+            var fileLines = new HashSet<int>();
+            HashSet<int>? contextLines = null;
+            foreach (var match in matches)
+            {
+                if (match.Before == null && match.After == null)
+                {
+                    continue;
+                }
+
+                contextLines ??= [];
+                contextLines.Add(match.Line);
+            }
+
+            WriteRgBegin(path);
+            var lastLine = 0;
+            foreach (var match in matches)
+            {
+                if (match.Before != null)
+                {
+                    foreach (var line in match.Before)
+                    {
+                        if (line.Line <= lastLine || (contextLines != null && contextLines.Contains(line.Line)))
+                        {
+                            continue;
+                        }
+
+                        WriteRgContext(path, line);
+                        lastLine = line.Line;
+                    }
+                }
+
+                fileLines.Add(match.Line);
+                WriteRgMatch(match);
+                if (match.Line > lastLine)
+                {
+                    lastLine = match.Line;
+                }
+
+                if (match.After == null)
+                {
+                    continue;
+                }
+
+                foreach (var line in match.After)
+                {
+                    if (line.Line <= lastLine || (contextLines != null && contextLines.Contains(line.Line)))
+                    {
+                        continue;
+                    }
+
+                    WriteRgContext(path, line);
+                    lastLine = line.Line;
+                }
+            }
+
+            WriteRgEnd(path, matches.Count, fileLines.Count);
+            _rgFiles++;
+            _rgMatches += matches.Count;
+            _rgLines += fileLines.Count;
+        }
+
+        private void JsonString(string value) => JsonRaw(Quote(value));
+
+        private void JsonValue(string json) => JsonRaw(json);
+
+        private static string Quote(string value)
+        {
+            using var stream = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(stream, JsonOptions))
+            {
+                writer.WriteStringValue(value);
+            }
+
+            return Encoding.UTF8.GetString(stream.ToArray());
+        }
+
+        private void JsonRaw(string json)
+        {
+            if (!_jsonStarted)
+            {
+                var name = _presentation.Report switch
+                {
+                    ReportMode.Count => "counts",
+                    ReportMode.FilesWithMatches or ReportMode.FilesWithoutMatch => "paths",
+                    _ => "matches",
+                };
+                Console.Write("{\"");
+                Console.Write(name);
+                Console.Write("\":[");
+                _jsonStarted = true;
+            }
+
+            if (_jsonAny)
+            {
+                Console.Write(',');
+            }
+
+            _jsonAny = true;
+            Console.Write(json);
+        }
+
+        private void CloseJson(string name)
+        {
+            if (!_jsonStarted)
+            {
+                Console.Write("{\"");
+                Console.Write(name);
+                Console.Write("\":[]}");
+            }
+            else
+            {
+                Console.Write("]}");
+            }
+
+            Console.WriteLine();
+            Console.Out.Flush();
+        }
+    }
+}

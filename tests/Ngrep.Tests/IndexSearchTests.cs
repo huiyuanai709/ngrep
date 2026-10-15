@@ -91,6 +91,77 @@ public class IndexSearchTests
     }
 
     [Fact]
+    public void Search_load_skips_line_starts_and_unused_postings()
+    {
+        using var tree = new TempTree();
+        File.WriteAllText(tree.File("a.txt"), "alpha netgrep\n");
+        File.WriteAllText(tree.File("b.txt"), "other words here\n");
+        var built = Indexer.Build(tree.Root);
+        var full = IndexStore.TryLoad(built.IndexPath);
+        Assert.NotNull(full);
+        Assert.NotEmpty(full!.Documents[0].LineStarts);
+        Assert.True(full.Postings.Count > 3);
+
+        var grams = new HashSet<string>(Trigrams.ForQuery("netgrep"), StringComparer.Ordinal);
+        var search = IndexStore.TryLoadForSearch(built.IndexPath, grams);
+        Assert.NotNull(search);
+        Assert.All(search!.Documents, doc => Assert.Empty(doc.LineStarts));
+        Assert.NotEmpty(search.Postings);
+        Assert.All(search.Postings.Keys, key => Assert.Contains(key, grams));
+        Assert.True(search.Postings.Count < full.Postings.Count);
+
+        var headerOnly = IndexStore.TryLoadForSearch(built.IndexPath, grams: null);
+        Assert.NotNull(headerOnly);
+        Assert.Empty(headerOnly!.Postings);
+        Assert.All(headerOnly.Documents, doc => Assert.Empty(doc.LineStarts));
+    }
+
+    [Fact]
+    public async Task Indexed_stream_emits_each_file_before_the_next_read()
+    {
+        using var tree = new TempTree();
+        File.WriteAllText(tree.File("a.txt"), "netgrep\n");
+        File.WriteAllText(tree.File("b.txt"), "netgrep\n");
+        Indexer.Build(tree.Root);
+
+        var started = new List<string>();
+        var emitted = new List<string>();
+        Searcher.BeforeConfirm = started.Add;
+        try
+        {
+            var outcome = await Searcher.Search(new SearchQuery
+            {
+                Pattern = "netgrep",
+                Path = tree.Root,
+                MaxDegreeOfParallelism = 1,
+                Events = new SearchEvents
+                {
+                    Batch = batch =>
+                    {
+                        if (batch.Path == "a.txt")
+                        {
+                            Assert.DoesNotContain("b.txt", started);
+                        }
+
+                        emitted.Add(batch.Path);
+                    },
+                },
+            });
+
+            Assert.True(outcome.Streamed);
+            Assert.True(outcome.UsedIndex);
+            Assert.Empty(outcome.Matches);
+            Assert.Equal(2, outcome.MatchCount);
+            Assert.Equal(["a.txt", "b.txt"], emitted);
+            Assert.Equal(["a.txt", "b.txt"], started);
+        }
+        finally
+        {
+            Searcher.BeforeConfirm = null;
+        }
+    }
+
+    [Fact]
     public void Case_sensitive_verification_uses_folded_index()
     {
         using var tree = new TempTree();

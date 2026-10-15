@@ -441,6 +441,32 @@ internal sealed class LiteralQuery
         return all.Count == 0 ? null : new LiteralQuery(all.ToArray());
     }
 
+    public bool TryCollectGrams(HashSet<string> grams)
+    {
+        if (!TrigramSafe)
+        {
+            return false;
+        }
+
+        foreach (var clause in _clauses)
+        {
+            foreach (var part in clause.Parts)
+            {
+                if (part.Length < Trigrams.Length)
+                {
+                    continue;
+                }
+
+                foreach (var gram in Trigrams.ForQuery(part))
+                {
+                    grams.Add(gram);
+                }
+            }
+        }
+
+        return grams.Count > 0;
+    }
+
     public bool TrySelect(Dictionary<string, List<int>> postings, out HashSet<int> ids)
     {
         ids = [];
@@ -451,7 +477,7 @@ internal sealed class LiteralQuery
 
         foreach (var clause in _clauses)
         {
-            HashSet<int>? acc = null;
+            List<int>? acc = null;
             foreach (var part in clause.Parts)
             {
                 if (part.Length < Trigrams.Length)
@@ -466,7 +492,7 @@ internal sealed class LiteralQuery
                 }
                 else
                 {
-                    acc.IntersectWith(hit);
+                    acc = IntersectSorted(acc, hit);
                 }
 
                 if (acc.Count == 0)
@@ -481,7 +507,10 @@ internal sealed class LiteralQuery
                 return false;
             }
 
-            ids.UnionWith(acc);
+            foreach (var id in acc)
+            {
+                ids.Add(id);
+            }
         }
 
         return true;
@@ -679,23 +708,31 @@ internal sealed class LiteralQuery
         public static ByteClause AlwaysHit { get; } = new(true, []);
     }
 
-    private static HashSet<int> Intersect(Dictionary<string, List<int>> postings, List<string> grams)
+    private static List<int> Intersect(Dictionary<string, List<int>> postings, List<string> grams)
     {
-        HashSet<int>? acc = null;
-        foreach (var gram in grams.Distinct(StringComparer.Ordinal))
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var ordered = new List<List<int>>(grams.Count);
+        foreach (var gram in grams)
         {
+            if (!seen.Add(gram))
+            {
+                continue;
+            }
+
             if (!postings.TryGetValue(gram, out var list) || list.Count == 0)
             {
                 return [];
             }
 
-            if (acc == null)
-            {
-                acc = list.ToHashSet();
-                continue;
-            }
+            ordered.Add(list);
+        }
 
-            acc.IntersectWith(list);
+        // Rarest list first so a selective gram does not hash every document id.
+        ordered.Sort(static (left, right) => left.Count.CompareTo(right.Count));
+        List<int>? acc = null;
+        foreach (var list in ordered)
+        {
+            acc = acc == null ? list : IntersectSorted(acc, list);
             if (acc.Count == 0)
             {
                 return acc;
