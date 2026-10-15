@@ -56,6 +56,9 @@ internal static class SearchSyntax
     {
         args = ExpandShortBundles(args);
         args = ApplyUnrestricted(args);
+        // -e --no-config is a pattern. The option is known, so the parser would
+        // otherwise take the token as the flag and leave -e without a value.
+        args = AttachNoConfigValues(args);
         args = PreferLast(args);
         if (args.Length == 0 || HasSubcommand(args))
         {
@@ -448,6 +451,7 @@ internal static class SearchSyntax
         "-o", "--only-matching", "--hidden", "--color", "-U", "--multiline",
         "--multiline-dotall", "--heading", "--no-heading", "--stats",
         "--files", "--binary", "-a", "--text", "-u", "--unrestricted",
+        "--no-config",
     };
 
     /// <summary>
@@ -543,12 +547,19 @@ internal static class SearchSyntax
     }
 
     /// <summary>
-    /// <c>index</c>, <c>watch</c>, help, and version do not read the config file.
+    /// <c>index</c>, <c>watch</c>, help, version, and <c>--no-config</c> do not read the config file.
     /// A bare <c>ngrep</c> with no arguments does not either.
+    /// <c>--no-config</c> is detected here, before the file is opened. A token after <c>--</c>,
+    /// or the value of another option, is not the flag.
     /// </summary>
     internal static bool SkipsConfig(string[] args)
     {
         if (args.Length == 0)
+        {
+            return true;
+        }
+
+        if (HasNoConfig(args))
         {
             return true;
         }
@@ -574,6 +585,110 @@ internal static class SearchSyntax
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// True when <c>--no-config</c> is a flag on the raw command line.
+    /// The scan stops at <c>--</c>. The operand of a value option is not the flag,
+    /// so <c>-e --no-config</c> searches for that pattern and still reads the config file.
+    /// </summary>
+    private static bool HasNoConfig(string[] args)
+    {
+        // Match Rewrite, which expands -nEe before the parser sees it.
+        args = ExpandShortBundles(args);
+        for (var i = 0; i < args.Length; i++)
+        {
+            var arg = args[i];
+            if (arg == "--")
+            {
+                return false;
+            }
+
+            if (arg == "--no-config")
+            {
+                return true;
+            }
+
+            if (ConsumesNext(arg))
+            {
+                i++;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Joins a value option to a following <c>--no-config</c> operand (<c>-e=--no-config</c>).
+    /// The config decision has already been made from the raw arguments.
+    /// </summary>
+    private static string[] AttachNoConfigValues(string[] args)
+    {
+        var attached = false;
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (args[i] == "--")
+            {
+                break;
+            }
+
+            if (ConsumesNext(args[i]) && i + 1 < args.Length && args[i + 1] == "--no-config")
+            {
+                attached = true;
+                break;
+            }
+        }
+
+        if (!attached)
+        {
+            return args;
+        }
+
+        var rewritten = new List<string>(args.Length);
+        var passthrough = false;
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (passthrough)
+            {
+                rewritten.Add(args[i]);
+                continue;
+            }
+
+            if (args[i] == "--")
+            {
+                passthrough = true;
+                rewritten.Add(args[i]);
+                continue;
+            }
+
+            if (ConsumesNext(args[i]) && i + 1 < args.Length && args[i + 1] == "--no-config")
+            {
+                rewritten.Add(args[i] + "=--no-config");
+                i++;
+                continue;
+            }
+
+            rewritten.Add(args[i]);
+        }
+
+        return rewritten.ToArray();
+    }
+
+    private static bool ConsumesNext(string arg)
+    {
+        if (arg.Length < 2 || arg[0] != '-' || arg == "--" || arg.Contains('='))
+        {
+            return false;
+        }
+
+        // -j1 and -g*.cs already include the operand.
+        if (arg.Length > 2 && arg[1] != '-' && ValueOptions.Contains(arg[..2]))
+        {
+            return false;
+        }
+
+        var name = OptionName(arg);
+        return ValueOptions.Contains(arg) || ValueOptions.Contains(name);
     }
 
     /// <summary>
@@ -777,6 +892,7 @@ internal static class SearchSyntax
             "--heading" => "heading",
             "--no-heading" => "no-heading",
             "--stats" => "stats",
+            "--no-config" => "no-config",
             _ => null,
         };
     }

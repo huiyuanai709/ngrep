@@ -60,6 +60,7 @@ public class CliTests
         Assert.Contains("search", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("watch", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("NGREP_CONFIG_PATH", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--no-config", capture.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

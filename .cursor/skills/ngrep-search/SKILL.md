@@ -42,7 +42,7 @@ ngrep -C 2 TODO .
 ngrep --format ndjson -C 2 TODO .
 ```
 
-- `-i`: ignore case. `-S` / `--smart-case`: ignore case when the pattern has no uppercase letter. The last of `-i`, `-S`, and `--case-sensitive` wins. `NGREP_CONFIG_PATH` prepends search arguments, one per line. `RIPGREP_CONFIG_PATH` is not read.
+- `-i`: ignore case. `-S` / `--smart-case`: ignore case when the pattern has no uppercase letter. The last of `-i`, `-S`, and `--case-sensitive` wins. `NGREP_CONFIG_PATH` prepends search arguments, one per line. `--no-config` skips that file. `RIPGREP_CONFIG_PATH` is not read.
 - `-d N` / `--max-depth N`: cap walk depth. 0 is the start path. 1 is its immediate children. `--maxdepth` is the same flag.
 - `-g`: glob filter. A leading `!` excludes. Repeatable.
 - `-t`: built-in file type. Repeatable.

@@ -80,6 +80,11 @@ internal static class NgrepCli
             Description = "Index directory. Defaults to <root>/.ngrep/index. Search walks parents to find .ngrep/index when omitted.",
             Recursive = true,
         };
+        var noConfig = new Option<bool>("--no-config")
+        {
+            Description = "Never read configuration files. When this flag is present, NGREP_CONFIG_PATH is not opened and flags in that file are not applied. Recognized before the file is loaded, wherever it appears before --. The value of another option is not this flag. A --no-config line inside the config file does not skip that file. RIPGREP_CONFIG_PATH is not read either way.",
+            Recursive = true,
+        };
 
         var root = new RootCommand(
             "Search a tree, or stdin when the path is '-' or omitted and stdin is not a terminal. " +
@@ -87,9 +92,11 @@ internal static class NgrepCli
             "Uses an index when one is found; otherwise scans file contents. " +
             "Each PATH is a separate root. No PATH searches `.` when stdin is a terminal. " +
             "`-f -` reads patterns from stdin and does not search that stream. " +
-            "NGREP_CONFIG_PATH, when set, prepends search arguments from that file (one argument per line).");
+            "NGREP_CONFIG_PATH, when set, prepends search arguments from that file (one argument per line). " +
+            "--no-config skips that file.");
         root.Options.Add(format);
         root.Options.Add(index);
+        root.Options.Add(noConfig);
 
         var indexPath = new Argument<string>("path")
         {
@@ -328,7 +335,7 @@ internal static class NgrepCli
             "search",
             "Query the index, or scan contents when no index covers the path. Patterns are .NET regular expressions unless -F. " +
             "Each PATH is a root. A path of '-' searches stdin. With no path, a non-terminal stdin is searched instead of the working directory. -f - still means patterns from stdin. " +
-            "NGREP_CONFIG_PATH prepends search arguments from that file.");
+            "NGREP_CONFIG_PATH prepends search arguments from that file. --no-config skips that file.");
         searchCommand.Arguments.Add(positionals);
         searchCommand.Options.Add(ignoreCase);
         searchCommand.Options.Add(smartCase);
