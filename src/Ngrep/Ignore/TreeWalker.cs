@@ -15,14 +15,14 @@ internal readonly struct WalkDir
 
 internal readonly struct WalkOptions
 {
-    public WalkOptions(bool applyGitIgnore, bool includeHidden, string? indexRelative)
+    public WalkOptions(IgnorePolicy policy, bool includeHidden, string? indexRelative)
     {
-        ApplyGitIgnore = applyGitIgnore;
+        Policy = policy;
         IncludeHidden = includeHidden;
         IndexRelative = indexRelative;
     }
 
-    public bool ApplyGitIgnore { get; }
+    public IgnorePolicy Policy { get; }
 
     public bool IncludeHidden { get; }
 
@@ -77,10 +77,10 @@ internal static class TreeWalker
     /// Hidden names are included, so a path the user named is not rejected only for a leading dot.
     /// Symlinks are not yielded, so a named symlink is treated as not searched.
     /// </summary>
-    public static bool IsIgnoredFile(string walkRoot, string fullPath)
+    public static bool IsIgnoredFile(string walkRoot, string fullPath, IgnorePolicy? policy = null)
     {
         var stats = new WalkStats();
-        foreach (var file in Enumerate(walkRoot, indexDirectory: null, stats, applyGitIgnore: true, includeHidden: true))
+        foreach (var file in Enumerate(walkRoot, indexDirectory: null, stats, policy, includeHidden: true))
         {
             if (string.Equals(file.FullPath, fullPath, StringComparison.Ordinal))
             {
@@ -95,11 +95,12 @@ internal static class TreeWalker
         string walkRoot,
         string? indexDirectory,
         WalkStats stats,
-        bool applyGitIgnore = true,
+        IgnorePolicy? policy = null,
         bool includeHidden = false)
     {
-        var root = CreateRoot(walkRoot, applyGitIgnore);
-        var options = new WalkOptions(applyGitIgnore, includeHidden, IndexRelative(root.Full, indexDirectory));
+        var chosen = policy ?? IgnorePolicy.All;
+        var root = CreateRoot(walkRoot, chosen);
+        var options = new WalkOptions(chosen, includeHidden, IndexRelative(root.Full, indexDirectory));
         var stack = new Stack<WalkDir>();
         stack.Push(root);
         var files = new List<WalkedFile>(32);
@@ -120,15 +121,17 @@ internal static class TreeWalker
         }
     }
 
-    public static WalkOptions CreateOptions(string walkRootFull, string? indexDirectory, bool applyGitIgnore, bool includeHidden) =>
-        new(applyGitIgnore, includeHidden, IndexRelative(walkRootFull, indexDirectory));
+    public static WalkOptions CreateOptions(string walkRootFull, string? indexDirectory, IgnorePolicy policy, bool includeHidden) =>
+        new(policy, includeHidden, IndexRelative(walkRootFull, indexDirectory));
 
-    public static WalkDir CreateRoot(string walkRoot, bool applyGitIgnore)
+    public static WalkDir CreateRoot(string walkRoot, IgnorePolicy policy)
     {
         walkRoot = Path.GetFullPath(walkRoot);
         var scopeRoot = FindGitRoot(walkRoot) ?? walkRoot;
         var scopeRelative = Relative(scopeRoot, walkRoot);
-        var ignores = applyGitIgnore ? LoadAncestors(scopeRoot, walkRoot) : IgnoreStack.Empty;
+        var ignores = policy.Vcs || policy.Custom
+            ? LoadAncestors(scopeRoot, walkRoot, policy)
+            : IgnoreStack.Empty;
         return new WalkDir
         {
             Full = walkRoot,
@@ -160,27 +163,9 @@ internal static class TreeWalker
 
         entries.Sort(static (left, right) => string.CompareOrdinal(left.Name, right.Name));
         var ignores = dir.Ignores;
-        if (options.ApplyGitIgnore)
+        if (options.Policy.Vcs || options.Policy.Custom)
         {
-            for (var i = 0; i < entries.Count; i++)
-            {
-                if (!string.Equals(entries[i].Name, ".gitignore", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                var gitignore = Path.Join(dir.Full, ".gitignore");
-                try
-                {
-                    ignores = ignores.Add(dir.ScopeRelative, File.ReadAllText(gitignore));
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                {
-                    stats.IncrementSkippedUnreadable();
-                }
-
-                break;
-            }
+            ignores = AddListedIgnoreFiles(ignores, dir, entries, options.Policy, stats);
         }
 
         foreach (var entry in entries)
@@ -204,15 +189,15 @@ internal static class TreeWalker
             }
 
             // Dot names and the Windows/macOS hidden attribute are skipped unless the
-            // caller asked for them. .gitignore is still read above; the file itself is
-            // not a hit unless hidden names are included.
+            // caller asked for them. Ignore files were read above; the files themselves
+            // are not hits unless hidden names are included.
             if (!options.IncludeHidden && IsHiddenEntry(name, entry.Hidden))
             {
                 continue;
             }
 
             var scopeRelative = JoinRelative(dir.ScopeRelative, name);
-            if (options.ApplyGitIgnore && ignores.IsIgnored(scopeRelative, isDir, checkParents: false))
+            if (ignores.IsIgnored(scopeRelative, isDir, checkParents: false))
             {
                 if (!isDir)
                 {
@@ -266,32 +251,124 @@ internal static class TreeWalker
         return string.Concat(parent, "/", name);
     }
 
-    private static IgnoreStack LoadAncestors(string scopeRoot, string walkRoot)
+    private static IgnoreStack AddListedIgnoreFiles(
+        IgnoreStack ignores,
+        WalkDir dir,
+        List<(string Name, DirentKind Kind, bool Hidden)> entries,
+        IgnorePolicy policy,
+        WalkStats stats)
+    {
+        var git = false;
+        var dot = false;
+        var rg = false;
+        for (var i = 0; i < entries.Count; i++)
+        {
+            switch (entries[i].Name)
+            {
+                case ".gitignore":
+                    git = true;
+                    break;
+                case ".ignore":
+                    dot = true;
+                    break;
+                case ".rgignore":
+                    rg = true;
+                    break;
+            }
+        }
+
+        if (policy.Vcs && git)
+        {
+            ignores = TryAdd(ignores, Path.Join(dir.Full, ".gitignore"), IgnoreSource.Git, dir.ScopeRelative, stats);
+        }
+
+        if (policy.Custom && dot)
+        {
+            ignores = TryAdd(ignores, Path.Join(dir.Full, ".ignore"), IgnoreSource.DotIgnore, dir.ScopeRelative, stats);
+        }
+
+        if (policy.Custom && rg)
+        {
+            ignores = TryAdd(ignores, Path.Join(dir.Full, ".rgignore"), IgnoreSource.RgIgnore, dir.ScopeRelative, stats);
+        }
+
+        return ignores;
+    }
+
+    private static IgnoreStack LoadAncestors(string scopeRoot, string walkRoot, IgnorePolicy policy)
     {
         var stack = IgnoreStack.Empty;
+        if (policy.Vcs)
+        {
+            stack = LoadVcsRoot(stack, scopeRoot);
+        }
+
+        var walkFull = Path.GetFullPath(walkRoot);
         foreach (var dir in Chain(scopeRoot, walkRoot))
         {
-            if (string.Equals(dir, Path.GetFullPath(walkRoot), StringComparison.Ordinal))
+            if (string.Equals(dir, walkFull, StringComparison.Ordinal))
             {
                 continue;
             }
 
-            var gitignore = Path.Combine(dir, ".gitignore");
-            if (!File.Exists(gitignore))
+            var rel = Relative(scopeRoot, dir);
+            if (policy.Vcs)
             {
-                continue;
+                stack = TryAddIfExists(stack, Path.Combine(dir, ".gitignore"), IgnoreSource.Git, rel);
             }
 
-            var rel = Path.GetRelativePath(scopeRoot, dir).Replace('\\', '/');
-            if (rel == ".")
+            if (policy.Custom)
             {
-                rel = "";
+                stack = TryAddIfExists(stack, Path.Combine(dir, ".ignore"), IgnoreSource.DotIgnore, rel);
+                stack = TryAddIfExists(stack, Path.Combine(dir, ".rgignore"), IgnoreSource.RgIgnore, rel);
             }
-
-            stack = stack.Add(rel, File.ReadAllText(gitignore));
         }
 
         return stack;
+    }
+
+    /// <summary>
+    /// Global excludes and <c>info/exclude</c> apply only when <paramref name="scopeRoot"/> has a
+    /// <c>.git</c> file or directory. Patterns are relative to that git root.
+    /// </summary>
+    private static IgnoreStack LoadVcsRoot(IgnoreStack stack, string scopeRoot)
+    {
+        var common = GitConfig.ResolveCommonGitDir(scopeRoot);
+        if (common == null)
+        {
+            return stack;
+        }
+
+        var excludes = GitConfig.FindExcludesPath(common);
+        if (!string.IsNullOrEmpty(excludes))
+        {
+            stack = TryAddIfExists(stack, excludes, IgnoreSource.Global, "");
+        }
+
+        return TryAddIfExists(stack, Path.Combine(common, "info", "exclude"), IgnoreSource.Exclude, "");
+    }
+
+    private static IgnoreStack TryAddIfExists(IgnoreStack stack, string path, IgnoreSource source, string baseRelative)
+    {
+        if (!File.Exists(path))
+        {
+            return stack;
+        }
+
+        return TryAdd(stack, path, source, baseRelative, stats: null);
+    }
+
+    private static IgnoreStack TryAdd(IgnoreStack stack, string path, IgnoreSource source, string baseRelative, WalkStats? stats)
+    {
+        try
+        {
+            return stack.Add(source, baseRelative, File.ReadAllText(path));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            stats?.IncrementSkippedUnreadable();
+            return stack;
+        }
     }
 
     private static IEnumerable<string> Chain(string scopeRoot, string walkRoot)

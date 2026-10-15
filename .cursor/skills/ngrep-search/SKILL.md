@@ -56,6 +56,12 @@ ngrep --format ndjson -C 2 TODO .
 
 With `--format json` or `ndjson`, each match also has `before` and `after` arrays of `{ "line", "text" }` when one of these flags is set. Those fields are absent otherwise.
 
+## Ignore files
+
+ngrep reads nested `.gitignore`, `.ignore`, and `.rgignore`, plus git `info/exclude` and the global excludes file (`core.excludesFile`, or `~/.config/git/ignore` when that key is unset). The first source that matches wins: `.rgignore`, then `.ignore`, then `.gitignore`, then `info/exclude`, then the global file.
+
+`--no-ignore-vcs` skips the git sources and still honors `.ignore` and `.rgignore`. `--no-ignore` skips every ignore file. `.git`, `.ngrep`, and symlinks stay skipped either way.
+
 ## Exit codes
 
 - `0`: a match, or `index` finished

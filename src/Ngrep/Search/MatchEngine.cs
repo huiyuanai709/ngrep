@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using Ngrep.Ignore;
 using Ngrep.Text;
 
 namespace Ngrep.Search;
@@ -37,7 +38,13 @@ internal sealed class MatchPlan
 
     public LiteralQuery? Literals { get; init; }
 
-    public bool ApplyGitIgnore { get; init; } = true;
+    public IgnorePolicy Ignore { get; init; } = IgnorePolicy.All;
+
+    /// <summary>
+    /// True when every ignore source is on, so an index built with those rules still matches the walk.
+    /// <c>--no-ignore</c> and <c>--no-ignore-vcs</c> are false and force a content scan.
+    /// </summary>
+    public bool ApplyGitIgnore => Ignore.Vcs && Ignore.Custom;
 
     public bool WantsContext => Before > 0 || After > 0;
 
@@ -159,7 +166,9 @@ internal sealed class MatchPlan
             After = query.AfterContext,
             Filter = PathFilter.Create(query.Globs, query.Types, query.TypeNots, query.TypeAdds),
             Literals = literalsQuery,
-            ApplyGitIgnore = !query.NoIgnore && !query.NoIgnoreVcs,
+            Ignore = query.NoIgnore
+                ? IgnorePolicy.None
+                : query.NoIgnoreVcs ? IgnorePolicy.CustomOnly : IgnorePolicy.All,
             Report = query.Report,
             Multiline = crosses,
             MultilineDotAll = query.MultilineDotAll,

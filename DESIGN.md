@@ -25,7 +25,7 @@ Shared options: `--format text|json|ndjson|rgjson`, `--index <dir>`. `rgjson` is
 
 `-e` values are patterns. `-f` values are pattern files. A positional token that appears before the first `-e` or `-f` is also a pattern. Any other positional is the single path. The default pattern language is .NET regular expressions (non-backtracking), the same engine as `-E` / `--regex` / `--extended-regexp`. Those flags are aliases of the default. `-F` selects literal text and cannot be combined with `-E` or `-P`. `-w` checks both ends of the match: a boundary is a transition between a word character (Unicode letter, digit, or `_`) and a non-word character, or either end of the text. `-x` requires the whole line. Line text drops a trailing CR. A literal must equal that text. A regex is `\A(?:pattern)\z` on that text, so the original pattern is what trigram extraction sees. `-v` emits every real line that contains no hit. A trailing newline is not an extra line, and an empty file has no lines. `column` is 1 and `text` is the line. `-n` does not change that shape. `-s` hides `Path not found` and `Unreadable` for a path the user named; the exit code is still 2. Walk-time unreadable files stay skipped. `-q` writes no match report and is mutually exclusive with `-c`, `-l`, and `--files-without-match`.
 
-Boolean short options may be clustered (`-nEi`, `-uu`). A value short ends the cluster and takes the rest of the token with `=` (`-nEepat`). A token that already starts with a value short is not rewritten. After `--`, tokens stay literal. `-u` / `--unrestricted` is counted before parse and rewritten, up to three times: `-u` adds `--no-ignore`, `-uu` also `--hidden`, `-uuu` also `--binary`. A fourth use exits 2. `.git`, `.ngrep`, the index directory, and symlinks stay skipped. ngrep does not read `.ignore` or `.rgignore`.
+Boolean short options may be clustered (`-nEi`, `-uu`). A value short ends the cluster and takes the rest of the token with `=` (`-nEepat`). A token that already starts with a value short is not rewritten. After `--`, tokens stay literal. `-u` / `--unrestricted` is counted before parse and rewritten, up to three times: `-u` adds `--no-ignore` (every ignore file, including `.ignore` and `.rgignore`), `-uu` also `--hidden`, `-uuu` also `--binary`. A fourth use exits 2. `.git`, `.ngrep`, the index directory, and symlinks stay skipped.
 
 `--files` prints the walk a content scan would open, one relative path per line, with no pattern. Ignore, hidden, glob, and type filters apply. It does not read bytes, so NUL files and files over 32 MiB are listed, and `-uu` and `-uuu` list the same paths. It does not use the index. `--format` is ignored. Exit 0 if any path is listed, 1 if none, 2 on error. `-q` suppresses the lines and keeps that code. `-e`, `-f`, `-l`, `--files-without-match`, and `-c` exit 2.
 
@@ -43,7 +43,7 @@ Text headings: when stdout is a terminal and more than one file’s contents wer
 
 Regex options are `CultureInvariant` and `Multiline` (line anchors), plus `IgnoreCase` and, for `--multiline-dotall`, `Singleline`. Never `Compiled`. Without `-U` / dotall, a match whose span contains `\n` is discarded. With them, the span is kept. `line` / `column` / `lineText` stay on the first line; `text` is the whole slice. `-v` marks every overlapped line. `-U` does not change a non-regex substring search.
 
-Globs follow gitignore syntax via the same interpreter regexes (no `RegexOptions.Compiled`). A leading `!` excludes. With at least one include glob, paths start excluded. The last matching glob wins. `-t` names are OR; `-T` names are excluded after that. `--type-add name:*.a,*.b` appends globs (bare `ext` means `*.ext`). Filters run after gitignore. They never re-include an ignored path, including when the query uses the index (ignored files were not indexed). `--no-ignore` and `--no-ignore-vcs` skip `.gitignore` and force a content scan, because the index has no ignored documents. ngrep has no other ignore files, so the flags match. `.git`, `.ngrep`, the index directory, and symlinks are still skipped. `--type-list` prints `name: *.ext, ...` and exits 0.
+Globs follow gitignore syntax via the same interpreter regexes (no `RegexOptions.Compiled`). A leading `!` excludes. With at least one include glob, paths start excluded. The last matching glob wins. `-t` names are OR; `-T` names are excluded after that. `--type-add name:*.a,*.b` appends globs (bare `ext` means `*.ext`). Filters run after gitignore. They never re-include an ignored path, including when the query uses the index (ignored files were not indexed). `--no-ignore` skips every ignore file. `--no-ignore-vcs` skips `.gitignore`, `info/exclude`, and the global excludes file, and still reads `.ignore` and `.rgignore`. Both force a content scan, because the index was built with every source and has no ignored documents. `.git`, `.ngrep`, the index directory, and symlinks are still skipped. `--type-list` prints `name: *.ext, ...` and exits 0.
 
 Context is stored on the match as optional `before` / `after` arrays and is omitted from JSON when the user did not ask for it. Text context lines are `path-line-text`, or `line-text` under a heading. Groups that are not contiguous are split with `--`. A line that is both context and a match is printed once, as a match.
 
@@ -85,25 +85,37 @@ Then hidden names, unless `--hidden` or the walk root is that path:
 
 - a file or directory whose name starts with `.` is not searched
 - on Windows and macOS, the file-system hidden attribute is hidden too, so a content scan does not descend into `AppData`
-- `.gitignore` is still loaded when its directory is entered
+- `.gitignore`, `.ignore`, and `.rgignore` are still loaded when their directory is entered
 - the index walk passes `includeHidden: true`, so those files are stored. An indexed search still treats hidden as a dot name only, because the snapshot does not record the attribute
 - `-g` and a gitignore `!` rule do not un-hide a path
 
-Then gitignore:
+Then ignore files. The first source that matches a path decides, highest precedence first. Within one source, a more nested file wins, and within one file the last matching pattern wins. A whitelist in a lower source does not bring a path back.
 
-- Rules come from `.gitignore` files between the git root (the nearest ancestor that contains `.git`) and the file. If there is no git root, only `.gitignore` files at the walk root and below apply.
-- Nested files are matched against the path relative to the `.gitignore` that defined the pattern. A rule in `src/.gitignore` does not affect the repo root.
-- Last matching pattern wins. `!` negates. A trailing `/` matches only directories. A pattern with no `/` matches in any directory. A leading `/` or an internal `/` anchors it to that gitignore's directory.
-- Globs: `*` and `?` do not cross `/`. `**` crosses directories. `[abc]` and `[!abc]` work.
-- If a parent directory is ignored, everything under it is ignored. `build/` plus `!build/keep.txt` does **not** bring `keep.txt` back. `build/*` plus `!build/keep.txt` does, because the directory itself is not ignored. This matches git 2.43.
+Sources, highest precedence first:
 
-Binary files (a `NUL` in the first 8192 bytes) and files over 32 MiB are not indexed. `--binary` and the third `-u` search those NUL files as text and force a content scan. The 32 MiB cap stays. Global gitexcludes and `$HOME/.config/git/ignore` are not read. `.ignore` and `.rgignore` are not read.
+- `.rgignore`
+- `.ignore`
+- `.gitignore`
+- `$GIT_DIR/info/exclude` (the common git dir when `.git` is a `gitdir:` file and `commondir` is present)
+- the global excludes file
+
+`.gitignore`, `.ignore`, and `.rgignore` are read from the git root down to the file. The walk root's own files are read when that directory is listed. Patterns match the path relative to the file that defined them. A rule in `src/.gitignore` does not affect the repo root. If there is no git root, only those files at the walk root and below apply. ngrep does not read `.ignore` above the git root. Ripgrep walks those parents to the filesystem root. `.gitignore` is still read outside a checkout. Ripgrep skips `.gitignore`, `info/exclude`, and the global file unless it finds a repository.
+
+`info/exclude` and the global file apply only when a `.git` file or directory is found. Their patterns are relative to that git root. Ripgrep anchors the global file at the process working directory.
+
+The global path is `core.excludesFile`, read from git config without starting git: `/etc/gitconfig` on Unix (unless `GIT_CONFIG_NOSYSTEM` is set; `GIT_CONFIG_SYSTEM` replaces it), then `$XDG_CONFIG_HOME/git/config` or `~/.config/git/config`, then `~/.gitconfig` (`GIT_CONFIG_GLOBAL` replaces those two), then `$GIT_DIR/config`. Later files win. `include.path` is followed (`~` and a path relative to the including file). `includeIf` is not. A leading `~` expands to the home directory. A relative `core.excludesFile` is relative to the process working directory. When the key is unset, the default is `$XDG_CONFIG_HOME/git/ignore`, or `~/.config/git/ignore` when `XDG_CONFIG_HOME` is unset. A missing file adds no rules.
+
+The pattern language is the same in every source. `!` negates. A trailing `/` matches only directories. A pattern with no `/` matches in any directory. A leading `/` or an internal `/` anchors it to that file's directory (or to the git root, for `info/exclude` and the global file). Globs: `*` and `?` do not cross `/`. `**` crosses directories. `[abc]` and `[!abc]` work. If a parent directory is ignored, everything under it is ignored. `build/` plus `!build/keep.txt` does **not** bring `keep.txt` back. `build/*` plus `!build/keep.txt` does, because the directory itself is not ignored. This matches git 2.43.
+
+`--no-ignore-vcs` skips `.gitignore`, `info/exclude`, and the global file. `.ignore` and `.rgignore` still apply. `--no-ignore` skips every ignore file. Both scan instead of using the index. `-u` is `--no-ignore`, so it skips `.ignore` and `.rgignore` as well as the git sources.
+
+Binary files (a `NUL` in the first 8192 bytes) and files over 32 MiB are not indexed. `--binary` and the third `-u` search those NUL files as text and force a content scan. The 32 MiB cap stays.
 
 ## Libraries
 
 - **System.CommandLine 2.0.12** defines `index`, `search`, and `watch`. A leading positional that is not one of those words is rewritten to `search`, so `ngrep <pattern> [path]` works. Handlers take `ParseResult` and call `GetValue`, which stays on the trim-safe 2.0 API (no reflection-based model binding). `string[]` options collect repeated flags; the search binder walks tokens so `-e` values are not mistaken for the path.
 - **`FileSystemWatcher`** is the watch backend. It is in the shared framework and works with Native AOT. The MVP does not coalesce bursts beyond a 300 ms flag, and it does not raise the inotify watch limit.
-- **Gitignore is in-tree.** [MAB.DotIgnore](https://github.com/markashleybell/MAB.DotIgnore) is the usual NuGet parser, and it compiles every pattern with `RegexOptions.Compiled`, which Native AOT cannot generate. It also merges rules into one list, so a nested `*.log` would leak out of its directory. ngrep matches common gitignore globs with an in-tree interpreter (no `RegexOptions.Compiled`). A pattern whose character class that interpreter does not handle, or a match that exceeds its step limit, falls back to the regex interpreter (`RegexOptions.CultureInvariant`). Each file's rules stay on a stack.
+- **Gitignore is in-tree.** [MAB.DotIgnore](https://github.com/markashleybell/MAB.DotIgnore) is the usual NuGet parser, and it compiles every pattern with `RegexOptions.Compiled`, which Native AOT cannot generate. It also merges rules into one list, so a nested `*.log` would leak out of its directory. ngrep matches common gitignore globs with an in-tree interpreter (no `RegexOptions.Compiled`). A pattern whose character class that interpreter does not handle, or a match that exceeds its step limit, falls back to the regex interpreter (`RegexOptions.CultureInvariant`). Each file's rules stay on the stack for that source.
 
 JSON is written with `Utf8JsonWriter` and read with `JsonDocument`. `JsonSerializer` reflection is disabled in the project file. Regex search does not use `RegexOptions.Compiled` and not a source-generated pattern (the pattern is user input). The default is `RegexOptions.NonBacktracking` (linear, AOT-safe, no backreferences or lookaround). `-P` / `--pcre` keeps the backtracking interpreter, with a five-second timeout. `RegexOptions.Multiline` and `Singleline` stay on both engines. Gitignore globs stay on the interpreter.
 
