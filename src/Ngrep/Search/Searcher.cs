@@ -35,6 +35,13 @@ internal sealed class SearchQuery
 
     public required string Path { get; init; }
 
+    /// <summary>
+    /// Path the user named, when several roots are searched. Result paths are printed under it
+    /// so two roots that both contain <c>App.cs</c> stay distinct. Null keeps the single-root
+    /// path (index root, or the directory that was scanned). <c>.</c> stays null.
+    /// </summary>
+    public string? DisplayRoot { get; init; }
+
     public string? IndexDirectory { get; init; }
 
     public bool IgnoreCase { get; init; }
@@ -361,6 +368,21 @@ internal static class Searcher
         var jobs = stream != null ? new List<EmitJob>() : null;
         var without = plan.Report == ReportMode.FilesWithoutMatch ? new ConcurrentBag<string>() : null;
         var covered = 0;
+        string Shown(string documentPath)
+        {
+            if (query.DisplayRoot == null)
+            {
+                return documentPath;
+            }
+
+            if (prefixIsFile)
+            {
+                return DisplayPath(query.DisplayRoot, documentPath, rootIsFile: true);
+            }
+
+            return DisplayPath(query.DisplayRoot, PathUnderStart(documentPath, prefix), rootIsFile: false);
+        }
+
         foreach (var document in index.Documents)
         {
             if (prefix.Length > 0 && !Under(document.Path, prefix, prefixIsFile))
@@ -385,18 +407,18 @@ internal static class Searcher
                 // A required literal is absent, so the file cannot match and is not opened.
                 if (stream != null)
                 {
-                    jobs!.Add(new EmitJob(false, new ConfirmFile("", document.Path)));
+                    jobs!.Add(new EmitJob(false, new ConfirmFile("", Shown(document.Path))));
                 }
                 else if (without != null)
                 {
-                    without.Add(document.Path);
+                    without.Add(Shown(document.Path));
                 }
 
                 continue;
             }
 
             var full = Path.Combine(root, document.Path.Replace('/', Path.DirectorySeparatorChar));
-            var file = new ConfirmFile(full, document.Path);
+            var file = new ConfirmFile(full, Shown(document.Path));
             if (stream != null)
             {
                 jobs!.Add(new EmitJob(true, file));
@@ -499,9 +521,10 @@ internal static class Searcher
             // includeHidden so a path the user named is not treated as skipped merely for being a dotfile.
             if ((plan.Ignore == IgnorePolicy.None || !IsIgnoredFile(parent, start, plan.Ignore)) && plan.Filter.Accepts(relative))
             {
-                var result = await TryCollectAsync(new ConfirmFile(start, relative), plan, matches, stats: null, without, tally, cancellation, errorIfUnreadable: true, checkExists: false);
+                var shown = DisplayPath(query.DisplayRoot, relative, rootIsFile: query.DisplayRoot != null);
+                var result = await TryCollectAsync(new ConfirmFile(start, shown), plan, matches, stats: null, without, tally, cancellation, errorIfUnreadable: true, checkExists: false);
                 query.Events?.Note?.Invoke(note);
-                stream?.AcceptFile(relative, matches, result);
+                stream?.AcceptFile(shown, matches, result);
             }
             else
             {
@@ -516,6 +539,8 @@ internal static class Searcher
         var stats = new WalkStats();
         var degree = workers > 1 ? workers : 1;
         var stopOnMatch = plan.Report == ReportMode.Quiet && plan.StopAtFirst;
+        ConfirmFile Show(ConfirmFile file) =>
+            new(file.FullPath, DisplayPath(query.DisplayRoot, file.RelativePath, rootIsFile: false));
         if (stream != null && !stopOnMatch)
         {
             // Do not list or sort the tree before reading. Hits print as each file is
@@ -529,8 +554,8 @@ internal static class Searcher
                 plan.Filter,
                 degree,
                 cancellation,
-                (file, local, token) => TryCollectAsync(file, plan, local, stats, filesWithoutMatch: null, tally, token),
-                (file, matches, result) => stream.Accept(new EmitJob(true, file), matches, result));
+                (file, local, token) => TryCollectAsync(Show(file), plan, local, stats, filesWithoutMatch: null, tally, token),
+                (file, matches, result) => stream.Accept(new EmitJob(true, Show(file)), matches, result));
             return new ScanResult([], degree, null, stream);
         }
 
@@ -543,7 +568,7 @@ internal static class Searcher
             plan.Filter,
             degree,
             cancellation,
-            (file, local, token) => TryCollectAsync(file, plan, local, stats, without, tally, token),
+            (file, local, token) => TryCollectAsync(Show(file), plan, local, stats, without, tally, token),
             stopOnMatch);
 
         return new ScanResult(found, degree, without, stream);
@@ -844,6 +869,84 @@ internal static class Searcher
         }
 
         return without.Distinct(StringComparer.Ordinal).OrderBy(path => path, StringComparer.Ordinal).ToArray();
+    }
+
+    /// <summary>
+    /// When <paramref name="multiple"/> is set, result paths are printed under the path the user
+    /// named. <c>.</c> keeps the single-root relative path so a search of the working directory
+    /// does not gain a prefix.
+    /// </summary>
+    internal static string? MultiRootDisplay(string path, bool multiple)
+    {
+        if (!multiple)
+        {
+            return null;
+        }
+
+        var root = path.Replace('\\', '/');
+        if (root.Length > 1)
+        {
+            root = root.TrimEnd('/');
+        }
+
+        if (root.Length == 0 || root == ".")
+        {
+            return null;
+        }
+
+        return path;
+    }
+
+    /// <summary>
+    /// Prefix <paramref name="relative"/> (a path under the search root) with the path the user named.
+    /// A null root leaves <paramref name="relative"/> unchanged. A file root is that path itself.
+    /// </summary>
+    private static string DisplayPath(string? displayRoot, string relative, bool rootIsFile)
+    {
+        if (displayRoot == null)
+        {
+            return relative;
+        }
+
+        var root = displayRoot.Replace('\\', '/');
+        if (root.Length > 1)
+        {
+            root = root.TrimEnd('/');
+        }
+
+        if (rootIsFile)
+        {
+            return root;
+        }
+
+        relative = relative.Replace('\\', '/');
+        if (relative.Length == 0)
+        {
+            return root;
+        }
+
+        return root + "/" + relative;
+    }
+
+    private static string PathUnderStart(string documentPath, string prefix)
+    {
+        if (prefix.Length == 0)
+        {
+            return documentPath;
+        }
+
+        if (documentPath.Equals(prefix, StringComparison.Ordinal))
+        {
+            return "";
+        }
+
+        var head = prefix + "/";
+        if (documentPath.StartsWith(head, StringComparison.Ordinal))
+        {
+            return documentPath[head.Length..];
+        }
+
+        return documentPath;
     }
 
     private static string RelativeTo(string root, string start, out bool outside, out bool prefixIsFile)
