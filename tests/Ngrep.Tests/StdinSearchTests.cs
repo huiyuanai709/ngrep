@@ -37,7 +37,7 @@ public class StdinSearchTests
             Assert.Equal(ExitCodes.Success, code);
         }
 
-        Assert.Equal("(standard input):1:7:hello ngrep", capture.Stdout.Trim());
+        Assert.Equal("1:7:hello ngrep", capture.Stdout.Trim());
     }
 
     [Fact]
@@ -170,23 +170,35 @@ public class StdinSearchTests
         using (Feed("keep\nngrep\nngrep\nno\n"))
         {
             Assert.Equal(ExitCodes.Success, NgrepCli.Run(["ngrep", "-", "-c", "-j", "1"]).GetAwaiter().GetResult());
+            Assert.Equal("2", capture.Stdout.Trim());
+
+            capture.Clear();
+            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["ngrep", "-", "-c", "-H", "-j", "1"]).GetAwaiter().GetResult());
             Assert.Equal("(standard input):2", capture.Stdout.Trim());
 
             capture.Clear();
-            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["ngrep", "-", "-l", "-j", "1"]).GetAwaiter().GetResult());
+            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["ngrep", "-", "-l", "-I", "-j", "1"]).GetAwaiter().GetResult());
             Assert.Equal("(standard input)", capture.Stdout.Trim());
 
             capture.Clear();
             Assert.Equal(ExitCodes.Success, NgrepCli.Run(["ngrep", "-", "-o", "-j", "1"]).GetAwaiter().GetResult());
+            Assert.Equal("2:1:ngrep\n3:1:ngrep", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
+
+            capture.Clear();
+            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["ngrep", "-", "-H", "-o", "-j", "1"]).GetAwaiter().GetResult());
             Assert.Equal("(standard input):2:1:ngrep\n(standard input):3:1:ngrep", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
 
             capture.Clear();
             Assert.Equal(ExitCodes.Success, NgrepCli.Run(["ngrep", "-", "--heading", "-j", "1"]).GetAwaiter().GetResult());
+            Assert.Equal("2:1:ngrep\n3:1:ngrep", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
+
+            capture.Clear();
+            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["ngrep", "-", "-H", "--heading", "-j", "1"]).GetAwaiter().GetResult());
             Assert.Equal("(standard input)\n2:1:ngrep\n3:1:ngrep", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
 
             capture.Clear();
             Assert.Equal(ExitCodes.Success, NgrepCli.Run(["ngrep", "-", "--heading", "--no-heading", "-j", "1"]).GetAwaiter().GetResult());
-            Assert.Equal("(standard input):2:1:ngrep\n(standard input):3:1:ngrep", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
+            Assert.Equal("2:1:ngrep\n3:1:ngrep", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
 
             capture.Clear();
             Assert.Equal(ExitCodes.NoMatches, NgrepCli.Run(["--files-without-match", "ngrep", "-", "-j", "1"]).GetAwaiter().GetResult());
@@ -194,6 +206,10 @@ public class StdinSearchTests
 
             capture.Clear();
             Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-v", "ngrep", "-", "-j", "1"]).GetAwaiter().GetResult());
+            Assert.Equal("1:1:keep\n4:1:no", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
+
+            capture.Clear();
+            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-H", "-v", "ngrep", "-", "-j", "1"]).GetAwaiter().GetResult());
             Assert.Equal("(standard input):1:1:keep\n(standard input):4:1:no", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
 
             capture.Clear();
@@ -211,7 +227,7 @@ public class StdinSearchTests
             var code = NgrepCli.Run(["ngrep", "-", "-C", "1", "-j", "1"]).GetAwaiter().GetResult();
             Assert.Equal(ExitCodes.Success, code);
             Assert.Equal(
-                "(standard input)-1-before\n(standard input):2:1:ngrep\n(standard input)-3-after",
+                "1-before\n2:1:ngrep\n3-after",
                 capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
         }
 
@@ -219,7 +235,7 @@ public class StdinSearchTests
         using (Feed("NGREP\nxxNGREPyy\n"))
         {
             Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-i", "-w", "ngrep", "-", "-j", "1"]).GetAwaiter().GetResult());
-            Assert.Equal("(standard input):1:1:NGREP", capture.Stdout.Trim());
+            Assert.Equal("1:1:NGREP", capture.Stdout.Trim());
         }
 
         capture.Clear();
@@ -269,7 +285,7 @@ public class StdinSearchTests
             Assert.Equal(ExitCodes.Success, code);
         }
 
-        Assert.Contains("(standard input):1:7:hello ngrep", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("1:7:hello ngrep", capture.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

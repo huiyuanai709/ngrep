@@ -16,7 +16,8 @@ internal readonly record struct SearchPresentation(
     bool LineNumbers = true,
     bool Column = true,
     bool NullPaths = false,
-    LineReplacer? Replacer = null);
+    LineReplacer? Replacer = null,
+    bool WithFilename = true);
 
 internal static partial class MachineOutput
 {
@@ -214,7 +215,7 @@ internal static partial class MachineOutput
         var headingStarted = false;
         void EnsureHeading(string path)
         {
-            if (!heading || string.Equals(headingPath, path, StringComparison.Ordinal))
+            if (!presentation.WithFilename || !heading || string.Equals(headingPath, path, StringComparison.Ordinal))
             {
                 return;
             }
@@ -234,7 +235,7 @@ internal static partial class MachineOutput
             foreach (var match in matches)
             {
                 EnsureHeading(match.Path);
-                WriteMatchLine(match, MatchBody(match, lineIndex, presentation, onlyMatching: true), presentation, includePath: !heading, colorizeBody: presentation.Replacer == null);
+                WriteMatchLine(match, MatchBody(match, lineIndex, presentation, onlyMatching: true), presentation, includePath: presentation.WithFilename && !heading, colorizeBody: presentation.Replacer == null);
             }
 
             return;
@@ -266,7 +267,7 @@ internal static partial class MachineOutput
             if (match.Before == null && match.After == null)
             {
                 EnsureHeading(match.Path);
-                WriteMatchLine(match, MatchBody(match, lineIndex, presentation, onlyMatching: false), presentation, includePath: !heading, colorizeBody: presentation.Replacer == null);
+                WriteMatchLine(match, MatchBody(match, lineIndex, presentation, onlyMatching: false), presentation, includePath: presentation.WithFilename && !heading, colorizeBody: presentation.Replacer == null);
                 continue;
             }
 
@@ -293,12 +294,12 @@ internal static partial class MachineOutput
                     continue;
                 }
 
-                WriteContextLine(match.Path, line.Line, line.Text, presentation, includePath: !heading);
+                WriteContextLine(match.Path, line.Line, line.Text, presentation, includePath: presentation.WithFilename && !heading);
                 lastLine = line.Line;
                 printed = true;
             }
 
-            WriteMatchLine(match, MatchBody(match, lineIndex, presentation, onlyMatching: false), presentation, includePath: !heading, colorizeBody: presentation.Replacer == null);
+            WriteMatchLine(match, MatchBody(match, lineIndex, presentation, onlyMatching: false), presentation, includePath: presentation.WithFilename && !heading, colorizeBody: presentation.Replacer == null);
             if (match.Line > lastLine)
             {
                 lastLine = match.Line;
@@ -312,7 +313,7 @@ internal static partial class MachineOutput
                     continue;
                 }
 
-                WriteContextLine(match.Path, line.Line, line.Text, presentation, includePath: !heading);
+                WriteContextLine(match.Path, line.Line, line.Text, presentation, includePath: presentation.WithFilename && !heading);
                 lastLine = line.Line;
             }
         }

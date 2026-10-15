@@ -79,7 +79,7 @@ public class TextShapeTests
         var match = Run("netgrep", tree.Root, "-0", "-j", "1", "--no-heading");
         Assert.Equal("a.txt\02:1:netgrep\nb.txt\01:1:netgrep\n", match.Stdout);
 
-        var noNumbers = Run("netgrep", Path.Combine(tree.Root, "a.txt"), "-0", "-N", "--no-column", "-C", "1", "-j", "1");
+        var noNumbers = Run("-H", "netgrep", Path.Combine(tree.Root, "a.txt"), "-0", "-N", "--no-column", "-C", "1", "-j", "1");
         Assert.Equal("a.txt\0alpha\na.txt\0netgrep\na.txt\0omega\n", noNumbers.Stdout);
 
         var list = Run("-l0", "netgrep", tree.Root, "-j", "1");
@@ -112,18 +112,18 @@ public class TextShapeTests
         var path = tree.File("a.txt");
         File.WriteAllText(path, "foo foo\n");
 
-        var run = Run("-F", "foo", path, "-r", "$1", "-j", "1");
+        var run = Run("-F", "-H", "foo", path, "-r", "$1", "-j", "1");
         Assert.Equal("a.txt:1:1:$1 $1\na.txt:1:5:$1 $1", run.Stdout.Trim());
         Assert.Equal("foo foo\n", File.ReadAllText(path));
 
-        var empty = Run("-F", "foo", path, "-r", "", "-j", "1");
+        var empty = Run("-F", "-H", "foo", path, "-r", "", "-j", "1");
         Assert.Equal("a.txt:1:1: \na.txt:1:5: ", empty.Stdout.TrimEnd('\r', '\n'));
         Assert.Equal("foo foo\n", File.ReadAllText(path));
 
-        var attached = Run("-F", "-rX", "foo", path, "-j", "1");
+        var attached = Run("-F", "-H", "-rX", "foo", path, "-j", "1");
         Assert.Equal("a.txt:1:1:X X\na.txt:1:5:X X", attached.Stdout.Trim());
 
-        var captured = Run("(f)oo", path, "-r", "[$1]", "-j", "1");
+        var captured = Run("-H", "(f)oo", path, "-r", "[$1]", "-j", "1");
         Assert.Equal("a.txt:1:1:[f] [f]\na.txt:1:5:[f] [f]", captured.Stdout.Trim());
     }
 
@@ -211,7 +211,7 @@ public class TextShapeTests
         var path = tree.File("a.txt");
         File.WriteAllText(path, "foo\nbar\n");
 
-        var inverted = Run("foo", path, "-v", "-r", "Z", "-N", "--no-column", "-j", "1");
+        var inverted = Run("-H", "foo", path, "-v", "-r", "Z", "-N", "--no-column", "-j", "1");
         Assert.Equal("a.txt:bar", inverted.Stdout.Trim());
         Assert.Equal("foo\nbar\n", File.ReadAllText(path));
 
