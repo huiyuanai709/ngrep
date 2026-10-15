@@ -119,7 +119,7 @@ public class SearchUxTests
                 throw new TimeoutException("workers did not run concurrently");
             }
 
-            return ValueTask.CompletedTask;
+            return ValueTask.FromResult(ConfirmResult.Skip);
         }, stopOnMatch: false);
         Assert.True(entered >= 4);
 

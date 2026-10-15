@@ -5,6 +5,13 @@ namespace Ngrep.Search;
 
 internal readonly record struct ConfirmFile(string FullPath, string RelativePath);
 
+internal readonly record struct ConfirmResult(bool Examined, bool Matched)
+{
+    public static ConfirmResult Skip => new(false, false);
+}
+
+internal readonly record struct EmitJob(bool Confirm, ConfirmFile File);
+
 /// <summary>
 /// Walks and confirms on task workers. Directory listing stays on the producer task.
 /// Each worker reads with <see cref="RandomAccess.ReadAsync"/> and then runs the
@@ -16,7 +23,7 @@ internal static class AsyncScheduler
         IReadOnlyList<ConfirmFile> files,
         int workers,
         CancellationToken cancellation,
-        Func<ConfirmFile, List<SearchMatch>, CancellationToken, ValueTask> collect,
+        Func<ConfirmFile, List<SearchMatch>, CancellationToken, ValueTask<ConfirmResult>> collect,
         bool stopOnMatch)
     {
         cancellation.ThrowIfCancellationRequested();
@@ -49,7 +56,7 @@ internal static class AsyncScheduler
         PathFilter filter,
         int workers,
         CancellationToken cancellation,
-        Func<ConfirmFile, List<SearchMatch>, CancellationToken, ValueTask> collect,
+        Func<ConfirmFile, List<SearchMatch>, CancellationToken, ValueTask<ConfirmResult>> collect,
         bool stopOnMatch)
     {
         cancellation.ThrowIfCancellationRequested();
@@ -76,7 +83,7 @@ internal static class AsyncScheduler
         WalkStats stats,
         PathFilter filter,
         CancellationToken cancellation,
-        Func<ConfirmFile, List<SearchMatch>, CancellationToken, ValueTask> collect,
+        Func<ConfirmFile, List<SearchMatch>, CancellationToken, ValueTask<ConfirmResult>> collect,
         bool stopOnMatch)
     {
         var matches = new List<SearchMatch>();
@@ -155,7 +162,7 @@ internal static class AsyncScheduler
         IEnumerable<ConfirmFile> files,
         int workers,
         CancellationToken cancellation,
-        Func<ConfirmFile, List<SearchMatch>, CancellationToken, ValueTask> collect,
+        Func<ConfirmFile, List<SearchMatch>, CancellationToken, ValueTask<ConfirmResult>> collect,
         bool stopOnMatch,
         int[]? halt = null)
     {
@@ -248,5 +255,218 @@ internal static class AsyncScheduler
         }
 
         return merged;
+    }
+
+    /// <summary>
+    /// Confirms jobs in parallel and invokes <paramref name="onFile"/> in job order.
+    /// A job with <see cref="EmitJob.Confirm"/> false is a prefilter miss and is emitted
+    /// without a read. Printing overlaps later confirms.
+    /// </summary>
+    public static async Task EmitOrdered(
+        IReadOnlyList<EmitJob> jobs,
+        int workers,
+        CancellationToken cancellation,
+        Func<ConfirmFile, List<SearchMatch>, CancellationToken, ValueTask<ConfirmResult>> collect,
+        Action<EmitJob, List<SearchMatch>, ConfirmResult> onFile,
+        bool stopOnMatch)
+    {
+        cancellation.ThrowIfCancellationRequested();
+        if (jobs.Count == 0)
+        {
+            return;
+        }
+
+        if (workers <= 1 || CountConfirm(jobs) <= 1)
+        {
+            foreach (var job in jobs)
+            {
+                cancellation.ThrowIfCancellationRequested();
+                if (!job.Confirm)
+                {
+                    onFile(job, [], ConfirmResult.Skip);
+                    continue;
+                }
+
+                var local = new List<SearchMatch>();
+                var result = await collect(job.File, local, cancellation);
+                onFile(job, local, result);
+                if (stopOnMatch && result.Matched)
+                {
+                    break;
+                }
+            }
+
+            return;
+        }
+
+        var halt = 0;
+        var done = new bool[jobs.Count];
+        var results = new ConfirmResult[jobs.Count];
+        var batches = new List<SearchMatch>?[jobs.Count];
+        var next = 0;
+        Exception? failure = null;
+        var gate = new object();
+        var pending = Channel.CreateUnbounded<int>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false,
+        });
+
+        void Drain()
+        {
+            while (next < jobs.Count)
+            {
+                if (!jobs[next].Confirm)
+                {
+                    pending.Writer.TryWrite(next);
+                    next++;
+                    continue;
+                }
+
+                if (!done[next])
+                {
+                    break;
+                }
+
+                pending.Writer.TryWrite(next);
+                if (stopOnMatch && results[next].Matched)
+                {
+                    Volatile.Write(ref halt, 1);
+                    next = jobs.Count;
+                    break;
+                }
+
+                next++;
+            }
+
+            if (next >= jobs.Count)
+            {
+                pending.Writer.TryComplete();
+            }
+        }
+
+        lock (gate)
+        {
+            Drain();
+        }
+
+        var confirm = new List<int>();
+        for (var i = 0; i < jobs.Count; i++)
+        {
+            if (jobs[i].Confirm)
+            {
+                confirm.Add(i);
+            }
+        }
+
+        var work = Channel.CreateUnbounded<int>(new UnboundedChannelOptions { SingleWriter = true });
+        foreach (var index in confirm)
+        {
+            work.Writer.TryWrite(index);
+        }
+
+        work.Writer.TryComplete();
+        var consumers = new Task[Math.Min(workers, Math.Max(1, confirm.Count))];
+        for (var i = 0; i < consumers.Length; i++)
+        {
+            consumers[i] = Task.Run(async () =>
+            {
+                try
+                {
+                    await foreach (var index in work.Reader.ReadAllAsync(cancellation))
+                    {
+                        if (Volatile.Read(ref halt) != 0 || cancellation.IsCancellationRequested)
+                        {
+                            break;
+                        }
+
+                        var local = new List<SearchMatch>();
+                        var result = await collect(jobs[index].File, local, cancellation);
+                        lock (gate)
+                        {
+                            if (Volatile.Read(ref halt) != 0 && next > index)
+                            {
+                                continue;
+                            }
+
+                            batches[index] = local;
+                            results[index] = result;
+                            done[index] = true;
+                            Drain();
+                        }
+                    }
+                }
+                catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+                {
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    Interlocked.CompareExchange(ref failure, ex, null);
+                    Volatile.Write(ref halt, 1);
+                }
+            }, CancellationToken.None);
+        }
+
+        var emitted = Task.Run(async () =>
+        {
+            try
+            {
+                await foreach (var index in pending.Reader.ReadAllAsync(CancellationToken.None))
+                {
+                    var job = jobs[index];
+                    if (!job.Confirm)
+                    {
+                        onFile(job, [], ConfirmResult.Skip);
+                        continue;
+                    }
+
+                    onFile(job, batches[index] ?? [], results[index]);
+                }
+            }
+            catch (ChannelClosedException)
+            {
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Interlocked.CompareExchange(ref failure, ex, null);
+                Volatile.Write(ref halt, 1);
+            }
+        }, CancellationToken.None);
+
+        await Task.WhenAll(consumers);
+        lock (gate)
+        {
+            if (failure == null && Volatile.Read(ref halt) == 0)
+            {
+                Drain();
+            }
+
+            pending.Writer.TryComplete(failure);
+        }
+
+        await emitted;
+        if (failure != null)
+        {
+            throw failure;
+        }
+
+        if (cancellation.IsCancellationRequested && Volatile.Read(ref halt) == 0)
+        {
+            throw new OperationCanceledException(cancellation);
+        }
+    }
+
+    private static int CountConfirm(IReadOnlyList<EmitJob> jobs)
+    {
+        var count = 0;
+        foreach (var job in jobs)
+        {
+            if (job.Confirm)
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 }

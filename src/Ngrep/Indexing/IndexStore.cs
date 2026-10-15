@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -21,7 +22,46 @@ internal static class IndexStore
             return null;
         }
 
-        return Read(dir);
+        return Read(dir, new IndexRead());
+    }
+
+    /// <summary>
+    /// Search load. Skips <c>lineStarts</c> (search recomputes them from the file)
+    /// and materializes only <paramref name="grams"/>. A null set checks the postings
+    /// header and does not read posting lists.
+    /// </summary>
+    public static IndexData? TryLoadForSearch(string indexDirectory, HashSet<string>? grams)
+    {
+        var dir = ResolveExisting(indexDirectory);
+        if (dir == null)
+        {
+            return null;
+        }
+
+        return Read(dir, new IndexRead(grams));
+    }
+
+    private readonly struct IndexRead
+    {
+        public IndexRead()
+        {
+            AllPostings = true;
+            LineStarts = true;
+            Grams = null;
+        }
+
+        public IndexRead(HashSet<string>? grams)
+        {
+            AllPostings = false;
+            LineStarts = false;
+            Grams = grams;
+        }
+
+        public bool AllPostings { get; }
+
+        public bool LineStarts { get; }
+
+        public HashSet<string>? Grams { get; }
     }
 
     public static void Write(string indexDirectory, IndexManifest manifest, IReadOnlyList<DocumentRecord> documents, Dictionary<string, List<int>> postings)
@@ -99,7 +139,7 @@ internal static class IndexStore
         return Encoding.UTF8.GetString(stream.ToArray());
     }
 
-    private static IndexData Read(string directory)
+    private static IndexData Read(string directory, IndexRead read)
     {
         var manifestPath = Path.Combine(directory, "manifest.json");
         var documentsPath = Path.Combine(directory, "documents.ndjson");
@@ -116,11 +156,11 @@ internal static class IndexStore
                 $"Unsupported index format version {manifest.FormatVersion}. This build reads version {IndexPaths.FormatVersion}.");
         }
 
-        var documents = ReadDocuments(documentsPath);
+        var documents = read.LineStarts ? ReadDocuments(documentsPath) : ReadDocumentMeta(documentsPath);
         Dictionary<string, List<int>> postings;
         using (var stream = File.OpenRead(postingsPath))
         {
-            postings = ReadPostings(stream);
+            postings = read.AllPostings ? ReadPostings(stream) : ReadSelectedPostings(stream, read.Grams);
         }
 
         return new IndexData
@@ -263,6 +303,172 @@ internal static class IndexStore
         return documents;
     }
 
+    /// <summary>
+    /// Document id, path, size, mtime, and hash only. The lineStarts array is skipped
+    /// without becoming a string or an int[].
+    /// </summary>
+    private static List<DocumentRecord> ReadDocumentMeta(string path)
+    {
+        var documents = new List<DocumentRecord>();
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, FileOptions.SequentialScan);
+        var chunk = ArrayPool<byte>.Shared.Rent(1 << 16);
+        var line = new ArrayBufferWriter<byte>(256);
+        try
+        {
+            int read;
+            while ((read = stream.Read(chunk, 0, chunk.Length)) > 0)
+            {
+                var span = chunk.AsSpan(0, read);
+                var offset = 0;
+                while (offset < span.Length)
+                {
+                    var newline = span[offset..].IndexOf((byte)'\n');
+                    if (newline < 0)
+                    {
+                        line.Write(span[offset..]);
+                        break;
+                    }
+
+                    line.Write(span.Slice(offset, newline));
+                    AddMeta(documents, line.WrittenSpan);
+                    line.Clear();
+                    offset += newline + 1;
+                }
+            }
+
+            if (line.WrittenCount > 0)
+            {
+                AddMeta(documents, line.WrittenSpan);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(chunk);
+        }
+
+        return documents;
+    }
+
+    private static readonly byte[] LineStartsMarker = "\"lineStarts\""u8.ToArray();
+
+    private static void AddMeta(List<DocumentRecord> documents, ReadOnlySpan<byte> line)
+    {
+        if (line.Length > 0 && line[^1] == (byte)'\r')
+        {
+            line = line[..^1];
+        }
+
+        if (line.IsEmpty)
+        {
+            return;
+        }
+
+        var cut = line.IndexOf(LineStartsMarker);
+        if (cut >= 0)
+        {
+            var end = cut;
+            while (end > 0 && (line[end - 1] == (byte)' ' || line[end - 1] == (byte)','))
+            {
+                end--;
+            }
+
+            var rented = ArrayPool<byte>.Shared.Rent(end + 1);
+            try
+            {
+                line[..end].CopyTo(rented);
+                rented[end] = (byte)'}';
+                documents.Add(ParseMeta(rented.AsSpan(0, end + 1)));
+            }
+            catch (Exception ex) when (ex is InvalidDataException or JsonException or InvalidOperationException or FormatException)
+            {
+                documents.Add(ParseMeta(line));
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(rented);
+            }
+
+            return;
+        }
+
+        documents.Add(ParseMeta(line));
+    }
+
+    private static DocumentRecord ParseMeta(ReadOnlySpan<byte> json)
+    {
+        var reader = new Utf8JsonReader(json, isFinalBlock: true, state: default);
+        if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject)
+        {
+            throw new InvalidDataException("documents.ndjson contains an invalid record.");
+        }
+
+        var id = 0;
+        var path = "";
+        long size = 0;
+        long mtime = 0;
+        var hash = "";
+        var sawId = false;
+        var sawPath = false;
+        var sawSize = false;
+        var sawMtime = false;
+        var sawHash = false;
+        while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
+        {
+            if (reader.TokenType != JsonTokenType.PropertyName)
+            {
+                throw new InvalidDataException("documents.ndjson contains an invalid record.");
+            }
+
+            var name = reader.GetString();
+            if (!reader.Read())
+            {
+                throw new InvalidDataException("documents.ndjson contains an invalid record.");
+            }
+
+            switch (name)
+            {
+                case "id":
+                    id = reader.GetInt32();
+                    sawId = true;
+                    break;
+                case "path":
+                    path = reader.GetString() ?? "";
+                    sawPath = true;
+                    break;
+                case "size":
+                    size = reader.GetInt64();
+                    sawSize = true;
+                    break;
+                case "mtimeUnixMs":
+                    mtime = reader.GetInt64();
+                    sawMtime = true;
+                    break;
+                case "sha256":
+                    hash = reader.GetString() ?? "";
+                    sawHash = true;
+                    break;
+                default:
+                    reader.Skip();
+                    break;
+            }
+        }
+
+        if (!sawId || !sawPath || !sawSize || !sawMtime || !sawHash)
+        {
+            throw new InvalidDataException("documents.ndjson contains an invalid record.");
+        }
+
+        return new DocumentRecord
+        {
+            Id = id,
+            Path = path,
+            Size = size,
+            MtimeUnixMs = mtime,
+            Sha256 = hash,
+            LineStarts = [],
+        };
+    }
+
     public static void WritePostings(Stream stream, Dictionary<string, List<int>> postings)
     {
         if (postings.Count == 0)
@@ -362,6 +568,225 @@ internal static class IndexStore
         }
 
         return postings;
+    }
+
+    /// <summary>
+    /// Reads posting lists for <paramref name="grams"/> only. A null set validates the
+    /// header and returns an empty map. Scanning stops once every requested gram is loaded.
+    /// </summary>
+    private static Dictionary<string, List<int>> ReadSelectedPostings(Stream stream, HashSet<string>? grams)
+    {
+        var reader = new SeqReader(stream);
+        try
+        {
+            var magic = new byte[4];
+            reader.ReadBytes(magic);
+            if (magic[0] != (byte)'N' || magic[1] != (byte)'G' || magic[2] != (byte)'T' || magic[3] != (byte)'R')
+            {
+                throw new InvalidDataException("postings.bin magic mismatch (expected NGTR).");
+            }
+
+            var version = reader.ReadInt32();
+            if (version != IndexPaths.FormatVersion)
+            {
+                throw new InvalidDataException(
+                    $"Unsupported postings version {version}. This build reads version {IndexPaths.FormatVersion}.");
+            }
+
+            var count = reader.ReadInt32();
+            if (count < 0)
+            {
+                throw new InvalidDataException("postings.bin trigram count is invalid.");
+            }
+
+            if (grams == null || grams.Count == 0 || count == 0)
+            {
+                return new Dictionary<string, List<int>>(StringComparer.Ordinal);
+            }
+
+            var pending = grams.Count;
+            var postings = new Dictionary<string, List<int>>(grams.Count, StringComparer.Ordinal);
+            var gramBuf = ArrayPool<byte>.Shared.Rent(16);
+            try
+            {
+                for (var i = 0; i < count && pending > 0; i++)
+                {
+                    var len = reader.ReadUInt16();
+                    if (gramBuf.Length < len)
+                    {
+                        ArrayPool<byte>.Shared.Return(gramBuf);
+                        gramBuf = ArrayPool<byte>.Shared.Rent(len);
+                    }
+
+                    reader.ReadBytes(gramBuf.AsSpan(0, len));
+                    var n = reader.ReadInt32();
+                    if (n < 0)
+                    {
+                        throw new InvalidDataException("postings.bin posting count is invalid.");
+                    }
+
+                    var gram = Encoding.UTF8.GetString(gramBuf, 0, len);
+                    if (!grams.Contains(gram))
+                    {
+                        var skip = (long)n * 4;
+                        while (skip > 0)
+                        {
+                            var step = (int)Math.Min(skip, 1 << 20);
+                            reader.Skip(step);
+                            skip -= step;
+                        }
+
+                        continue;
+                    }
+
+                    var ids = new List<int>(n);
+                    for (var j = 0; j < n; j++)
+                    {
+                        ids.Add(reader.ReadInt32());
+                    }
+
+                    postings[gram] = ids;
+                    pending--;
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(gramBuf);
+            }
+
+            return postings;
+        }
+        finally
+        {
+            reader.Dispose();
+        }
+    }
+
+    private struct SeqReader : IDisposable
+    {
+        private readonly Stream _stream;
+        private byte[] _buffer;
+        private int _pos;
+        private int _filled;
+
+        public SeqReader(Stream stream)
+        {
+            _stream = stream;
+            _buffer = ArrayPool<byte>.Shared.Rent(1 << 16);
+            _pos = 0;
+            _filled = 0;
+        }
+
+        public void Dispose()
+        {
+            if (_buffer != null)
+            {
+                ArrayPool<byte>.Shared.Return(_buffer);
+                _buffer = null!;
+            }
+        }
+
+        public int ReadInt32()
+        {
+            Require(4);
+            var value = BinaryPrimitives.ReadInt32LittleEndian(_buffer.AsSpan(_pos));
+            _pos += 4;
+            return value;
+        }
+
+        public ushort ReadUInt16()
+        {
+            Require(2);
+            var value = BinaryPrimitives.ReadUInt16LittleEndian(_buffer.AsSpan(_pos));
+            _pos += 2;
+            return value;
+        }
+
+        public void ReadBytes(Span<byte> dest)
+        {
+            var offset = 0;
+            while (offset < dest.Length)
+            {
+                if (_pos >= _filled)
+                {
+                    Fill();
+                    if (_filled == 0)
+                    {
+                        throw new InvalidDataException("postings.bin ended early.");
+                    }
+                }
+
+                var n = Math.Min(dest.Length - offset, _filled - _pos);
+                _buffer.AsSpan(_pos, n).CopyTo(dest[offset..]);
+                _pos += n;
+                offset += n;
+            }
+        }
+
+        public void Skip(int count)
+        {
+            if (count < 0)
+            {
+                throw new InvalidDataException("postings.bin posting count is invalid.");
+            }
+
+            while (count > 0)
+            {
+                if (_pos >= _filled)
+                {
+                    Fill();
+                    if (_filled == 0)
+                    {
+                        throw new InvalidDataException("postings.bin ended early.");
+                    }
+                }
+
+                var n = Math.Min(count, _filled - _pos);
+                _pos += n;
+                count -= n;
+            }
+        }
+
+        private void Require(int count)
+        {
+            if (_filled - _pos >= count)
+            {
+                return;
+            }
+
+            var have = _filled - _pos;
+            if (have > 0 && _pos > 0)
+            {
+                Buffer.BlockCopy(_buffer, _pos, _buffer, 0, have);
+            }
+
+            _pos = 0;
+            _filled = have;
+            while (_filled < count)
+            {
+                var read = _stream.Read(_buffer, _filled, _buffer.Length - _filled);
+                if (read == 0)
+                {
+                    throw new InvalidDataException("postings.bin ended early.");
+                }
+
+                _filled += read;
+            }
+        }
+
+        private void Fill()
+        {
+            var have = _filled - _pos;
+            if (have > 0 && _pos > 0)
+            {
+                Buffer.BlockCopy(_buffer, _pos, _buffer, 0, have);
+            }
+
+            _pos = 0;
+            _filled = have;
+            var read = _stream.Read(_buffer, _filled, _buffer.Length - _filled);
+            _filled += read;
+        }
     }
 
     private static int RequiredInt(JsonElement root, string name) =>

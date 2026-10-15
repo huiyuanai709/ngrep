@@ -87,6 +87,29 @@ internal sealed class SearchQuery
     public int MaxDegreeOfParallelism { get; init; }
 
     public CancellationToken CancellationToken { get; init; }
+
+    /// <summary>When set, matches are emitted in path order as each file finishes and are not retained.</summary>
+    public SearchEvents? Events { get; init; }
+}
+
+internal sealed class SearchEvents
+{
+    public Action<string?>? Note { get; init; }
+
+    public Action<SearchBatch>? Batch { get; init; }
+}
+
+internal readonly struct SearchBatch
+{
+    public required string Path { get; init; }
+
+    public required List<SearchMatch> Matches { get; init; }
+
+    public bool Examined { get; init; }
+
+    public bool Matched { get; init; }
+
+    public bool PrefilterMiss { get; init; }
 }
 
 internal sealed class SearchOutcome
@@ -112,6 +135,13 @@ internal sealed class SearchOutcome
 
     public int LinesMatched { get; init; }
 
+    public int MatchCount { get; init; }
+
+    public int WithoutCount { get; init; }
+
+    /// <summary>True when matches were handed to <see cref="SearchEvents"/> and <see cref="SearchOutcome.Matches"/> is empty.</summary>
+    public bool Streamed { get; init; }
+
     public long ElapsedMilliseconds { get; init; }
 }
 
@@ -136,6 +166,9 @@ internal sealed class SearchTally
 
 internal static class Searcher
 {
+    /// <summary>Test hook. Invoked with the relative path before an indexed or scanned file is read.</summary>
+    internal static Action<string>? BeforeConfirm { get; set; }
+
     public static async Task<SearchOutcome> Search(SearchQuery query)
     {
         query.CancellationToken.ThrowIfCancellationRequested();
@@ -157,7 +190,7 @@ internal static class Searcher
         var skipIndex = query.ForceScan || !plan.ApplyGitIgnore;
         if (!skipIndex && query.IndexDirectory != null)
         {
-            var explicitIndex = IndexStore.TryLoad(query.IndexDirectory)
+            var explicitIndex = LoadForSearch(query.IndexDirectory, plan)
                 ?? throw new InvalidDataException($"Index not found at {Path.GetFullPath(query.IndexDirectory)}.");
             return await SearchIndex(explicitIndex, start, query, plan, workers, tally, clock);
         }
@@ -167,7 +200,7 @@ internal static class Searcher
             var discovered = IndexPaths.Discover(start);
             if (discovered != null)
             {
-                var index = IndexStore.TryLoad(discovered);
+                var index = LoadForSearch(discovered, plan);
                 if (index != null)
                 {
                     return await SearchIndex(index, start, query, plan, workers, tally, clock);
@@ -176,8 +209,28 @@ internal static class Searcher
         }
 
         var note = ScanNote(query, indexSkipped: skipIndex && !query.ForceScan && IndexWouldApply(start, query));
-        var scanned = await ContentScan(start, plan, workers, query.CancellationToken, tally);
+        var scanned = await ContentScan(start, plan, workers, query.CancellationToken, tally, query, note);
+        if (query.Events?.Batch != null)
+        {
+            return FinishStream(usedIndex: false, note, scanned.Workers, usedPrefilter: false, scanned.Stream!, tally, clock);
+        }
+
         return Finish(scanned.Matches, usedIndex: false, note, scanned.Workers, usedPrefilter: false, scanned.Without, tally, clock);
+    }
+
+    private static IndexData? LoadForSearch(string directory, MatchPlan plan)
+    {
+        HashSet<string>? grams = null;
+        if (plan.CanUseTrigrams && plan.Literals != null)
+        {
+            grams = new HashSet<string>(StringComparer.Ordinal);
+            if (!plan.Literals.TryCollectGrams(grams))
+            {
+                grams = null;
+            }
+        }
+
+        return IndexStore.TryLoadForSearch(directory, grams);
     }
 
     private static int ResolveWorkers(SearchQuery query)
@@ -224,8 +277,14 @@ internal static class Searcher
         var prefix = RelativeTo(root, start, out var outside, out var prefixIsFile);
         if (outside)
         {
-            var scanned = await ContentScan(start, plan, workers, query.CancellationToken, tally);
-            return Finish(scanned.Matches, usedIndex: false, "path is outside the indexed root; scanned content", scanned.Workers, usedPrefilter: false, scanned.Without, tally, clock);
+            const string note = "path is outside the indexed root; scanned content";
+            var scanned = await ContentScan(start, plan, workers, query.CancellationToken, tally, query, note);
+            if (scanned.Stream != null)
+            {
+                return FinishStream(usedIndex: false, note, scanned.Workers, usedPrefilter: false, scanned.Stream!, tally, clock);
+            }
+
+            return Finish(scanned.Matches, usedIndex: false, note, scanned.Workers, usedPrefilter: false, scanned.Without, tally, clock);
         }
 
         HashSet<int>? selectedIds = null;
@@ -236,7 +295,9 @@ internal static class Searcher
             selectedIds = ids;
         }
 
+        var stream = query.Events?.Batch != null ? new StreamCount(query.Events) : null;
         var files = new List<ConfirmFile>();
+        var jobs = stream != null ? new List<EmitJob>() : null;
         var without = plan.Report == ReportMode.FilesWithoutMatch ? new ConcurrentBag<string>() : null;
         foreach (var document in index.Documents)
         {
@@ -255,16 +316,14 @@ internal static class Searcher
                 continue;
             }
 
-            var full = Path.Combine(root, document.Path.Replace('/', Path.DirectorySeparatorChar));
-            if (!File.Exists(full))
-            {
-                continue;
-            }
-
             if (selectedIds != null && !selectedIds.Contains(document.Id))
             {
-                // A required literal is absent, so the file cannot match.
-                if (without != null)
+                // A required literal is absent, so the file cannot match and is not opened.
+                if (stream != null)
+                {
+                    jobs!.Add(new EmitJob(false, new ConfirmFile("", document.Path)));
+                }
+                else if (without != null)
                 {
                     without.Add(document.Path);
                 }
@@ -272,16 +331,38 @@ internal static class Searcher
                 continue;
             }
 
-            files.Add(new ConfirmFile(full, document.Path));
+            var full = Path.Combine(root, document.Path.Replace('/', Path.DirectorySeparatorChar));
+            var file = new ConfirmFile(full, document.Path);
+            if (stream != null)
+            {
+                jobs!.Add(new EmitJob(true, file));
+            }
+            else if (File.Exists(full))
+            {
+                files.Add(file);
+            }
         }
 
-        var degree = files.Count > 1 ? workers : 1;
+        var degree = (stream != null ? jobs!.Count : files.Count) > 1 ? workers : 1;
         var stopOnMatch = plan.Report == ReportMode.Quiet && plan.StopAtFirst;
+        if (stream != null)
+        {
+            query.Events?.Note?.Invoke(null);
+            await AsyncScheduler.EmitOrdered(
+                jobs!,
+                degree,
+                query.CancellationToken,
+                (file, local, token) => TryCollectAsync(file, plan, local, stats: null, filesWithoutMatch: null, tally, token, errorIfUnreadable: prefixIsFile, checkExists: true),
+                (job, matches, result) => stream.Accept(job, matches, result),
+                stopOnMatch);
+            return FinishStream(usedIndex: true, note: null, degree, usedPrefilter, stream, tally, clock);
+        }
+
         var matches = await AsyncScheduler.Run(
             files,
             degree,
             query.CancellationToken,
-            (file, local, token) => TryCollectAsync(file, plan, local, stats: null, without, tally, token, errorIfUnreadable: prefixIsFile),
+            (file, local, token) => TryCollectAsync(file, plan, local, stats: null, without, tally, token, errorIfUnreadable: prefixIsFile, checkExists: false),
             stopOnMatch);
 
         return Finish(matches, usedIndex: true, note: null, degree, usedPrefilter, without, tally, clock);
@@ -291,11 +372,12 @@ internal static class Searcher
     {
         if (query.IndexDirectory != null)
         {
-            return IndexStore.TryLoad(query.IndexDirectory) != null;
+            var full = Path.GetFullPath(query.IndexDirectory);
+            return File.Exists(Path.Combine(full, "manifest.json"))
+                || File.Exists(Path.Combine(full + ".bak", "manifest.json"));
         }
 
-        var discovered = IndexPaths.Discover(start);
-        return discovered != null && IndexStore.TryLoad(discovered) != null;
+        return IndexPaths.Discover(start) != null;
     }
 
     private static string ScanNote(SearchQuery query, bool indexSkipped)
@@ -324,14 +406,17 @@ internal static class Searcher
         return "no index found; scanned content";
     }
 
-    private static async Task<(List<SearchMatch> Matches, int Workers, ConcurrentBag<string>? Without)> ContentScan(
+    private static async Task<ScanResult> ContentScan(
         string start,
         MatchPlan plan,
         int workers,
         CancellationToken cancellation,
-        SearchTally tally)
+        SearchTally tally,
+        SearchQuery query,
+        string? note)
     {
-        var without = plan.Report == ReportMode.FilesWithoutMatch ? new ConcurrentBag<string>() : null;
+        var stream = query.Events?.Batch != null ? new StreamCount(query.Events) : null;
+        var without = stream == null && plan.Report == ReportMode.FilesWithoutMatch ? new ConcurrentBag<string>() : null;
         if (File.Exists(start))
         {
             var parent = Path.GetDirectoryName(start) ?? start;
@@ -340,15 +425,51 @@ internal static class Searcher
             // includeHidden so a path the user named is not treated as skipped merely for being a dotfile.
             if ((!plan.ApplyGitIgnore || !IsIgnoredFile(parent, start)) && plan.Filter.Accepts(relative))
             {
-                await TryCollectAsync(new ConfirmFile(start, relative), plan, matches, stats: null, without, tally, cancellation, errorIfUnreadable: true);
+                var result = await TryCollectAsync(new ConfirmFile(start, relative), plan, matches, stats: null, without, tally, cancellation, errorIfUnreadable: true, checkExists: false);
+                query.Events?.Note?.Invoke(note);
+                stream?.AcceptFile(relative, matches, result);
+            }
+            else
+            {
+                query.Events?.Note?.Invoke(note);
             }
 
-            return (matches, 1, without);
+            return new ScanResult(matches, 1, without, stream);
         }
+
+        query.Events?.Note?.Invoke(note);
 
         var stats = new WalkStats();
         var degree = workers > 1 ? workers : 1;
         var stopOnMatch = plan.Report == ReportMode.Quiet && plan.StopAtFirst;
+        if (stream != null && !stopOnMatch)
+        {
+            var listed = new List<ConfirmFile>();
+            foreach (var file in TreeWalker.Enumerate(start, IndexPaths.DefaultFor(start), stats, plan.ApplyGitIgnore, plan.IncludeHidden))
+            {
+                if (plan.Filter.Accepts(file.RelativePath))
+                {
+                    listed.Add(new ConfirmFile(file.FullPath, file.RelativePath));
+                }
+            }
+
+            listed.Sort(static (left, right) => string.CompareOrdinal(left.RelativePath, right.RelativePath));
+            var jobs = new EmitJob[listed.Count];
+            for (var i = 0; i < listed.Count; i++)
+            {
+                jobs[i] = new EmitJob(true, listed[i]);
+            }
+
+            await AsyncScheduler.EmitOrdered(
+                jobs,
+                degree,
+                cancellation,
+                (file, local, token) => TryCollectAsync(file, plan, local, stats, filesWithoutMatch: null, tally, token),
+                (job, matches, result) => stream.Accept(job, matches, result),
+                stopOnMatch: false);
+            return new ScanResult([], degree, null, stream);
+        }
+
         var found = await AsyncScheduler.Scan(
             start,
             IndexPaths.DefaultFor(start),
@@ -361,7 +482,18 @@ internal static class Searcher
             (file, local, token) => TryCollectAsync(file, plan, local, stats, without, tally, token),
             stopOnMatch);
 
-        return (found, degree, without);
+        return new ScanResult(found, degree, without, stream);
+    }
+
+    private readonly struct ScanResult(List<SearchMatch> matches, int workers, ConcurrentBag<string>? without, StreamCount? stream)
+    {
+        public List<SearchMatch> Matches { get; } = matches;
+
+        public int Workers { get; } = workers;
+
+        public ConcurrentBag<string>? Without { get; } = without;
+
+        public StreamCount? Stream { get; } = stream;
     }
 
     private static bool IsIgnoredFile(string walkRoot, string fullPath)
@@ -371,7 +503,7 @@ internal static class Searcher
             string.Equals(file.FullPath, fullPath, StringComparison.Ordinal));
     }
 
-    private static async ValueTask TryCollectAsync(
+    private static async ValueTask<ConfirmResult> TryCollectAsync(
         ConfirmFile file,
         MatchPlan plan,
         List<SearchMatch> matches,
@@ -379,19 +511,27 @@ internal static class Searcher
         ConcurrentBag<string>? filesWithoutMatch,
         SearchTally tally,
         CancellationToken cancellation,
-        bool errorIfUnreadable = false)
+        bool errorIfUnreadable = false,
+        bool checkExists = false)
     {
+        if (checkExists && !File.Exists(file.FullPath))
+        {
+            return ConfirmResult.Skip;
+        }
+
+        BeforeConfirm?.Invoke(file.RelativePath);
         var stop = ByteConfirm.ArmFresh(plan);
         try
         {
             using var read = await TextFiles.ReadAsync(file.FullPath, stop, cancellation);
             ByteConfirm.Adopt(stop);
-            if (MatchLoaded(read, file, plan, matches, stats, filesWithoutMatch, tally, errorIfUnreadable, out var text))
+            if (MatchLoaded(read, file, plan, matches, stats, filesWithoutMatch, tally, errorIfUnreadable, out var text, out var examined, out var matched))
             {
-                return;
+                return new ConfirmResult(examined, matched);
             }
 
-            CollectDecoded(text, file, plan, matches, filesWithoutMatch, tally);
+            matched = CollectDecoded(text, file, plan, matches, filesWithoutMatch, tally);
+            return new ConfirmResult(true, matched);
         }
         finally
         {
@@ -409,9 +549,13 @@ internal static class Searcher
         ConcurrentBag<string>? filesWithoutMatch,
         SearchTally tally,
         bool errorIfUnreadable,
-        out string text)
+        out string text,
+        out bool examined,
+        out bool matched)
     {
         text = "";
+        examined = false;
+        matched = false;
         switch (read.Kind)
         {
             case ReadKind.TooLarge:
@@ -438,6 +582,8 @@ internal static class Searcher
                 filesWithoutMatch?.Add(file.RelativePath);
             }
 
+            examined = true;
+            matched = byteMatched;
             return true;
         }
 
@@ -446,6 +592,7 @@ internal static class Searcher
         {
             tally.File(matched: false);
             filesWithoutMatch?.Add(file.RelativePath);
+            examined = true;
             return true;
         }
 
@@ -457,6 +604,8 @@ internal static class Searcher
                 filesWithoutMatch?.Add(file.RelativePath);
             }
 
+            examined = true;
+            matched = automatonMatched;
             return true;
         }
 
@@ -468,6 +617,8 @@ internal static class Searcher
                 filesWithoutMatch?.Add(file.RelativePath);
             }
 
+            examined = true;
+            matched = prefiltered;
             return true;
         }
 
@@ -475,7 +626,7 @@ internal static class Searcher
         return false;
     }
 
-    private static void CollectDecoded(
+    private static bool CollectDecoded(
         string text,
         ConfirmFile file,
         MatchPlan plan,
@@ -492,7 +643,7 @@ internal static class Searcher
                 filesWithoutMatch?.Add(file.RelativePath);
             }
 
-            return;
+            return hit;
         }
 
         var before = matches.Count;
@@ -503,6 +654,8 @@ internal static class Searcher
         {
             filesWithoutMatch?.Add(file.RelativePath);
         }
+
+        return matched;
     }
 
     private static SearchOutcome Finish(
@@ -516,6 +669,7 @@ internal static class Searcher
         Stopwatch clock)
     {
         matches.Sort(CompareMatches);
+        var filesWithout = NormalizeWithout(without);
         return new SearchOutcome
         {
             Matches = matches,
@@ -524,12 +678,84 @@ internal static class Searcher
             UsedTrigramPrefilter = usedPrefilter,
             Confirmation = workers > 1 ? "parallel" : "sequential",
             Workers = workers,
-            FilesWithoutMatch = NormalizeWithout(without),
+            FilesWithoutMatch = filesWithout,
             FilesSearched = tally.FilesSearched,
             FilesMatched = tally.FilesMatched,
             LinesMatched = CountMatchedLines(matches),
+            MatchCount = matches.Count,
+            WithoutCount = filesWithout.Length,
             ElapsedMilliseconds = clock.ElapsedMilliseconds,
         };
+    }
+
+    private static SearchOutcome FinishStream(
+        bool usedIndex,
+        string? note,
+        int workers,
+        bool usedPrefilter,
+        StreamCount stream,
+        SearchTally tally,
+        Stopwatch clock)
+    {
+        return new SearchOutcome
+        {
+            Matches = [],
+            UsedIndex = usedIndex,
+            Note = note,
+            UsedTrigramPrefilter = usedPrefilter,
+            Confirmation = workers > 1 ? "parallel" : "sequential",
+            Workers = workers,
+            FilesWithoutMatch = [],
+            FilesSearched = tally.FilesSearched,
+            FilesMatched = tally.FilesMatched,
+            LinesMatched = stream.Lines,
+            MatchCount = stream.MatchCount,
+            WithoutCount = stream.Without,
+            Streamed = true,
+            ElapsedMilliseconds = clock.ElapsedMilliseconds,
+        };
+    }
+
+    private sealed class StreamCount
+    {
+        private readonly SearchEvents _events;
+
+        public StreamCount(SearchEvents events) => _events = events;
+
+        public int MatchCount { get; private set; }
+
+        public int Lines { get; private set; }
+
+        public int Without { get; private set; }
+
+        public void AcceptFile(string path, List<SearchMatch> matches, ConfirmResult result) =>
+            Accept(new EmitJob(true, new ConfirmFile("", path)), matches, result);
+
+        public void Accept(EmitJob job, List<SearchMatch> matches, ConfirmResult result)
+        {
+            if (matches.Count > 1)
+            {
+                matches.Sort(CompareMatches);
+            }
+
+            var examined = job.Confirm && result.Examined;
+            var matched = job.Confirm && result.Matched;
+            if (!job.Confirm || (examined && !matched))
+            {
+                Without++;
+            }
+
+            MatchCount += matches.Count;
+            Lines += CountMatchedLines(matches);
+            _events.Batch?.Invoke(new SearchBatch
+            {
+                Path = job.File.RelativePath,
+                Matches = matches,
+                Examined = examined,
+                Matched = matched,
+                PrefilterMiss = !job.Confirm,
+            });
+        }
     }
 
     private static int CountMatchedLines(List<SearchMatch> matches)

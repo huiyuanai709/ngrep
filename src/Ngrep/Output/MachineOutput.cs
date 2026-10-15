@@ -10,7 +10,7 @@ internal readonly record struct WatchEvent(string Event, IndexResult Result);
 
 internal readonly record struct SearchPresentation(ReportMode Report, bool OnlyMatching, bool Color, bool Heading = false);
 
-internal static class MachineOutput
+internal static partial class MachineOutput
 {
     private static readonly JsonWriterOptions JsonOptions = new()
     {
@@ -72,7 +72,7 @@ internal static class MachineOutput
         Console.Error.WriteLine("files searched: " + outcome.FilesSearched.ToString(culture));
         Console.Error.WriteLine("files matched: " + outcome.FilesMatched.ToString(culture));
         Console.Error.WriteLine("lines matched: " + outcome.LinesMatched.ToString(culture));
-        Console.Error.WriteLine("matches: " + outcome.Matches.Count.ToString(culture));
+        Console.Error.WriteLine("matches: " + outcome.MatchCount.ToString(culture));
         Console.Error.WriteLine("elapsed ms: " + outcome.ElapsedMilliseconds.ToString(culture));
     }
 
