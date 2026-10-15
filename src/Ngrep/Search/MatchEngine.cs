@@ -15,6 +15,18 @@ internal sealed class MatchPlan
 
     public required bool IgnoreCase { get; init; }
 
+    /// <summary>Smart-case patterns disagree. Byte confirm stays off; the prefilter folds.</summary>
+    public bool MixedCase { get; init; }
+
+    /// <summary>Per-pattern folding when <see cref="MixedCase"/> is set.</summary>
+    public bool[]? PatternIgnoreCase { get; init; }
+
+    /// <summary>
+    /// Case folding for literal prefilters. Mixed smart-case uses an insensitive
+    /// scan, which is a superset, and confirmation applies each pattern's own case.
+    /// </summary>
+    public bool PrefilterIgnoreCase => IgnoreCase || MixedCase;
+
     public required bool Word { get; init; }
 
     public required bool Invert { get; init; }
@@ -74,12 +86,22 @@ internal sealed class MatchPlan
     public static MatchPlan Create(SearchQuery query)
     {
         var patterns = Combine(query);
-        var regex = query.Regex;
-        if (regex && !query.IgnoreCase && VerbatimPattern.TryAll(patterns, out var literals))
+        var folds = FoldFlags(query, patterns);
+        var anyFold = false;
+        var allFold = folds.Length > 0;
+        foreach (var fold in folds)
         {
-            // The interpreter would match these spans exactly. Searching them as literals
-            // keeps the byte engine on the hot path. Ignore-case stays on the regex
-            // engine so Unicode case folding does not change.
+            anyFold |= fold;
+            allFold &= fold;
+        }
+
+        var mixed = anyFold && !allFold;
+        var regex = query.Regex;
+        if (regex && !anyFold && VerbatimPattern.TryAll(patterns, out var literals))
+        {
+            // A case-sensitive pattern with no metacharacters matches the same spans as a literal.
+            // Ignore-case stays on the regex engine so Unicode case folding does not change.
+            // Mixed smart-case is not converted: some patterns fold and some do not.
             patterns = literals;
             regex = false;
         }
@@ -98,11 +120,6 @@ internal sealed class MatchPlan
                 nonBacktracking = true;
             }
 
-            if (query.IgnoreCase)
-            {
-                options |= RegexOptions.IgnoreCase;
-            }
-
             if (query.MultilineDotAll)
             {
                 options |= RegexOptions.Singleline;
@@ -111,13 +128,13 @@ internal sealed class MatchPlan
             regexes = new Regex[patterns.Length];
             var programs = new ByteProgram[patterns.Length];
             var allBytes = !query.Backtracking && !query.LineRegexp;
-            var byteOptions = new ByteAutomaton.Options(query.IgnoreCase, query.MultilineDotAll);
             for (var i = 0; i < patterns.Length; i++)
             {
+                var patternOptions = folds[i] ? options | RegexOptions.IgnoreCase : options;
                 var source = query.LineRegexp ? AnchorWholeLine(patterns[i]) : patterns[i];
                 try
                 {
-                    regexes[i] = new Regex(source, options, TimeSpan.FromSeconds(5));
+                    regexes[i] = new Regex(source, patternOptions, TimeSpan.FromSeconds(5));
                 }
                 catch (NotSupportedException ex) when (nonBacktracking)
                 {
@@ -130,6 +147,7 @@ internal sealed class MatchPlan
                         ex);
                 }
 
+                var byteOptions = new ByteAutomaton.Options(folds[i], query.MultilineDotAll);
                 if (allBytes && ByteAutomaton.TryCompile(patterns[i], byteOptions, out var program))
                 {
                     programs[i] = program;
@@ -159,7 +177,9 @@ internal sealed class MatchPlan
             Patterns = patterns,
             Regexes = regexes,
             Regex = regex,
-            IgnoreCase = query.IgnoreCase,
+            IgnoreCase = allFold && anyFold,
+            MixedCase = mixed,
+            PatternIgnoreCase = mixed ? folds : null,
             Word = query.WordRegexp,
             Invert = query.InvertMatch,
             Before = query.BeforeContext,
@@ -333,7 +353,7 @@ internal sealed class MatchPlan
         }
 
         var lineStarts = new List<int>();
-        if (!plan.Literals.CandidateLineStarts(bytes, plan.IgnoreCase, lineStarts))
+        if (!plan.Literals.CandidateLineStarts(bytes, plan.PrefilterIgnoreCase, lineStarts))
         {
             return false;
         }
@@ -554,16 +574,16 @@ internal sealed class MatchPlan
         }
         else
         {
-            var comparison = plan.IgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-            foreach (var pattern in plan.Patterns)
+            for (var i = 0; i < plan.Patterns.Length; i++)
             {
+                var pattern = plan.Patterns[i];
                 if (pattern.Length == 0)
                 {
                     CollectEmpty(text, plan.Word, hits);
                     continue;
                 }
 
-                CollectLiteral(text, pattern, comparison, plan.Word, hits);
+                CollectLiteral(text, pattern, ComparisonAt(plan, i), plan.Word, hits);
             }
         }
 
@@ -697,10 +717,9 @@ internal sealed class MatchPlan
             return false;
         }
 
-        var comparison = plan.IgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        foreach (var pattern in plan.Patterns)
+        for (var i = 0; i < plan.Patterns.Length; i++)
         {
-            if (lineText.Equals(pattern, comparison))
+            if (lineText.Equals(plan.Patterns[i], ComparisonAt(plan, i)))
             {
                 return true;
             }
@@ -737,10 +756,9 @@ internal sealed class MatchPlan
         }
         else
         {
-            var comparison = plan.IgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-            foreach (var pattern in plan.Patterns)
+            for (var i = 0; i < plan.Patterns.Length; i++)
             {
-                ConsiderFirstLiteral(text, pattern, comparison, plan.Word, ref best);
+                ConsiderFirstLiteral(text, plan.Patterns[i], ComparisonAt(plan, i), plan.Word, ref best);
             }
         }
 
@@ -880,7 +898,7 @@ internal sealed class MatchPlan
         }
 
         var candidates = new bool[lineCount];
-        plan.Literals.MarkLines(text, starts, lineCount, plan.IgnoreCase, candidates);
+        plan.Literals.MarkLines(text, starts, lineCount, plan.PrefilterIgnoreCase, candidates);
         for (var line = 1; line <= lineCount; line++)
         {
             if (!candidates[line - 1])
@@ -972,6 +990,29 @@ internal sealed class MatchPlan
         return text.IndexOf('\n', index, end - index) >= 0;
     }
 
+    private static StringComparison ComparisonAt(MatchPlan plan, int index)
+    {
+        var fold = plan.PatternIgnoreCase != null ? plan.PatternIgnoreCase[index] : plan.IgnoreCase;
+        return fold ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+    }
+
+    private static bool[] FoldFlags(SearchQuery query, string[] patterns)
+    {
+        if (query.PatternIgnoreCase == null)
+        {
+            var folds = new bool[patterns.Length];
+            Array.Fill(folds, query.IgnoreCase);
+            return folds;
+        }
+
+        if (query.PatternIgnoreCase.Length != patterns.Length)
+        {
+            throw new ArgumentException("Pattern case flags do not match the patterns.");
+        }
+
+        return query.PatternIgnoreCase;
+    }
+
     private static string[] Combine(SearchQuery query)
     {
         var extra = query.AdditionalPatterns;
@@ -1017,10 +1058,9 @@ internal sealed class MatchPlan
             return;
         }
 
-        var comparison = plan.IgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        foreach (var pattern in plan.Patterns)
+        for (var i = 0; i < plan.Patterns.Length; i++)
         {
-            MarkLiteral(text, starts, pattern, comparison, plan.Word, lines);
+            MarkLiteral(text, starts, plan.Patterns[i], ComparisonAt(plan, i), plan.Word, lines);
         }
     }
 

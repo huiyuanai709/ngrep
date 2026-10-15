@@ -370,6 +370,9 @@ public class SearchUxTests
         Assert.Contains("--silent", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--line-number", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--no-messages", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--smart-case", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--case-sensitive", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("NGREP_CONFIG_PATH", capture.Stdout, StringComparison.Ordinal);
         Assert.DoesNotContain("--async", capture.Stdout, StringComparison.Ordinal);
     }
 

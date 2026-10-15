@@ -31,13 +31,21 @@ internal static class NgrepCli
         Console.OutputEncoding = Encoding.UTF8;
         try
         {
+            args = ConfigFile.Apply(args, out var config);
             var root = Build();
             var parsed = root.Parse(SearchSyntax.Rewrite(args));
             if (parsed.Errors.Count > 0)
             {
                 foreach (var error in parsed.Errors)
                 {
-                    Console.Error.WriteLine(error.Message);
+                    if (config is { } loaded && ConfigFile.Blames(error.Message, loaded.Arguments))
+                    {
+                        Console.Error.WriteLine($"NGREP_CONFIG_PATH: {loaded.Path}: {error.Message}");
+                    }
+                    else
+                    {
+                        Console.Error.WriteLine(error.Message);
+                    }
                 }
 
                 return ExitCodes.Error;
@@ -73,7 +81,8 @@ internal static class NgrepCli
 
         var root = new RootCommand(
             "Search a tree. `ngrep <pattern> [path]` is the same as `ngrep search`. " +
-            "Uses an index when one is found; otherwise scans file contents.");
+            "Uses an index when one is found; otherwise scans file contents. " +
+            "NGREP_CONFIG_PATH, when set, prepends search arguments from that file (one argument per line).");
         root.Options.Add(format);
         root.Options.Add(index);
 
@@ -103,7 +112,15 @@ internal static class NgrepCli
         };
         var ignoreCase = new Option<bool>("--ignore-case", "-i")
         {
-            Description = "Case-insensitive match (ordinal, culture-invariant).",
+            Description = "Case-insensitive match (ordinal, culture-invariant). The last of -i/--ignore-case, -S/--smart-case, and --case-sensitive wins.",
+        };
+        var smartCase = new Option<bool>("--smart-case", "-S")
+        {
+            Description = "Case-insensitive when the pattern has no uppercase letter; otherwise case-sensitive. Decided per pattern. An uppercase letter in a regex escape (\\W) counts. The last of -i, -S, and --case-sensitive wins.",
+        };
+        var caseSensitive = new Option<bool>("--case-sensitive")
+        {
+            Description = "Case-sensitive match. This is the default. Overrides -i and -S, including flags from NGREP_CONFIG_PATH. -s remains --no-messages.",
         };
         var regex = new Option<bool>("--regex", "-E", "--extended-regexp")
         {
@@ -262,9 +279,14 @@ internal static class NgrepCli
             Description = "After the search, print files searched, files matched, lines matched, matches, and elapsed milliseconds on stderr. Stdout is unchanged. Collects every hit so -l line counts are complete.",
         };
 
-        var searchCommand = new Command("search", "Query the index, or scan contents when no index covers the path. Patterns are .NET regular expressions unless -F.");
+        var searchCommand = new Command(
+            "search",
+            "Query the index, or scan contents when no index covers the path. Patterns are .NET regular expressions unless -F. " +
+            "NGREP_CONFIG_PATH prepends search arguments from that file.");
         searchCommand.Arguments.Add(positionals);
         searchCommand.Options.Add(ignoreCase);
+        searchCommand.Options.Add(smartCase);
+        searchCommand.Options.Add(caseSensitive);
         searchCommand.Options.Add(regex);
         searchCommand.Options.Add(pcre);
         searchCommand.Options.Add(fixedStrings);
@@ -333,7 +355,6 @@ internal static class NgrepCli
                     result,
                     format,
                     index,
-                    ignoreCase,
                     regex,
                     pcre,
                     scan,
@@ -423,7 +444,6 @@ internal static class NgrepCli
         System.CommandLine.ParseResult result,
         Option<string> format,
         Option<string> index,
-        Option<bool> ignoreCase,
         Option<bool> regex,
         Option<bool> pcre,
         Option<bool> scan,
@@ -483,6 +503,7 @@ internal static class NgrepCli
         }
 
         var patterns = LoadPatterns(bound);
+        var casing = CaseFold.Decide(CaseFold.Resolve(result), patterns);
         var report = BindReport(result, filesWith, filesWithout, count, quiet);
         var beforeCount = ContextCount(result, before, context);
         var afterCount = ContextCount(result, after, context);
@@ -529,7 +550,8 @@ internal static class NgrepCli
                 AdditionalPatterns = patterns.Count > 1 ? patterns[1..] : [],
                 Path = bound.Path,
                 IndexDirectory = result.GetValue(index),
-                IgnoreCase = result.GetValue(ignoreCase),
+                IgnoreCase = casing.IgnoreCase,
+                PatternIgnoreCase = casing.PerPattern,
                 // -E/--regex is an alias of this default. -F opts out. -P keeps regex and switches engines.
                 Regex = !result.GetValue(fixedStrings),
                 Backtracking = result.GetValue(pcre),
