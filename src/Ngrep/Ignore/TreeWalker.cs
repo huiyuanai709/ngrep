@@ -55,6 +55,23 @@ internal sealed class WalkStats
 
 internal static class TreeWalker
 {
+    /// <summary>Test hook. Invoked with the directory full path before its entries are listed.</summary>
+    internal static Action<string>? BeforeCollect { get; set; }
+
+    /// <summary>
+    /// A dot name, or a Windows/macOS hidden attribute. <paramref name="includeHidden"/> (--hidden)
+    /// is applied by the caller.
+    /// </summary>
+    internal static bool IsHiddenEntry(string name, bool hiddenAttribute)
+    {
+        if (name.Length > 0 && name[0] == '.')
+        {
+            return true;
+        }
+
+        return hiddenAttribute;
+    }
+
     public static IEnumerable<WalkedFile> Enumerate(
         string walkRoot,
         string? indexDirectory,
@@ -102,12 +119,15 @@ internal static class TreeWalker
         };
     }
 
-    public static void Collect(WalkDir dir, WalkOptions options, WalkStats stats, List<WalkedFile> files, List<WalkDir> children)
+    public static void Collect(WalkDir dir, WalkOptions options, WalkStats stats, List<WalkedFile> files, List<WalkDir> children, CancellationToken cancellation = default)
     {
+        cancellation.ThrowIfCancellationRequested();
+        BeforeCollect?.Invoke(dir.Full);
+        cancellation.ThrowIfCancellationRequested();
         files.Clear();
         children.Clear();
         var sink = new ListSink();
-        if (!DirectoryEntries.TryList(dir.Full, ref sink))
+        if (!DirectoryEntries.TryList(dir.Full, ref sink, cancellation))
         {
             stats.IncrementSkippedUnreadable();
             return;
@@ -164,9 +184,10 @@ internal static class TreeWalker
                 continue;
             }
 
-            // Dotfiles are skipped unless the caller asked for them. .gitignore is still
-            // read above; the file itself is not a hit unless hidden names are included.
-            if (!options.IncludeHidden && name.Length > 0 && name[0] == '.')
+            // Dot names and the Windows/macOS hidden attribute are skipped unless the
+            // caller asked for them. .gitignore is still read above; the file itself is
+            // not a hit unless hidden names are included.
+            if (!options.IncludeHidden && IsHiddenEntry(name, entry.Hidden))
             {
                 continue;
             }
@@ -316,12 +337,12 @@ internal static class TreeWalker
 
     private struct ListSink : IDirentSink
     {
-        public List<(string Name, DirentKind Kind)> Entries;
+        public List<(string Name, DirentKind Kind, bool Hidden)> Entries;
 
-        public void OnEntry(string name, DirentKind kind)
+        public void OnEntry(string name, DirentKind kind, bool hiddenAttribute)
         {
-            Entries ??= new List<(string, DirentKind)>(32);
-            Entries.Add((name, kind));
+            Entries ??= new List<(string, DirentKind, bool)>(32);
+            Entries.Add((name, kind, hiddenAttribute));
         }
     }
 }

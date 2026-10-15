@@ -9,6 +9,22 @@ namespace Ngrep.Cli;
 
 internal static class NgrepCli
 {
+    /// <summary>
+    /// First Ctrl+C cancels <paramref name="cts"/> and returns true. A later one returns
+    /// false; the caller force-exits. In-flight <c>RandomAccess.ReadAsync</c> calls do not
+    /// take the token (Windows overlapped dispose race), so they stop at the next chunk.
+    /// </summary>
+    internal static bool RequestSearchCancel(ref int interrupts, CancellationTokenSource cts)
+    {
+        if (Interlocked.Increment(ref interrupts) > 1)
+        {
+            return false;
+        }
+
+        cts.Cancel();
+        return true;
+    }
+
     public static async Task<int> Run(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
@@ -204,7 +220,7 @@ internal static class NgrepCli
         };
         var hidden = new Option<bool>("--hidden")
         {
-            Description = "Search hidden files and directories (a name starting with '.'). .git, .ngrep, the index directory, and symlinks stay skipped.",
+            Description = "Search hidden files and directories. A name starting with '.' is hidden. On Windows and macOS the hidden attribute counts too. .git, .ngrep, the index directory, and symlinks stay skipped.",
         };
         var color = new Option<string>("--color")
         {
@@ -273,10 +289,16 @@ internal static class NgrepCli
         searchCommand.SetAction(async (result, cancellationToken) =>
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var interrupts = 0;
             void Cancel(object? _, ConsoleCancelEventArgs e)
             {
+                // Keep the process alive so the search can observe the token. A second
+                // Ctrl+C exits immediately: an in-flight read cannot be CancelIoEx'd.
                 e.Cancel = true;
-                cts.Cancel();
+                if (!RequestSearchCancel(ref interrupts, cts))
+                {
+                    Environment.Exit(ExitCodes.Error);
+                }
             }
 
             var hooked = false;

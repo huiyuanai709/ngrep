@@ -157,7 +157,8 @@ public class ShortParentIndexTests
         Assert.False(outcome.UsedIndex);
         Assert.True(outcome.Streamed);
         Assert.Equal(4, outcome.MatchCount);
-        Assert.Equal(["a.txt", "b.txt"], emitted);
+        // Parallel content scans emit as each file finishes, not in path order.
+        Assert.Equal(["a.txt", "b.txt"], emitted.OrderBy(path => path, StringComparer.Ordinal).ToArray());
     }
 
     private static SearchOutcome Search(string path, string pattern, bool scan = false) =>

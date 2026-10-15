@@ -77,6 +77,286 @@ internal static class AsyncScheduler
             halt);
     }
 
+    /// <summary>
+    /// Walks and confirms together. Each accepted file is passed to <paramref name="onFile"/>
+    /// as soon as that file is confirmed. The walk is not collected or sorted first.
+    /// One worker is a depth-first walk. More workers list sibling directories and read
+    /// files at the same time, and they print in completion order.
+    /// Cancel stops new directories and new reads. A read already in
+    /// <see cref="RandomAccess.ReadAsync"/> finishes its current chunk
+    /// (<c>CancellationToken.None</c> there; the token is checked between chunks).
+    /// </summary>
+    public static async Task EmitScan(
+        string walkRoot,
+        string? indexDirectory,
+        WalkStats stats,
+        bool applyGitIgnore,
+        bool includeHidden,
+        PathFilter filter,
+        int workers,
+        CancellationToken cancellation,
+        Func<ConfirmFile, List<SearchMatch>, CancellationToken, ValueTask<ConfirmResult>> collect,
+        Action<ConfirmFile, List<SearchMatch>, ConfirmResult> onFile)
+    {
+        cancellation.ThrowIfCancellationRequested();
+        var root = TreeWalker.CreateRoot(walkRoot, applyGitIgnore);
+        var options = TreeWalker.CreateOptions(root.Full, indexDirectory, applyGitIgnore, includeHidden);
+        if (workers <= 1)
+        {
+            await EmitSequential(root, options, stats, filter, cancellation, collect, onFile);
+            return;
+        }
+
+        await EmitParallel(root, options, stats, filter, workers, cancellation, collect, onFile);
+    }
+
+    private static async Task EmitSequential(
+        WalkDir root,
+        WalkOptions options,
+        WalkStats stats,
+        PathFilter filter,
+        CancellationToken cancellation,
+        Func<ConfirmFile, List<SearchMatch>, CancellationToken, ValueTask<ConfirmResult>> collect,
+        Action<ConfirmFile, List<SearchMatch>, ConfirmResult> onFile)
+    {
+        var stack = new Stack<WalkDir>();
+        stack.Push(root);
+        var files = new List<WalkedFile>(32);
+        var children = new List<WalkDir>(8);
+        while (stack.Count > 0)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            var dir = stack.Pop();
+            TreeWalker.Collect(dir, options, stats, files, children, cancellation);
+            foreach (var file in files)
+            {
+                if (!filter.Accepts(file.RelativePath))
+                {
+                    continue;
+                }
+
+                cancellation.ThrowIfCancellationRequested();
+                var local = new List<SearchMatch>();
+                var confirm = new ConfirmFile(file.FullPath, file.RelativePath);
+                var result = await collect(confirm, local, cancellation);
+                onFile(confirm, local, result);
+            }
+
+            for (var i = children.Count - 1; i >= 0; i--)
+            {
+                stack.Push(children[i]);
+            }
+        }
+    }
+
+    private static async Task EmitParallel(
+        WalkDir root,
+        WalkOptions options,
+        WalkStats stats,
+        PathFilter filter,
+        int workers,
+        CancellationToken cancellation,
+        Func<ConfirmFile, List<SearchMatch>, CancellationToken, ValueTask<ConfirmResult>> collect,
+        Action<ConfirmFile, List<SearchMatch>, ConfirmResult> onFile)
+    {
+        var pump = new ScanPump();
+        using var registration = cancellation.UnsafeRegister(static state => ((ScanPump)state!).Stop(), pump);
+        pump.Schedule(root);
+
+        // Several listers so a large sibling (AppData, node_modules) does not
+        // stand in front of every other top-level directory. Searchers are the
+        // same pool width the user asked for with -j.
+        var walkerCount = Math.Min(workers, Math.Clamp(Math.Max(workers / 2, 2), 2, 8));
+        var walkers = new Task[walkerCount];
+        for (var i = 0; i < walkers.Length; i++)
+        {
+            walkers[i] = Task.Run(() => pump.Walk(options, stats, filter, cancellation), CancellationToken.None);
+        }
+
+        var emitGate = new object();
+        var searchers = new Task[workers];
+        for (var i = 0; i < searchers.Length; i++)
+        {
+            searchers[i] = Task.Run(async () =>
+            {
+                try
+                {
+                    await foreach (var file in pump.Files.Reader.ReadAllAsync(CancellationToken.None))
+                    {
+                        if (Volatile.Read(ref pump.Halt) != 0 || cancellation.IsCancellationRequested)
+                        {
+                            pump.Stop();
+                            break;
+                        }
+
+                        var local = new List<SearchMatch>();
+                        var result = await collect(file, local, cancellation);
+                        lock (emitGate)
+                        {
+                            onFile(file, local, result);
+                        }
+                    }
+                }
+                catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+                {
+                    pump.Stop();
+                }
+                catch (ChannelClosedException)
+                {
+                }
+                catch (Exception ex)
+                {
+                    pump.Fail(ex);
+                }
+            }, CancellationToken.None);
+        }
+
+        try
+        {
+            await Task.WhenAll(walkers.Concat(searchers));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            pump.Fail(ex);
+        }
+
+        if (pump.Failure != null)
+        {
+            throw pump.Failure;
+        }
+
+        cancellation.ThrowIfCancellationRequested();
+    }
+
+    /// <summary>
+    /// Pending-directory count plus the two channels. <see cref="Inflight"/> counts
+    /// directories that have been queued and not yet finished. The last one completes
+    /// both channels so searchers drain and exit.
+    /// </summary>
+    private sealed class ScanPump
+    {
+        public int Halt;
+        public int Inflight;
+        public Exception? Failure;
+        public readonly Channel<WalkDir> Dirs = Channel.CreateUnbounded<WalkDir>(new UnboundedChannelOptions
+        {
+            SingleReader = false,
+            SingleWriter = false,
+        });
+        public readonly Channel<ConfirmFile> Files = Channel.CreateBounded<ConfirmFile>(new BoundedChannelOptions(64)
+        {
+            SingleReader = false,
+            SingleWriter = false,
+            FullMode = BoundedChannelFullMode.Wait,
+        });
+
+        public void Schedule(WalkDir dir)
+        {
+            Interlocked.Increment(ref Inflight);
+            if (!Dirs.Writer.TryWrite(dir))
+            {
+                FinishOne();
+            }
+        }
+
+        public void FinishOne()
+        {
+            if (Interlocked.Decrement(ref Inflight) == 0)
+            {
+                Complete();
+            }
+        }
+
+        public void Complete()
+        {
+            Dirs.Writer.TryComplete();
+            Files.Writer.TryComplete();
+        }
+
+        public void Stop()
+        {
+            Volatile.Write(ref Halt, 1);
+            Complete();
+        }
+
+        public void Fail(Exception ex)
+        {
+            Interlocked.CompareExchange(ref Failure, ex, null);
+            Stop();
+        }
+
+        public async Task Walk(WalkOptions options, WalkStats stats, PathFilter filter, CancellationToken cancellation)
+        {
+            var listed = new List<WalkedFile>(32);
+            var children = new List<WalkDir>(8);
+            try
+            {
+                await foreach (var dir in Dirs.Reader.ReadAllAsync(CancellationToken.None))
+                {
+                    try
+                    {
+                        if (Volatile.Read(ref Halt) != 0 || cancellation.IsCancellationRequested)
+                        {
+                            Stop();
+                            break;
+                        }
+
+                        TreeWalker.Collect(dir, options, stats, listed, children, cancellation);
+                        foreach (var file in listed)
+                        {
+                            if (!filter.Accepts(file.RelativePath))
+                            {
+                                continue;
+                            }
+
+                            if (Volatile.Read(ref Halt) != 0 || cancellation.IsCancellationRequested)
+                            {
+                                Stop();
+                                break;
+                            }
+
+                            await Files.Writer.WriteAsync(new ConfirmFile(file.FullPath, file.RelativePath), cancellation);
+                        }
+
+                        if (Volatile.Read(ref Halt) != 0 || cancellation.IsCancellationRequested)
+                        {
+                            Stop();
+                            break;
+                        }
+
+                        foreach (var child in children)
+                        {
+                            Schedule(child);
+                        }
+                    }
+                    catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+                    {
+                        Stop();
+                        break;
+                    }
+                    catch (ChannelClosedException)
+                    {
+                        Stop();
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        Fail(ex);
+                        break;
+                    }
+                    finally
+                    {
+                        FinishOne();
+                    }
+                }
+            }
+            catch (ChannelClosedException)
+            {
+                Stop();
+            }
+        }
+    }
+
     private static async Task<List<SearchMatch>> ScanSequential(
         WalkDir root,
         WalkOptions options,
@@ -95,7 +375,7 @@ internal static class AsyncScheduler
         {
             cancellation.ThrowIfCancellationRequested();
             var dir = stack.Pop();
-            TreeWalker.Collect(dir, options, stats, files, children);
+            TreeWalker.Collect(dir, options, stats, files, children, cancellation);
             foreach (var file in files)
             {
                 if (!filter.Accepts(file.RelativePath))
@@ -142,7 +422,7 @@ internal static class AsyncScheduler
             }
 
             var dir = stack.Pop();
-            TreeWalker.Collect(dir, options, stats, files, children);
+            TreeWalker.Collect(dir, options, stats, files, children, cancellation);
             foreach (var file in files)
             {
                 if (filter.Accepts(file.RelativePath))

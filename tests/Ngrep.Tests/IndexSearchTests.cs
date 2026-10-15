@@ -7,6 +7,7 @@ using Ngrep.Text;
 
 namespace Ngrep.Tests;
 
+[Collection("walker-hooks")]
 public class IndexSearchTests
 {
     [Fact]

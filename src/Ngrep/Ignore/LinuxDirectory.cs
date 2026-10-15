@@ -12,9 +12,10 @@ internal static partial class LinuxDirectory
     private const int TypeOffset = 18;
     private const int NameOffset = 19;
 
-    public static bool TryList<TSink>(string directory, ref TSink sink)
+    public static bool TryList<TSink>(string directory, ref TSink sink, CancellationToken cancellation)
         where TSink : IDirentSink
     {
+        cancellation.ThrowIfCancellationRequested();
         var dir = OpenDir(directory);
         if (dir == IntPtr.Zero)
         {
@@ -25,6 +26,7 @@ internal static partial class LinuxDirectory
         {
             while (true)
             {
+                cancellation.ThrowIfCancellationRequested();
                 var entry = ReadDir(dir);
                 if (entry == IntPtr.Zero)
                 {
@@ -44,7 +46,9 @@ internal static partial class LinuxDirectory
                     kind = StatKind(directory, name);
                 }
 
-                sink.OnEntry(name, kind);
+                // Unix hidden names start with '.'. The walker checks that. There is no
+                // separate hidden attribute on this path.
+                sink.OnEntry(name, kind, hiddenAttribute: false);
             }
         }
         finally
