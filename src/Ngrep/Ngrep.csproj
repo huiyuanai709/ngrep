@@ -5,7 +5,7 @@
     <TargetFramework>net11.0</TargetFramework>
     <AssemblyName>ngrep</AssemblyName>
     <RootNamespace>Ngrep</RootNamespace>
-    <Version>0.6.0</Version>
+    <Version>0.6.1</Version>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
