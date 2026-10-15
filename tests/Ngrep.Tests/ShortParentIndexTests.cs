@@ -1,6 +1,7 @@
 using Ngrep.Cli;
 using Ngrep.Indexing;
 using Ngrep.Search;
+using Ngrep.Text;
 
 namespace Ngrep.Tests;
 
@@ -118,7 +119,17 @@ public class ShortParentIndexTests
         {
             Directory.SetCurrentDirectory(child);
             using var capture = new Capture();
-            var code = NgrepCli.Run(["a", "--format", "ndjson", "-j", "1"]).GetAwaiter().GetResult();
+            // No path searches stdin when the process stdin is a pipe. This case is the working directory.
+            StandardInput.SetRedirected(false);
+            int code;
+            try
+            {
+                code = NgrepCli.Run(["a", "--format", "ndjson", "-j", "1"]).GetAwaiter().GetResult();
+            }
+            finally
+            {
+                StandardInput.SetRedirected(null);
+            }
             Assert.Equal(ExitCodes.Success, code);
             Assert.Contains("a.txt", capture.Stdout, StringComparison.Ordinal);
             Assert.Contains("word.txt", capture.Stdout, StringComparison.Ordinal);

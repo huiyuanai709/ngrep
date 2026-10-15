@@ -5,6 +5,7 @@ using Ngrep.Ignore;
 using Ngrep.Indexing;
 using Ngrep.Output;
 using Ngrep.Search;
+using Ngrep.Text;
 using Ngrep.Watch;
 
 namespace Ngrep.Cli;
@@ -81,9 +82,11 @@ internal static class NgrepCli
         };
 
         var root = new RootCommand(
-            "Search a tree. `ngrep <pattern> [PATH...]` is the same as `ngrep search`. " +
+            "Search a tree, or stdin when the path is '-' or omitted and stdin is not a terminal. " +
+            "`ngrep <pattern> [PATH...]` is the same as `ngrep search`. " +
             "Uses an index when one is found; otherwise scans file contents. " +
-            "Each PATH is a separate root. No PATH searches `.`. " +
+            "Each PATH is a separate root. No PATH searches `.` when stdin is a terminal. " +
+            "`-f -` reads patterns from stdin and does not search that stream. " +
             "NGREP_CONFIG_PATH, when set, prepends search arguments from that file (one argument per line).");
         root.Options.Add(format);
         root.Options.Add(index);
@@ -109,7 +112,7 @@ internal static class NgrepCli
 
         var positionals = new Argument<string[]>("pattern")
         {
-            Description = "Search pattern and optional paths: <pattern> [PATH...]. With --files, the pattern is omitted and the positional is the path. With -e or -f, every -e value is a pattern and every -f value is a pattern file (OR). A positional written before the first -e or -f is also a pattern; any later positional is a path. No path searches `.`.",
+            Description = "Search pattern and optional paths: <pattern> [PATH...]. '-' reads file contents from stdin. With no path, stdin is searched when it is not a terminal; a terminal still searches `.`. -f - reads patterns from stdin instead, and a path of '-' is then an error. With --files, the pattern is omitted and the positional is the path. With -e or -f, every -e value is a pattern and every -f value is a pattern file (OR). A positional written before the first -e or -f is also a pattern; any later positional is a path. No path searches `.` when stdin is a terminal.",
             Arity = ArgumentArity.ZeroOrMore,
         };
         var ignoreCase = new Option<bool>("--ignore-case", "-i")
@@ -183,7 +186,7 @@ internal static class NgrepCli
         };
         var patternFile = new Option<string[]>("-f", "--file")
         {
-            Description = "Read patterns from a file, one per line. An empty line matches every line. A line starting with # is a pattern, not a comment. '-' reads stdin. Repeatable, OR-ed with -e and a positional pattern.",
+            Description = "Read patterns from a file, one per line. An empty line matches every line. A line starting with # is a pattern, not a comment. '-' reads patterns from stdin (not file contents) and searches the working directory, or the path you passed. A second '-' or a search path of '-' exits 2 because stdin is already in use. Repeatable, OR-ed with -e and a positional pattern.",
             Arity = ArgumentArity.ZeroOrMore,
         };
         var word = new Option<bool>("-w", "--word-regexp")
@@ -312,7 +315,7 @@ internal static class NgrepCli
         var searchCommand = new Command(
             "search",
             "Query the index, or scan contents when no index covers the path. Patterns are .NET regular expressions unless -F. " +
-            "Each PATH is a root; no PATH searches `.`. " +
+            "Each PATH is a root. A path of '-' searches stdin. With no path, a non-terminal stdin is searched instead of the working directory. -f - still means patterns from stdin. " +
             "NGREP_CONFIG_PATH prepends search arguments from that file.");
         searchCommand.Arguments.Add(positionals);
         searchCommand.Options.Add(ignoreCase);
@@ -556,6 +559,7 @@ internal static class NgrepCli
             throw new ArgumentException("-E/--regex, -P/--pcre, and -F/--fixed-strings are mutually exclusive.");
         }
 
+        var searchStdin = StdinSearch.ShouldSearch(bound);
         var patterns = LoadPatterns(bound);
         var casing = CaseFold.Decide(CaseFold.Resolve(result), patterns);
         var report = BindReport(result, filesWith, filesWithout, count, quiet);
@@ -640,7 +644,7 @@ internal static class NgrepCli
             };
         }
 
-        var roots = bound.Paths;
+        var roots = searchStdin ? [StandardInput.DisplayPath] : bound.Paths;
         var multiple = roots.Length > 1;
         var extra = patterns.Count > 1 ? patterns[1..] : [];
         var clock = System.Diagnostics.Stopwatch.StartNew();
@@ -651,12 +655,14 @@ internal static class NgrepCli
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
+                var stdinRoot = searchStdin || (bound.PathExplicit && root == "-");
                 var part = await Searcher.Search(new SearchQuery
                 {
                     Pattern = patterns[0],
                     AdditionalPatterns = extra,
-                    Path = root,
-                    DisplayRoot = Searcher.MultiRootDisplay(root, multiple),
+                    Path = stdinRoot ? StandardInput.DisplayPath : root,
+                    DisplayRoot = stdinRoot ? null : Searcher.MultiRootDisplay(root, multiple),
+                    SearchStdin = stdinRoot,
                     IndexDirectory = result.GetValue(index),
                     IgnoreCase = casing.IgnoreCase,
                     PatternIgnoreCase = casing.PerPattern,

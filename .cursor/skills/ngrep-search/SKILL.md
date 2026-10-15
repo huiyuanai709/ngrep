@@ -24,7 +24,9 @@ The first positional is the pattern. `ngrep .` searches for the regex `.` (any c
 
 Patterns are .NET regular expressions by default (non-backtracking), the same engine as `-E` / `--regex` / `--extended-regexp`. Those flags are aliases of the default, not POSIX ERE and not ripgrep's `-E` encoding flag. `-F` / `--fixed-strings` is literal text. `-P` / `--pcre` is the backtracking interpreter for backreferences and lookaround. When you will parse hits, add `--format ndjson`.
 
-Search reads file bytes asynchronously (task workers and async reads). Files of at least 256 KiB are memory-mapped. That is the only search mode.
+Search reads file bytes asynchronously (task workers and async reads). Files of at least 256 KiB are memory-mapped. That is the only search mode for paths on disk.
+
+`cmd | ngrep pattern` and `ngrep pattern -` search file contents from stdin. The path text is `(standard input)`. With no path, stdin is used only when it is not a terminal; a terminal still searches `.`. `-f -` is patterns from stdin, not the haystack, and `ngrep -f - -` is an error. An explicit path such as `.` searches that path and does not read stdin.
 
 ```bash
 ngrep --format ndjson TODO .

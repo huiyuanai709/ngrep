@@ -3,7 +3,7 @@ using System.CommandLine.Parsing;
 
 namespace Ngrep.Cli;
 
-internal readonly record struct BoundSearch(string[] Patterns, string[] PatternFiles, string[] Paths);
+internal readonly record struct BoundSearch(string[] Patterns, string[] PatternFiles, string[] Paths, bool PathExplicit);
 
 /// <summary>
 /// <c>ngrep &lt;pattern&gt; [PATH...]</c> is rewritten to <c>search</c> unless the first positional
@@ -149,20 +149,24 @@ internal static class SearchSyntax
                 throw new ArgumentException("--files does not take a pattern.");
             }
 
-            return new BoundSearch([], [], filePath == null ? ["."] : [filePath]);
+            return new BoundSearch([], [], filePath == null ? ["."] : [filePath], filePath != null);
         }
 
         if (patterns.Count == 0 && files.Count == 0)
         {
             if (typeList)
             {
-                return new BoundSearch([], [], ["."]);
+                return new BoundSearch([], [], ["."], false);
             }
 
             throw new ArgumentException("Pattern is required. Usage: ngrep <pattern> [PATH...]");
         }
 
-        return new BoundSearch(patterns.ToArray(), files.ToArray(), paths.Count == 0 ? ["."] : paths.ToArray());
+        return new BoundSearch(
+            patterns.ToArray(),
+            files.ToArray(),
+            paths.Count == 0 ? ["."] : paths.ToArray(),
+            paths.Count > 0);
     }
 
     private static void TakePatternSource(string name, string value, List<string> patterns, List<string> files)
@@ -239,7 +243,7 @@ internal static class SearchSyntax
             return Subcommands.Contains(arg);
         }
 
-        // `-e` / `-f` with no path still searches `.`, including when every positional was a pattern source.
+        // `-e` / `-f` with no path is still the search command. The path stays implicit (`.`, or stdin when that stream is the haystack).
         if (sawPatternSource)
         {
             return false;

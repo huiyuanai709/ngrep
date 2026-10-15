@@ -16,6 +16,8 @@ dotnet test
 dotnet run --project src/Ngrep -- index testdata/sample
 dotnet run --project src/Ngrep -- ngrep testdata/sample
 dotnet run --project src/Ngrep -- search ngrep testdata/sample --format ndjson
+echo 'hello ngrep' | dotnet run --project src/Ngrep -- ngrep
+dotnet run --project src/Ngrep -- ngrep -
 ```
 
 `testdata/sample` is a tiny tree with a nested `.gitignore`, a binary file, and a log that should not match.
@@ -32,7 +34,7 @@ ngrep watch <path> [--index <dir>] [--format text|json|ndjson]
 
 `ngrep <pattern> [PATH...]` is the same command as `ngrep search`. The first positional word is a subcommand only when it is `index`, `search`, or `watch`. To search for the literal `index`, run `ngrep search index` or `ngrep -- index`.
 
-Each `PATH` is a root, searched in the order you name them. A path inside another path is searched again. No path searches `.`. `.gitignore` is loaded the same way as a one-path search of that root (from the git root through that directory), and `.ngrep/index` is discovered from that root. `--index` still names one index directory and is applied to each root; a root outside that index is scanned. `-f -` still reads patterns from stdin. A path named `-` is a file, not stdin.
+Each `PATH` is a root, searched in the order you name them. A path inside another path is searched again. No path searches `.`. `.gitignore` is loaded the same way as a one-path search of that root (from the git root through that directory), and `.ngrep/index` is discovered from that root. `--index` still names one index directory and is applied to each root; a root outside that index is scanned. `-f -` still reads patterns from stdin. A path named `-` searches stdin, not a file named `-` (use `./-`). With no path, a terminal searches `.` and a pipe searches stdin.
 
 With one path, printed paths stay relative to the index root or to the directory that was scanned. With two or more paths, each hit is prefixed with the path you named, so `ngrep needle src tests` prints `src/App.cs` and `tests/App.cs`. `.` is not prefixed. `-l`, `--files-without-match`, and `-c` use those same paths. A missing path prints `Path not found` on stderr (unless `-s`) and the exit code is 2; the other paths are still searched. The same scan note is printed once when several roots scan for the same reason.
 
@@ -68,7 +70,37 @@ Patterns are .NET regular expressions unless `-F` / `--fixed-strings` is set. Th
 
 Patterns are OR. `-e` / `--regexp` may be repeated. A positional pattern written before the first `-e` or `-f` is included; once either flag is present, every remaining positional is a path (`ngrep -e foo -e bar src tests`, `ngrep -f pats.txt src`). `-w` keeps a match only when both ends are word boundaries (a Unicode letter, digit, or `_` on one side and a non-word character or the end of the text on the other). `-x` / `--line-regexp` keeps a match only when the entire line matches. The line is the same text ngrep prints: a trailing CR before LF is not part of the line. A literal must equal that text. A regex is run against that text anchored at both ends (`\A(?:pattern)\z`), so `a|aaa` matches a line `aaa`. A pattern that contains a newline does not match a single line, including with `-U`. `-v` prints each line that matches none of the patterns; `text` and `lineText` are that line and `column` is 1.
 
-`-f` / `--file` reads more patterns, one per line, and OR-s them after positional and `-e` patterns. Repeat the flag for several files. `-` reads stdin. The newline is not part of the pattern, and a trailing newline does not add an extra pattern. An empty line is an empty pattern and matches every line (one hit per line, column 1, `text` empty, `lineText` the line). With `-x`, that empty pattern matches only empty lines. A line whose first character is `#` is a normal pattern, including the `#`. Nothing in the file is a comment, and `\#` is not rewritten. The default regex treats `\#` as an escape (`\#` matches `#`). `-F` keeps the backslash literal. `-E` / `--regex` does the same as the default. A missing or unreadable path exits 2 (`Pattern file not found`). A zero-length file that yields no lines, and no `-e` or positional pattern, exits 2 (`Pattern file contains no patterns`). `#` starts a comment only in the config file (`NGREP_CONFIG_PATH`), not in a pattern file. `RIPGREP_CONFIG_PATH` is not read.
+`-f` / `--file` reads more patterns, one per line, and OR-s them after positional and `-e` patterns. Repeat the flag for several files. `-` reads patterns from stdin, not the haystack. The newline is not part of the pattern, and a trailing newline does not add an extra pattern. An empty line is an empty pattern and matches every line (one hit per line, column 1, `text` empty, `lineText` the line). With `-x`, that empty pattern matches only empty lines. A line whose first character is `#` is a normal pattern, including the `#`. Nothing in the file is a comment, and `\#` is not rewritten. The default regex treats `\#` as an escape (`\#` matches `#`). `-F` keeps the backslash literal. `-E` / `--regex` does the same as the default. A missing or unreadable path exits 2 (`Pattern file not found`). A zero-length file that yields no lines, and no `-e` or positional pattern, exits 2 (`Pattern file contains no patterns`). `#` starts a comment only in the config file (`NGREP_CONFIG_PATH`), not in a pattern file. `RIPGREP_CONFIG_PATH` is not read.
+
+### Searching stdin
+
+File contents can come from stdin. That is separate from `-f -`, which is the pattern list.
+
+```bash
+echo 'hello ngrep' | ngrep ngrep
+ngrep ngrep -
+ngrep -f pats.txt -
+echo foo | ngrep -f - src
+```
+
+- `ngrep <pattern> -` reads the haystack from stdin, including when stdin is a terminal (it waits until EOF).
+- `ngrep <pattern>` with no path reads stdin when stdin is not a terminal (a pipe or a redirect). When stdin is a terminal, that command still searches the working directory.
+- `ngrep <pattern> .` or any other path searches that path and leaves stdin unread. Use this when a pipe is attached and you still want the tree. Same rule as ripgrep. Several paths are searched in order; a `-` among them is stdin.
+- The path `-` is stdin, not a file named `-`. Search that file with `./-`.
+
+`-f -` / `--file -` consumes stdin for patterns. With no path, ngrep then searches the working directory, because the stream is already the pattern list. `ngrep -f pats.txt -` and `cat file | ngrep -f pats.txt` read patterns from the file and contents from stdin. `ngrep -f - -` exits 2 (`attempted to read patterns from stdin while also searching stdin`): one stream cannot be both. A second `-f -` exits 2 (`error reading -f/--file from stdin: stdin has already been consumed`).
+
+The path label is `(standard input)`, in the same place ngrep prints a file path.
+
+```text
+(standard input):1:7:hello ngrep
+```
+
+`--heading` prints that name once and `line:column:text` under it. `--no-heading` keeps the prefixed line and wins when both are set. JSON, NDJSON, and rgjson set `path` to `(standard input)`. `-l` prints `(standard input)`. `-c` prints `(standard input):count`. Line numbers and columns stay on. ripgrep's label is `<stdin>`, and it omits the name unless `-H` / `--with-filename`. ngrep has no `-H`, so a one-input search still shows the path the way a single file does.
+
+A NUL in the first 8 KiB skips the stream the way a binary file is skipped (no match, exit 1, no error). More than 32 MiB is the same too-large skip. `--binary` searches the stream. An unreadable stream exits 2 (`Unreadable: (standard input)`); `-s` hides that line and still exits 2. Empty stdin is an empty file: exit 1, and `--files-without-match` prints `(standard input)`.
+
+Stdin does not use the index, so there is no `no index found` note. Globs, types, and ignore rules do not apply, because there is no path to filter. `--scan` and `--index` do not change that. `--stats` counts the stream as one file when its bytes were examined.
 
 `-g` is repeatable. A glob that starts with `!` excludes, same as ripgrep. If any glob does not start with `!`, a file must be selected by an include. When several globs match one path, the last one wins. Globs use gitignore syntax (`*`, `?`, `**`, `[abc]`) and run after ignore files. They do not bring an ignored file back. `ngrep foo -g '*.log'` still skips an ignored log. `--no-ignore` turns every ignore file off (`.gitignore`, `.ignore`, `.rgignore`, `info/exclude`, and the global excludes file) so those files are walked, and `-g` then filters that larger set (`--no-ignore -g '*.log'` prints the log). `--no-ignore-vcs` turns off only the git sources (`.gitignore`, `info/exclude`, and the global file) and still honors `.ignore` and `.rgignore`. `.git`, `.ngrep`, the index directory, and symlinks stay skipped either way.
 
@@ -188,6 +220,7 @@ Dialect gaps that remain:
 - `-s` does not cover unreadable files discovered while walking a directory. Those stay skipped, with no diagnostic and no exit 2. `-s` also does not hide usage errors, bad regexes, or missing pattern files.
 - An unknown character in a short cluster is not expanded (`-nZ` is an error). Options after `--` are literals.
 - Search walks the tree unless `-d` / `--max-depth` caps it. `-r` / `--replace` is print-only and does not change that. `-d 1` reads only the files directly in the directory you named.
+- Stdin contents follow ripgrep: `ngrep pat -`, or no path when stdin is not a terminal. `-f -` is still the pattern list, and combining it with a path of `-` exits 2. The printed name is `(standard input)`. There is no `-H` to hide it. Line numbers stay on.
 - `-c`, `-l`, `-q`, and `--files-without-match` cannot be combined. POSIX only defines the first three.
 
 ### Match fields
