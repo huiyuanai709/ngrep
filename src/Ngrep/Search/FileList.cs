@@ -11,7 +11,7 @@ internal static class FileList
 {
     public static List<string> Collect(
         string path,
-        bool applyGitIgnore,
+        IgnorePolicy policy,
         bool includeHidden,
         PathFilter filter,
         bool noMessages,
@@ -33,8 +33,8 @@ internal static class FileList
         {
             var parent = Path.GetDirectoryName(start) ?? start;
             var relative = Path.GetFileName(start);
-            // A path the user named is not skipped for being hidden. Gitignore still applies.
-            if (filter.Accepts(relative) && (!applyGitIgnore || !TreeWalker.IsIgnoredFile(parent, start)))
+            // A path the user named is not skipped for being hidden. Ignore files still apply.
+            if (filter.Accepts(relative) && (policy == IgnorePolicy.None || !TreeWalker.IsIgnoredFile(parent, start, policy)))
             {
                 return [relative];
             }
@@ -44,8 +44,8 @@ internal static class FileList
 
         var results = new List<string>();
         var stats = new WalkStats();
-        var root = TreeWalker.CreateRoot(start, applyGitIgnore);
-        var options = TreeWalker.CreateOptions(root.Full, IndexPaths.DefaultFor(start), applyGitIgnore, includeHidden);
+        var root = TreeWalker.CreateRoot(start, policy);
+        var options = TreeWalker.CreateOptions(root.Full, IndexPaths.DefaultFor(start), policy, includeHidden);
         var stack = new Stack<WalkDir>();
         stack.Push(root);
         var files = new List<WalkedFile>(32);

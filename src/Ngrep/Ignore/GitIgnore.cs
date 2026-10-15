@@ -330,9 +330,51 @@ internal sealed class IgnoreRule
     }
 }
 
+/// <summary>
+/// One ignore file family. Higher values win over lower ones even when the lower file is more nested.
+/// </summary>
+internal enum IgnoreSource : byte
+{
+    /// <summary><c>core.excludesFile</c>, or the default global excludes file. Lowest precedence.</summary>
+    Global = 0,
+
+    /// <summary><c>$GIT_DIR/info/exclude</c>.</summary>
+    Exclude = 1,
+
+    /// <summary>A <c>.gitignore</c> file.</summary>
+    Git = 2,
+
+    /// <summary>A <c>.ignore</c> file.</summary>
+    DotIgnore = 3,
+
+    /// <summary>A <c>.rgignore</c> file. Highest precedence.</summary>
+    RgIgnore = 4,
+}
+
+/// <summary>
+/// Which ignore sources a walk reads.
+/// <see cref="All"/> is the default. <see cref="CustomOnly"/> is <c>--no-ignore-vcs</c>
+/// (<c>.ignore</c> and <c>.rgignore</c> stay on). <see cref="None"/> is <c>--no-ignore</c>.
+/// </summary>
+internal readonly record struct IgnorePolicy(bool Vcs, bool Custom)
+{
+    public static IgnorePolicy All { get; } = new(true, true);
+
+    public static IgnorePolicy None { get; } = new(false, false);
+
+    public static IgnorePolicy CustomOnly { get; } = new(false, true);
+}
+
+/// <summary>
+/// Ignore rules in ripgrep's source order.
+/// Within one source, parent files are added before child files and the last match wins.
+/// The first source that matches at all decides, from <see cref="IgnoreSource.RgIgnore"/>
+/// down to <see cref="IgnoreSource.Global"/>. A whitelist in <c>.gitignore</c> does not
+/// override a match in <c>.ignore</c>. If a parent directory is ignored, the child is ignored.
+/// </summary>
 internal sealed class IgnoreStack
 {
-    private readonly record struct Frame(string BaseRelative, IgnoreRuleSet Rules);
+    private readonly record struct Frame(IgnoreSource Source, string BaseRelative, IgnoreRuleSet Rules);
 
     private readonly Frame[] _frames;
 
@@ -340,9 +382,12 @@ internal sealed class IgnoreStack
 
     public static IgnoreStack Empty { get; } = new([]);
 
-    public IgnoreStack Add(string baseRelative, string gitignoreContents)
+    public IgnoreStack Add(string baseRelative, string contents) =>
+        Add(IgnoreSource.Git, baseRelative, contents);
+
+    public IgnoreStack Add(IgnoreSource source, string baseRelative, string contents)
     {
-        var rules = IgnoreRuleSet.Parse(gitignoreContents);
+        var rules = IgnoreRuleSet.Parse(contents);
         if (rules.Count == 0)
         {
             return this;
@@ -350,7 +395,7 @@ internal sealed class IgnoreStack
 
         var next = new Frame[_frames.Length + 1];
         _frames.CopyTo(next, 0);
-        next[^1] = new Frame(Normalize(baseRelative), rules);
+        next[^1] = new Frame(source, Normalize(baseRelative), rules);
         return new IgnoreStack(next);
     }
 
@@ -391,21 +436,36 @@ internal sealed class IgnoreStack
             }
         }
 
-        var ignored = false;
-        foreach (var frame in _frames)
+        for (var source = (int)IgnoreSource.RgIgnore; source >= (int)IgnoreSource.Global; source--)
         {
-            if (!TryLocal(frame.BaseRelative, relativePath, out var local))
+            var matched = false;
+            var ignored = false;
+            foreach (var frame in _frames)
             {
-                continue;
+                if ((int)frame.Source != source)
+                {
+                    continue;
+                }
+
+                if (!TryLocal(frame.BaseRelative, relativePath, out var local))
+                {
+                    continue;
+                }
+
+                if (frame.Rules.TryDecide(local, isDirectory, out var decision))
+                {
+                    matched = true;
+                    ignored = decision;
+                }
             }
 
-            if (frame.Rules.TryDecide(local, isDirectory, out var decision))
+            if (matched)
             {
-                ignored = decision;
+                return ignored;
             }
         }
 
-        return ignored;
+        return false;
     }
 
     private static bool TryLocal(string baseRelative, ReadOnlySpan<char> relativePath, out ReadOnlySpan<char> local)

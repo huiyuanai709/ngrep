@@ -143,7 +143,7 @@ public class GitIgnoreTests
             Directory.CreateSymbolicLink(Path.Combine(root, "linkdir"), Path.Combine(root, "sub"));
 
             var stats = new WalkStats();
-            var files = TreeWalker.Enumerate(root, null, stats, applyGitIgnore: true, includeHidden: false)
+            var files = TreeWalker.Enumerate(root, null, stats, includeHidden: false)
                 .Select(file => file.RelativePath)
                 .OrderBy(path => path, StringComparer.Ordinal)
                 .ToArray();

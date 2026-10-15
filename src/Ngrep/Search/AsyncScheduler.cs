@@ -51,7 +51,7 @@ internal static class AsyncScheduler
         string walkRoot,
         string? indexDirectory,
         WalkStats stats,
-        bool applyGitIgnore,
+        IgnorePolicy policy,
         bool includeHidden,
         PathFilter filter,
         int workers,
@@ -60,8 +60,8 @@ internal static class AsyncScheduler
         bool stopOnMatch)
     {
         cancellation.ThrowIfCancellationRequested();
-        var root = TreeWalker.CreateRoot(walkRoot, applyGitIgnore);
-        var options = TreeWalker.CreateOptions(root.Full, indexDirectory, applyGitIgnore, includeHidden);
+        var root = TreeWalker.CreateRoot(walkRoot, policy);
+        var options = TreeWalker.CreateOptions(root.Full, indexDirectory, policy, includeHidden);
         if (workers <= 1)
         {
             return await ScanSequential(root, options, stats, filter, cancellation, collect, stopOnMatch);
@@ -90,7 +90,7 @@ internal static class AsyncScheduler
         string walkRoot,
         string? indexDirectory,
         WalkStats stats,
-        bool applyGitIgnore,
+        IgnorePolicy policy,
         bool includeHidden,
         PathFilter filter,
         int workers,
@@ -99,8 +99,8 @@ internal static class AsyncScheduler
         Action<ConfirmFile, List<SearchMatch>, ConfirmResult> onFile)
     {
         cancellation.ThrowIfCancellationRequested();
-        var root = TreeWalker.CreateRoot(walkRoot, applyGitIgnore);
-        var options = TreeWalker.CreateOptions(root.Full, indexDirectory, applyGitIgnore, includeHidden);
+        var root = TreeWalker.CreateRoot(walkRoot, policy);
+        var options = TreeWalker.CreateOptions(root.Full, indexDirectory, policy, includeHidden);
         if (workers <= 1)
         {
             await EmitSequential(root, options, stats, filter, cancellation, collect, onFile);

@@ -396,7 +396,7 @@ static double TimeWalk(string root, bool gitignore)
     var stats = new WalkStats();
     var clock = Stopwatch.StartNew();
     var n = 0;
-    foreach (var _ in TreeWalker.Enumerate(root, null, stats, gitignore, includeHidden: false))
+    foreach (var _ in TreeWalker.Enumerate(root, null, stats, gitignore ? IgnorePolicy.All : IgnorePolicy.None, includeHidden: false))
     {
         n++;
     }

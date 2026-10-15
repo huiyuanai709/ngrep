@@ -491,7 +491,7 @@ internal static class Searcher
             var relative = Path.GetFileName(start);
             var matches = new List<SearchMatch>();
             // includeHidden so a path the user named is not treated as skipped merely for being a dotfile.
-            if ((!plan.ApplyGitIgnore || !IsIgnoredFile(parent, start)) && plan.Filter.Accepts(relative))
+            if ((plan.Ignore == IgnorePolicy.None || !IsIgnoredFile(parent, start, plan.Ignore)) && plan.Filter.Accepts(relative))
             {
                 var result = await TryCollectAsync(new ConfirmFile(start, relative), plan, matches, stats: null, without, tally, cancellation, errorIfUnreadable: true, checkExists: false);
                 query.Events?.Note?.Invoke(note);
@@ -518,7 +518,7 @@ internal static class Searcher
                 start,
                 IndexPaths.DefaultFor(start),
                 stats,
-                plan.ApplyGitIgnore,
+                plan.Ignore,
                 plan.IncludeHidden,
                 plan.Filter,
                 degree,
@@ -532,7 +532,7 @@ internal static class Searcher
             start,
             IndexPaths.DefaultFor(start),
             stats,
-            plan.ApplyGitIgnore,
+            plan.Ignore,
             plan.IncludeHidden,
             plan.Filter,
             degree,
@@ -554,8 +554,8 @@ internal static class Searcher
         public StreamCount? Stream { get; } = stream;
     }
 
-    private static bool IsIgnoredFile(string walkRoot, string fullPath) =>
-        TreeWalker.IsIgnoredFile(walkRoot, fullPath);
+    private static bool IsIgnoredFile(string walkRoot, string fullPath, IgnorePolicy policy) =>
+        TreeWalker.IsIgnoredFile(walkRoot, fullPath, policy);
 
     private static async ValueTask<ConfirmResult> TryCollectAsync(
         ConfirmFile file,

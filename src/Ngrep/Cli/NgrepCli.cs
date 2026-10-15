@@ -1,5 +1,6 @@
 using System.CommandLine;
 using System.Text;
+using Ngrep.Ignore;
 using Ngrep.Indexing;
 using Ngrep.Output;
 using Ngrep.Search;
@@ -122,7 +123,7 @@ internal static class NgrepCli
         };
         var glob = new Option<string[]>("-g", "--glob")
         {
-            Description = "Include or exclude files. Repeatable. A leading ! excludes (like ripgrep). The last matching glob wins. Globs filter after .gitignore and do not re-include ignored files.",
+            Description = "Include or exclude files. Repeatable. A leading ! excludes (like ripgrep). The last matching glob wins. Globs filter after ignore files and do not re-include ignored files.",
             Arity = ArgumentArity.ZeroOrMore,
         };
         var type = new Option<string[]>("-t", "--type")
@@ -180,15 +181,15 @@ internal static class NgrepCli
         };
         var noIgnore = new Option<bool>("--no-ignore")
         {
-            Description = "Do not respect .gitignore. Globs still filter. .git and .ngrep stay skipped. Scans, because the index omits ignored files.",
+            Description = "Do not respect ignore files (.gitignore, .ignore, .rgignore, git info/exclude, or the global excludes file). Globs still filter. .git and .ngrep stay skipped. Scans, because the index omits ignored files.",
         };
         var noIgnoreVcs = new Option<bool>("--no-ignore-vcs")
         {
-            Description = "Do not respect VCS ignore files. ngrep only reads .gitignore, so this matches --no-ignore. Scans instead of using the index.",
+            Description = "Do not respect version-control ignore rules (.gitignore, git info/exclude, and the global excludes file). .ignore and .rgignore still apply. Scans instead of using the index.",
         };
         var unrestricted = new Option<bool>("--unrestricted", "-u")
         {
-            Description = "Reduce filtering, like ripgrep. Repeat up to three times (-uu, -uuu, or separate -u flags). -u is --no-ignore, -uu also passes --hidden, and -uuu also passes --binary. A fourth -u exits 2. .git, .ngrep, the index directory, and symlinks stay skipped. ngrep does not read .ignore or .rgignore.",
+            Description = "Reduce filtering, like ripgrep. Repeat up to three times (-uu, -uuu, or separate -u flags). -u is --no-ignore (every ignore file, including .ignore and .rgignore), -uu also passes --hidden, and -uuu also passes --binary. A fourth -u exits 2. .git, .ngrep, the index directory, and symlinks stay skipped.",
         };
         var binary = new Option<bool>("--binary")
         {
@@ -200,7 +201,7 @@ internal static class NgrepCli
         };
         var listFiles = new Option<bool>("--files")
         {
-            Description = "List files that would be searched, one relative path per line, and do not search. No pattern. Respects .gitignore, hidden names, globs, and types. Exit 0 if any path is listed, 1 if none, and 2 on error. Does not read file contents, so binary files and files over 32 MiB are listed. Does not use the index. --format is ignored. -q prints nothing and keeps that exit code.",
+            Description = "List files that would be searched, one relative path per line, and do not search. No pattern. Respects ignore files, hidden names, globs, and types. Exit 0 if any path is listed, 1 if none, and 2 on error. Does not read file contents, so binary files and files over 32 MiB are listed. Does not use the index. --format is ignored. -q prints nothing and keeps that exit code.",
         };
         var filesWith = new Option<bool>("--files-with-matches", "-l")
         {
@@ -622,9 +623,12 @@ internal static class NgrepCli
         List<string> paths;
         try
         {
+            var policy = result.GetValue(noIgnore)
+                ? IgnorePolicy.None
+                : result.GetValue(noIgnoreVcs) ? IgnorePolicy.CustomOnly : IgnorePolicy.All;
             paths = FileList.Collect(
                 bound.Path,
-                applyGitIgnore: !result.GetValue(noIgnore) && !result.GetValue(noIgnoreVcs),
+                policy,
                 includeHidden: result.GetValue(hidden),
                 filter,
                 result.GetValue(noMessages),
