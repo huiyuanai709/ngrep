@@ -279,7 +279,11 @@ internal static class NgrepCli
         };
         var hidden = new Option<bool>("--hidden")
         {
-            Description = "Search hidden files and directories. A name starting with '.' is hidden. On Windows and macOS the hidden attribute counts too. .git, .ngrep, the index directory, and symlinks stay skipped.",
+            Description = "Search hidden files and directories. A name starting with '.' is hidden. On Windows and macOS the hidden attribute counts too. .git, .ngrep, and the index directory stay skipped. Symlinks stay skipped unless -L/--follow.",
+        };
+        var follow = new Option<bool>("--follow", "-L")
+        {
+            Description = "Follow symbolic links to files and directories. Off by default. A directory link whose target is already an ancestor is skipped, so a cycle stops. .git, .ngrep, and the index directory stay skipped. Scans, because the index does not follow links.",
         };
         var color = new Option<string>("--color")
         {
@@ -358,6 +362,7 @@ internal static class NgrepCli
         searchCommand.Options.Add(noMessages);
         searchCommand.Options.Add(onlyMatching);
         searchCommand.Options.Add(hidden);
+        searchCommand.Options.Add(follow);
         searchCommand.Options.Add(color);
         searchCommand.Options.Add(multiline);
         searchCommand.Options.Add(multilineDotAll);
@@ -430,6 +435,7 @@ internal static class NgrepCli
                     nullPaths,
                     replace,
                     hidden,
+                    follow,
                     color,
                     multiline,
                     multilineDotAll,
@@ -527,6 +533,7 @@ internal static class NgrepCli
         Option<bool> nullPaths,
         Option<string> replace,
         Option<bool> hidden,
+        Option<bool> follow,
         Option<string> color,
         Option<bool> multiline,
         Option<bool> multilineDotAll,
@@ -677,6 +684,7 @@ internal static class NgrepCli
                     NoIgnore = result.GetValue(noIgnore),
                     NoIgnoreVcs = result.GetValue(noIgnoreVcs),
                     IncludeHidden = result.GetValue(hidden),
+                    FollowSymlinks = result.GetValue(follow),
                     SearchBinary = result.GetValue(binary),
                     Multiline = result.GetValue(multiline),
                     MultilineDotAll = result.GetValue(multilineDotAll),

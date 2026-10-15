@@ -350,6 +350,8 @@ public class SearchUxTests
         Assert.Contains("--count", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--only-matching", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--hidden", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--follow", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("-L", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--unrestricted", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--binary", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("one relative path per line", capture.Stdout, StringComparison.Ordinal);

@@ -427,7 +427,7 @@ internal static class SearchSyntax
         return expanded.ToArray();
     }
 
-    private const string BoolShorts = "iEFPqnsxvwlcoUuSN0";
+    private const string BoolShorts = "iEFPqnsxvwlcoUuSN0L";
 
     private static readonly HashSet<string> KnownFlags = new(StringComparer.Ordinal)
     {

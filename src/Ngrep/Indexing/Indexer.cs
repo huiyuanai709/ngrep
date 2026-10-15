@@ -71,6 +71,7 @@ internal static class Indexer
         long dirtyBytes = 0;
 
         // Hidden files stay in the index so --hidden can filter at search time.
+        // Symlinks stay skipped. Search -L scans, because this snapshot does not follow them.
         var files = TreeWalker.Enumerate(root, indexPath, stats, includeHidden: true).ToList();
         files.Sort(static (left, right) => string.CompareOrdinal(left.RelativePath, right.RelativePath));
         var previous = new DocumentRecord?[files.Count];
