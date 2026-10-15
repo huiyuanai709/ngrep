@@ -106,15 +106,15 @@ internal static class NgrepCli
         };
         var regex = new Option<bool>("--regex", "-E", "--extended-regexp")
         {
-            Description = "Treat patterns as .NET regular expressions, not POSIX BRE or ERE. -E and --extended-regexp are aliases. The default is fixed strings. Required literals are trigram-filtered when extraction is safe.",
+            Description = "Treat patterns as .NET regular expressions (the default). Not POSIX BRE or ERE, and not ripgrep's -E encoding flag. -E and --extended-regexp select this default explicitly. The engine is non-backtracking and linear. Required literals are trigram-filtered when extraction is safe.",
         };
         var fixedStrings = new Option<bool>("--fixed-strings", "-F")
         {
-            Description = "Treat patterns as literal text. This is the default. Mutually exclusive with -E/--regex and -P/--pcre (exit 2).",
+            Description = "Treat patterns as literal text. Mutually exclusive with -E/--regex and -P/--pcre (exit 2).",
         };
         var pcre = new Option<bool>("--pcre", "-P")
         {
-            Description = "Backtracking .NET regex interpreter. Supports backreferences, lookaround, and atomic groups. Implies --regex. The default -E engine is non-backtracking and linear. Mutually exclusive with -F.",
+            Description = "Backtracking .NET regex interpreter. Supports backreferences, lookaround, and atomic groups. The default engine is non-backtracking and linear. Mutually exclusive with -F.",
         };
         var scan = new Option<bool>("--scan")
         {
@@ -249,7 +249,7 @@ internal static class NgrepCli
             Description = "After the search, print files searched, files matched, lines matched, matches, and elapsed milliseconds on stderr. Stdout is unchanged. Collects every hit so -l line counts are complete.",
         };
 
-        var searchCommand = new Command("search", "Query the index, or scan contents when no index covers the path.");
+        var searchCommand = new Command("search", "Query the index, or scan contents when no index covers the path. Patterns are .NET regular expressions unless -F.");
         searchCommand.Arguments.Add(positionals);
         searchCommand.Options.Add(ignoreCase);
         searchCommand.Options.Add(regex);
@@ -505,7 +505,8 @@ internal static class NgrepCli
                 Path = bound.Path,
                 IndexDirectory = result.GetValue(index),
                 IgnoreCase = result.GetValue(ignoreCase),
-                Regex = result.GetValue(regex) || result.GetValue(pcre),
+                // -E/--regex is an alias of this default. -F opts out. -P keeps regex and switches engines.
+                Regex = !result.GetValue(fixedStrings),
                 Backtracking = result.GetValue(pcre),
                 ForceScan = result.GetValue(scan),
                 WordRegexp = result.GetValue(word),

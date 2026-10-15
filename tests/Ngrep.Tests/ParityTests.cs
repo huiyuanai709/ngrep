@@ -436,8 +436,12 @@ public class ParityTests
 
             capture.Clear();
             File.WriteAllText(pats, "\\#hash\n");
-            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-f", pats, tree.Root, "-j", "1"]).GetAwaiter().GetResult());
+            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-F", "-f", pats, tree.Root, "-j", "1"]).GetAwaiter().GetResult());
             Assert.Equal("d.txt:1:1:\\#hash", capture.Stdout.Trim());
+
+            capture.Clear();
+            Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-f", pats, tree.Root, "-l", "-j", "1"]).GetAwaiter().GetResult());
+            Assert.Equal("b.txt\nd.txt", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
 
             capture.Clear();
             Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-f", pats, "--regex", tree.Root, "-l", "-j", "1"]).GetAwaiter().GetResult());

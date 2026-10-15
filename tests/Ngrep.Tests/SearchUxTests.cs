@@ -360,6 +360,8 @@ public class SearchUxTests
         Assert.Contains("--stats", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--extended-regexp", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--fixed-strings", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("the default", capture.Stdout, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not ripgrep's -E encoding flag", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--line-regexp", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--quiet", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--silent", capture.Stdout, StringComparison.Ordinal);

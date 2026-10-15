@@ -7,27 +7,48 @@ namespace Ngrep.Tests;
 public class PosixGrepTests
 {
     [Fact]
-    public void Extended_regexp_is_dotnet_and_fixed_strings_stay_the_default()
+    public void Regex_is_the_default_and_fixed_strings_opt_out()
     {
         using var tree = Temp();
         File.WriteAllText(tree.File("a.txt"), "net\nn.t\n");
+        File.WriteAllText(tree.File("b.txt"), "fooXXXbar\nfoo.*bar\n");
+        File.WriteAllText(tree.File("paren.txt"), "(\n");
 
-        var literal = Run("n.t", tree.Root, "-j", "1");
-        Assert.Equal(ExitCodes.Success, literal.Code);
-        Assert.Equal("a.txt:2:1:n.t", literal.Stdout.Trim());
-
-        var forced = Run("-F", "n.t", tree.Root, "-j", "1");
-        Assert.Equal(literal.Stdout, forced.Stdout);
+        var plain = Run("n.t", tree.Root, "-j", "1");
+        Assert.Equal(ExitCodes.Success, plain.Code);
+        Assert.Equal("a.txt:1:1:net\na.txt:2:1:n.t", plain.Stdout.Trim());
 
         var extended = Run("-E", "n.t", tree.Root, "-j", "1");
-        Assert.Equal(ExitCodes.Success, extended.Code);
-        Assert.Equal("a.txt:1:1:net\na.txt:2:1:n.t", extended.Stdout.Trim());
+        Assert.Equal(plain.Stdout, extended.Stdout);
 
         var alias = Run("--extended-regexp", "n.t", tree.Root, "-j", "1");
-        Assert.Equal(extended.Stdout, alias.Stdout);
+        Assert.Equal(plain.Stdout, alias.Stdout);
 
         var regex = Run("--regex", "n.t", tree.Root, "-j", "1");
-        Assert.Equal(extended.Stdout, regex.Stdout);
+        Assert.Equal(plain.Stdout, regex.Stdout);
+
+        var forced = Run("-F", "n.t", tree.Root, "-j", "1");
+        Assert.Equal(ExitCodes.Success, forced.Code);
+        Assert.Equal("a.txt:2:1:n.t", forced.Stdout.Trim());
+
+        var literalLong = Run("--fixed-strings", "n.t", tree.Root, "-j", "1");
+        Assert.Equal(forced.Stdout, literalLong.Stdout);
+
+        var dotted = Run("foo.*bar", tree.Root, "-j", "1");
+        Assert.Equal(ExitCodes.Success, dotted.Code);
+        Assert.Equal("b.txt:1:1:fooXXXbar\nb.txt:2:1:foo.*bar", dotted.Stdout.Trim());
+        Assert.Equal(dotted.Stdout, Run("-E", "foo.*bar", tree.Root, "-j", "1").Stdout);
+
+        var dottedLiteral = Run("-F", "foo.*bar", tree.Root, "-j", "1");
+        Assert.Equal("b.txt:2:1:foo.*bar", dottedLiteral.Stdout.Trim());
+
+        var bad = Run("(", tree.Root, "-j", "1");
+        Assert.Equal(ExitCodes.Error, bad.Code);
+        Assert.Equal("", bad.Stdout.Trim());
+
+        var literalParen = Run("-F", "(", tree.Root, "-j", "1");
+        Assert.Equal(ExitCodes.Success, literalParen.Code);
+        Assert.Equal("paren.txt:1:1:(", literalParen.Stdout.Trim());
     }
 
     [Fact]
@@ -249,6 +270,7 @@ public class PosixGrepTests
 
         var plus = Run("-E", "-x", "a+", tree.Root, "-j", "1");
         Assert.Equal("a.txt:1:1:aaa\na.txt:4:1:a\na.txt:5:1:aaa", plus.Stdout.Trim());
+        Assert.Equal(plus.Stdout, Run("-x", "a+", tree.Root, "-j", "1").Stdout);
 
         var either = Run("-E", "-x", "a|aaa", Path.Combine(tree.Root, "a.txt"), "-j", "1");
         Assert.Equal("a.txt:1:1:aaa\na.txt:4:1:a\na.txt:5:1:aaa", either.Stdout.Trim());
