@@ -62,18 +62,20 @@ A literal query of length >= 3 is answered by intersecting the posting lists of 
 
 ## Incremental updates
 
-`ngrep index` on an existing directory updates one in-memory snapshot, then commits it once:
+`ngrep index` on an existing directory updates an in-memory snapshot and commits it in chunks. A chunk closes after 4096 added, updated, or removed paths, or after 32 MiB of raw bytes from those adds and updates, whichever comes first. One last commit always runs and refreshes `updatedUtc`.
 
 - unchanged size and mtime: keep the document and its postings; the file is not read
-- same SHA-256: refresh size and mtime in memory; the new timestamps are stored in the commit
+- same SHA-256: refresh size and mtime in memory; the new timestamps are stored in the next chunk
 - content change: delete that `id` from every posting list, insert the new trigrams
-- path missing from the walk: after every walked file has been considered, delete that document and its postings (ordinal path order)
+- path missing from the walk: after every walked file has been considered, delete that document and its postings (ordinal path order), counting toward the same chunk size
 
-A commit rewrites `manifest.json`, `documents.ndjson`, and `postings.bin` into `<index>.tmp` and replaces `<index>` only after those files are complete. The committed directory is a normal v1 index: `documentCount` matches the rows, and postings refer only to ids in that snapshot. `.ngrep/` appears when that commit finishes, not as each file is read.
+A commit rewrites `manifest.json`, `documents.ndjson`, and `postings.bin` into `<index>.tmp` and replaces `<index>` only after those files are complete. The committed directory is a normal v1 index: `documentCount` matches the rows, and postings refer only to ids in that snapshot. `.ngrep/` appears when the first chunk finishes, not as each file is read.
 
-A killed `ngrep index` or `watch` leaves the previous commit untouched. A crash while writing the temp directory does not replace a good index. The final commit also covers an empty tree and refreshes `updatedUtc`.
+A killed `ngrep index` or `watch` leaves the last successful chunk. Files from later chunks are absent. Removals that have not reached a chunk commit are still present. A crash while writing the temp directory does not replace a good index. The final commit also covers an empty tree and refreshes `updatedUtc`.
 
-A caller that supplies a persistence callback is the exception: each added, updated, or removed document is committed before the callback returns, then one more commit stores unchanged hash refreshes and `updatedUtc`. That prefix is what a crash keeps. Removals in that mode still run one path at a time after the walk.
+Memory during the build is the live index plus one chunk, not a second copy of the tree. Document rows and posting lists stay for the whole build (posting lists are about 4 bytes per distinct trigram per file). Decoded text is discarded after trigrams and line starts are taken. At most `workers × 4` files are in flight, and each file is at most 32 MiB. Progress lines are kept only for the open chunk (at most 4096 paths). Serialized document lines used to write a chunk are dropped after that commit. A cold build of 100,000 tiny files peaked near 270 MB RSS.
+
+A caller that supplies a persistence callback is the exception: each added, updated, or removed document is committed before the callback returns, then one more commit stores unchanged hash refreshes and `updatedUtc`. That prefix is what a crash keeps. Removals in that mode still run one path at a time after the walk. The chunk limits are not used.
 
 v1 still rewrites the three files as a whole on every commit. It is not a write-ahead log. A later version can shard postings by document id without changing the trigram or line/column rules.
 

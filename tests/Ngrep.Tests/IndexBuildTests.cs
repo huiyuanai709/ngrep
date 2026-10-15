@@ -96,6 +96,104 @@ public class IndexBuildTests
     }
 
     [Fact]
+    public void Chunk_flush_is_coarser_than_one_commit_per_file()
+    {
+        using var tree = Temp();
+        for (var i = 0; i < 5; i++)
+        {
+            File.WriteAllText(tree.File($"f{i}.txt"), "token-" + i + "\n");
+        }
+
+        var writes = 0;
+        try
+        {
+            IndexStore.TestHookBeforeCommit = () =>
+            {
+                writes++;
+                if (writes == 2)
+                {
+                    throw new IOException("stop after the first chunk");
+                }
+            };
+            var ex = Assert.Throws<IOException>(() => Indexer.Build(
+                tree.Root,
+                maxDegreeOfParallelism: 2,
+                flushFileLimit: 2,
+                flushByteLimit: long.MaxValue));
+            Assert.Equal("stop after the first chunk", ex.Message);
+        }
+        finally
+        {
+            IndexStore.TestHookBeforeCommit = null;
+        }
+
+        var partial = IndexStore.TryLoad(IndexPaths.DefaultFor(tree.Root));
+        Assert.NotNull(partial);
+        Assert.Equal(["f0.txt", "f1.txt"], partial!.Documents.Select(doc => doc.Path).ToArray());
+
+        writes = 0;
+        try
+        {
+            IndexStore.TestHookBeforeCommit = () => writes++;
+            var built = Indexer.Build(
+                tree.Root,
+                showProgress: true,
+                maxDegreeOfParallelism: 2,
+                flushFileLimit: 2,
+                flushByteLimit: long.MaxValue);
+            Assert.Equal(3, built.Added);
+            Assert.Equal(2, built.Unchanged);
+            Assert.Equal(5, built.Documents);
+        }
+        finally
+        {
+            IndexStore.TestHookBeforeCommit = null;
+        }
+
+        Assert.Equal(2, writes);
+
+        for (var i = 0; i < 5; i++)
+        {
+            var hit = Searcher.Search(new SearchQuery
+            {
+                Pattern = "token-" + i,
+                Path = tree.Root,
+                MaxDegreeOfParallelism = 1,
+            }).GetAwaiter().GetResult();
+            Assert.Equal($"f{i}.txt", Assert.Single(hit.Matches).Path);
+        }
+    }
+
+    [Fact]
+    public void Chunk_flush_also_closes_on_a_byte_budget()
+    {
+        using var tree = Temp();
+        var body = new string('a', 1000);
+        File.WriteAllText(tree.File("a.txt"), body);
+        File.WriteAllText(tree.File("b.txt"), body);
+        File.WriteAllText(tree.File("c.txt"), body);
+
+        var writes = 0;
+        try
+        {
+            IndexStore.TestHookBeforeCommit = () => writes++;
+            Indexer.Build(
+                tree.Root,
+                maxDegreeOfParallelism: 1,
+                flushFileLimit: int.MaxValue,
+                flushByteLimit: 1500);
+        }
+        finally
+        {
+            IndexStore.TestHookBeforeCommit = null;
+        }
+
+        Assert.Equal(2, writes);
+        var loaded = IndexStore.TryLoad(IndexPaths.DefaultFor(tree.Root));
+        Assert.Equal(3, loaded!.Documents.Count);
+    }
+
+    [Fact]
     public void Parallel_and_serial_builds_match()
     {
         using var leftTree = Temp();

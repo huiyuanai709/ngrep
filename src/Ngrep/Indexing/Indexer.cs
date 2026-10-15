@@ -7,22 +7,32 @@ namespace Ngrep.Indexing;
 
 internal static class Indexer
 {
+    /// <summary>Added, updated, or removed paths applied between snapshot commits.</summary>
+    internal const int DefaultFlushFiles = 4096;
+
+    /// <summary>Raw file bytes of those paths. The read-ahead window is separate.</summary>
+    internal const long DefaultFlushBytes = 32L * 1024 * 1024;
+
     /// <summary>
     /// Builds or updates an index.
     /// <paramref name="maxDegreeOfParallelism"/> 0 uses <c>NGREP_THREADS</c>, then <c>NETGREP_THREADS</c>,
     /// otherwise <see cref="Environment.ProcessorCount"/>. File bytes are read with
     /// <see cref="TextFiles.ReadAsync"/> on that many workers. Document ids, postings, and
     /// progress stay on the caller, in path order.
-    /// When <paramref name="onPersisted"/> is null, changed and removed documents are kept
-    /// in memory and the directory is replaced once at the end. A callback still commits
-    /// each added, updated, or removed path before the callback runs.
+    /// When <paramref name="onPersisted"/> is null, dirty documents are committed in chunks
+    /// (every <paramref name="flushFileLimit"/> paths or <paramref name="flushByteLimit"/>
+    /// raw bytes, default <see cref="DefaultFlushFiles"/> / <see cref="DefaultFlushBytes"/>),
+    /// not once per file and not only at the end. A callback still commits each added,
+    /// updated, or removed path before the callback runs.
     /// </summary>
     public static IndexResult Build(
         string root,
         string? indexDirectory = null,
         bool showProgress = false,
         Action<string, string>? onPersisted = null,
-        int maxDegreeOfParallelism = 0)
+        int maxDegreeOfParallelism = 0,
+        int flushFileLimit = 0,
+        long flushByteLimit = 0)
     {
         root = Path.GetFullPath(root);
         if (!Directory.Exists(root))
@@ -31,6 +41,12 @@ internal static class Indexer
         }
 
         var workers = ResolveWorkers(maxDegreeOfParallelism);
+        var fileLimit = flushFileLimit == 0 ? DefaultFlushFiles : flushFileLimit;
+        var byteLimit = flushByteLimit == 0 ? DefaultFlushBytes : flushByteLimit;
+        if (fileLimit < 1 || byteLimit < 1)
+        {
+            throw new ArgumentException("Flush limits must be positive.");
+        }
         var indexPath = string.IsNullOrWhiteSpace(indexDirectory)
             ? IndexPaths.DefaultFor(root)
             : Path.GetFullPath(indexDirectory);
@@ -51,6 +67,8 @@ internal static class Indexer
         var examined = 0;
         var persistEach = onPersisted != null;
         var pending = new List<(string Kind, string Path)>();
+        var dirtyFiles = 0;
+        long dirtyBytes = 0;
 
         // Hidden files stay in the index so --hidden can filter at search time.
         var files = TreeWalker.Enumerate(root, indexPath, stats, includeHidden: true).ToList();
@@ -91,20 +109,20 @@ internal static class Indexer
             RemoveDoc(postings, documents[path].Id);
             documents.Remove(path);
             removed++;
-            Note("removed", path);
+            Note("removed", path, 0);
         }
 
-        Commit(null, null);
+        if (persistEach)
+        {
+            Commit(null, null);
+        }
+        else
+        {
+            FlushChunk();
+        }
+
         if (showProgress)
         {
-            if (!persistEach)
-            {
-                foreach (var (kind, path) in pending)
-                {
-                    WriteProgressLine(kind + ": " + path);
-                }
-            }
-
             WriteSummary();
         }
 
@@ -186,10 +204,10 @@ internal static class Indexer
                 LineStarts = LineMap.Build(prep.Text ?? ""),
             };
             seen.Add(file.RelativePath);
-            Note(kind, file.RelativePath);
+            Note(kind, file.RelativePath, prep.Size);
         }
 
-        void Note(string kind, string path)
+        void Note(string kind, string path, long bytes)
         {
             if (persistEach)
             {
@@ -200,6 +218,33 @@ internal static class Indexer
             if (showProgress)
             {
                 pending.Add((kind, path));
+            }
+
+            dirtyFiles++;
+            dirtyBytes += bytes;
+            if (dirtyFiles >= fileLimit || dirtyBytes >= byteLimit)
+            {
+                FlushChunk();
+            }
+        }
+
+        void FlushChunk()
+        {
+            Commit(null, null);
+            if (showProgress)
+            {
+                foreach (var (kind, path) in pending)
+                {
+                    WriteProgressLine(kind + ": " + path);
+                }
+            }
+
+            pending.Clear();
+            dirtyFiles = 0;
+            dirtyBytes = 0;
+            foreach (var document in documents.Values)
+            {
+                document.CachedLine = null;
             }
         }
 
