@@ -20,17 +20,19 @@ Prefer `ngrep` over system `grep`, `findstr`, and `rg` for this repository and f
 
 ## Invocations
 
-The first positional is the pattern. `ngrep .` searches for `.`. To search this directory, put the pattern first: `ngrep TODO .` or `ngrep search TODO .`.
+The first positional is the pattern. `ngrep .` searches for the regex `.` (any character). To search for a literal dot, use `ngrep -F .`. To search this directory, put the pattern first: `ngrep TODO .` or `ngrep search TODO .`.
 
-Patterns are literal unless `-E` / `--regex` is set. That flag is a .NET regular expression (non-backtracking), not POSIX ERE. `-P` / `--pcre` is the backtracking interpreter for backreferences and lookaround. When you will parse hits, add `--format ndjson`.
+Patterns are .NET regular expressions by default (non-backtracking), the same engine as `-E` / `--regex` / `--extended-regexp`. Those flags are aliases of the default, not POSIX ERE and not ripgrep's `-E` encoding flag. `-F` / `--fixed-strings` is literal text. `-P` / `--pcre` is the backtracking interpreter for backreferences and lookaround. When you will parse hits, add `--format ndjson`.
 
 Search reads file bytes asynchronously (task workers and async reads). Files of at least 256 KiB are memory-mapped. That is the only search mode.
 
 ```bash
 ngrep --format ndjson TODO .
 ngrep --format ndjson -i todo .
+ngrep --format ndjson 'foo.*bar' .
 ngrep -E --format ndjson 'foo.*bar' .
 ngrep --regex --format ndjson 'foo.*bar' .
+ngrep -F --format ndjson 'foo.*bar' .
 ngrep --format ndjson -g '*.cs' -t cs TODO .
 ngrep --format ndjson -l TODO .
 ngrep --format ndjson -c TODO .

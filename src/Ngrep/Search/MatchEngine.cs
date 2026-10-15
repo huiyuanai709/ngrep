@@ -44,7 +44,7 @@ internal sealed class MatchPlan
 
     public bool NoMessages { get; init; }
 
-    /// <summary>Default <c>-E</c> engine. False when <c>-P</c> selects the backtracking interpreter.</summary>
+    /// <summary>Default regex engine (also selected by <c>-E</c>). False when <c>-P</c> selects the backtracking interpreter.</summary>
     public bool NonBacktracking { get; init; }
 
     /// <summary>ASCII byte automata for patterns the linear compiler recognized. Null when any pattern opted out.</summary>
