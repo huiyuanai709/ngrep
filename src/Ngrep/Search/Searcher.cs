@@ -90,8 +90,15 @@ internal sealed class SearchQuery
     /// </summary>
     public int? MaxDepth { get; init; }
 
-    /// <summary><c>--binary</c> / the third <c>-u</c>. Search files with a NUL in the first 8 KiB instead of skipping them.</summary>
+    /// <summary><c>--binary</c> / the third <c>-u</c>. Search files with a NUL in the first 8 KiB and print matching lines.</summary>
     public bool SearchBinary { get; init; }
+
+    /// <summary>
+    /// <c>-a</c> / <c>--text</c>. Same read as <see cref="SearchBinary"/>: a NUL in the first 8 KiB
+    /// does not skip the file, and matching lines are printed. Ripgrep's <c>--binary</c> prints
+    /// <c>binary file matches</c> instead of the line; this is the ripgrep flag that prints the line.
+    /// </summary>
+    public bool SearchText { get; init; }
 
     public bool Multiline { get; init; }
 
@@ -247,7 +254,7 @@ internal static class Searcher
             return Finish([], usedIndex: false, note: null, workers: 1, usedPrefilter: false, without: null, tally, clock);
         }
 
-        // Binary files are not in the index, so --binary has to read the tree.
+        // Binary files are not in the index, so --binary and -a/--text have to read the tree.
         var skipIndex = query.ForceScan || !plan.ApplyGitIgnore || plan.SearchBinary || query.FollowSymlinks;
         if (!skipIndex && query.IndexDirectory != null)
         {
@@ -546,30 +553,32 @@ internal static class Searcher
 
     private static string ScanNote(SearchQuery query, bool indexSkipped)
     {
-        var ignore = query.NoIgnore ? "--no-ignore" : query.NoIgnoreVcs ? "--no-ignore-vcs" : null;
-        var binary = query.SearchBinary ? "--binary" : null;
-        var follow = query.FollowSymlinks ? "--follow" : null;
-        string? detail = null;
-        if (ignore != null || binary != null || follow != null)
+        var parts = new List<string>(4);
+        if (query.NoIgnore)
         {
-            var parts = new List<string>(3);
-            if (ignore != null)
-            {
-                parts.Add(ignore);
-            }
-
-            if (binary != null)
-            {
-                parts.Add(binary);
-            }
-
-            if (follow != null)
-            {
-                parts.Add(follow);
-            }
-
-            detail = string.Join(", ", parts);
+            parts.Add("--no-ignore");
         }
+        else if (query.NoIgnoreVcs)
+        {
+            parts.Add("--no-ignore-vcs");
+        }
+
+        if (query.SearchBinary)
+        {
+            parts.Add("--binary");
+        }
+
+        if (query.SearchText)
+        {
+            parts.Add("--text");
+        }
+
+        if (query.FollowSymlinks)
+        {
+            parts.Add("--follow");
+        }
+
+        string? detail = parts.Count == 0 ? null : string.Join(", ", parts);
         if (query.ForceScan && detail != null)
         {
             return $"content scan (--scan, {detail})";
