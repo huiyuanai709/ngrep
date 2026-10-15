@@ -97,7 +97,7 @@ internal static class NgrepCli
 
         var positionals = new Argument<string[]>("pattern")
         {
-            Description = "Search pattern and optional path: <pattern> [path]. With -e or -f, every -e value is a pattern and every -f value is a pattern file (OR). A positional written before the first -e or -f is also a pattern; any later positional is the path.",
+            Description = "Search pattern and optional path: <pattern> [path]. With --files, the pattern is omitted and the positional is the path. With -e or -f, every -e value is a pattern and every -f value is a pattern file (OR). A positional written before the first -e or -f is also a pattern; any later positional is the path.",
             Arity = ArgumentArity.ZeroOrMore,
         };
         var ignoreCase = new Option<bool>("--ignore-case", "-i")
@@ -186,9 +186,21 @@ internal static class NgrepCli
         {
             Description = "Do not respect VCS ignore files. ngrep only reads .gitignore, so this matches --no-ignore. Scans instead of using the index.",
         };
+        var unrestricted = new Option<bool>("--unrestricted", "-u")
+        {
+            Description = "Reduce filtering, like ripgrep. Repeat up to three times (-uu, -uuu, or separate -u flags). -u is --no-ignore, -uu also passes --hidden, and -uuu also passes --binary. A fourth -u exits 2. .git, .ngrep, the index directory, and symlinks stay skipped. ngrep does not read .ignore or .rgignore.",
+        };
+        var binary = new Option<bool>("--binary")
+        {
+            Description = "Search files with a NUL byte in the first 8 KiB. Those files are skipped otherwise. Matches are printed as text. Ripgrep's --binary stops and prints a warning instead of the line. Forces a content scan, because the index omits binary files. Files over 32 MiB stay skipped.",
+        };
         var threads = new Option<int>("-j", "--threads")
         {
             Description = "Workers for file reads. Default is the processor count, or NGREP_THREADS. NETGREP_THREADS is used only when NGREP_THREADS is unset.",
+        };
+        var listFiles = new Option<bool>("--files")
+        {
+            Description = "List files that would be searched, one relative path per line, and do not search. No pattern. Respects .gitignore, hidden names, globs, and types. Exit 0 if any path is listed, 1 if none, and 2 on error. Does not read file contents, so binary files and files over 32 MiB are listed. Does not use the index. --format is ignored. -q prints nothing and keeps that exit code.",
         };
         var filesWith = new Option<bool>("--files-with-matches", "-l")
         {
@@ -271,7 +283,10 @@ internal static class NgrepCli
         searchCommand.Options.Add(invert);
         searchCommand.Options.Add(noIgnore);
         searchCommand.Options.Add(noIgnoreVcs);
+        searchCommand.Options.Add(unrestricted);
+        searchCommand.Options.Add(binary);
         searchCommand.Options.Add(threads);
+        searchCommand.Options.Add(listFiles);
         searchCommand.Options.Add(filesWith);
         searchCommand.Options.Add(filesWithout);
         searchCommand.Options.Add(count);
@@ -333,6 +348,8 @@ internal static class NgrepCli
                     invert,
                     noIgnore,
                     noIgnoreVcs,
+                    listFiles,
+                    binary,
                     threads,
                     filesWith,
                     filesWithout,
@@ -421,6 +438,8 @@ internal static class NgrepCli
         Option<bool> invert,
         Option<bool> noIgnore,
         Option<bool> noIgnoreVcs,
+        Option<bool> listFiles,
+        Option<bool> binary,
         Option<int> threads,
         Option<bool> filesWith,
         Option<bool> filesWithout,
@@ -449,6 +468,11 @@ internal static class NgrepCli
             }
 
             return ExitCodes.Success;
+        }
+
+        if (result.GetValue(listFiles))
+        {
+            return ListFiles(result, glob, type, typeNot, adds, noIgnore, noIgnoreVcs, hidden, quiet, noMessages, filesWith, filesWithout, count, cancellationToken);
         }
 
         var bound = SearchSyntax.Bind(result, typeList: false);
@@ -516,6 +540,7 @@ internal static class NgrepCli
                 NoIgnore = result.GetValue(noIgnore),
                 NoIgnoreVcs = result.GetValue(noIgnoreVcs),
                 IncludeHidden = result.GetValue(hidden),
+                SearchBinary = result.GetValue(binary),
                 Multiline = result.GetValue(multiline),
                 MultilineDotAll = result.GetValue(multilineDotAll),
                 Stats = wantStats,
@@ -569,6 +594,61 @@ internal static class NgrepCli
             ? outcome.WithoutCount > 0
             : outcome.MatchCount > 0;
         return produced ? ExitCodes.Success : ExitCodes.NoMatches;
+    }
+
+    private static int ListFiles(
+        System.CommandLine.ParseResult result,
+        Option<string[]> glob,
+        Option<string[]> type,
+        Option<string[]> typeNot,
+        string[] typeAdds,
+        Option<bool> noIgnore,
+        Option<bool> noIgnoreVcs,
+        Option<bool> hidden,
+        Option<bool> quiet,
+        Option<bool> noMessages,
+        Option<bool> filesWith,
+        Option<bool> filesWithout,
+        Option<bool> count,
+        CancellationToken cancellationToken)
+    {
+        if (result.GetValue(filesWith) || result.GetValue(filesWithout) || result.GetValue(count))
+        {
+            throw new ArgumentException("--files cannot be combined with -l/--files-with-matches, --files-without-match, or -c/--count.");
+        }
+
+        var bound = SearchSyntax.Bind(result, typeList: false, listFiles: true);
+        var filter = PathFilter.Create(Values(result, glob), Values(result, type), Values(result, typeNot), typeAdds);
+        List<string> paths;
+        try
+        {
+            paths = FileList.Collect(
+                bound.Path,
+                applyGitIgnore: !result.GetValue(noIgnore) && !result.GetValue(noIgnoreVcs),
+                includeHidden: result.GetValue(hidden),
+                filter,
+                result.GetValue(noMessages),
+                cancellationToken);
+        }
+        catch (SearchPathException ex)
+        {
+            if (!ex.Suppress)
+            {
+                Console.Error.WriteLine(ex.Message);
+            }
+
+            return ExitCodes.Error;
+        }
+
+        if (!result.GetValue(quiet))
+        {
+            foreach (var path in paths)
+            {
+                Console.WriteLine(path);
+            }
+        }
+
+        return paths.Count > 0 ? ExitCodes.Success : ExitCodes.NoMatches;
     }
 
     private static List<string> LoadPatterns(BoundSearch bound)

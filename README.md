@@ -25,6 +25,7 @@ dotnet run --project src/Ngrep -- search ngrep testdata/sample --format ndjson
 ```text
 ngrep <pattern> [path] [search flags]
 ngrep search <pattern> [path] [search flags]
+ngrep --files [path] [filters]
 ngrep index <path> [--index <dir>] [--format text|json|ndjson] [--quiet|-q]
 ngrep watch <path> [--index <dir>] [--format text|json|ndjson]
 ```
@@ -38,13 +39,13 @@ Search flags:
 [--ignore-case|-i] [-E|--extended-regexp|--regex] [-F|--fixed-strings] [--scan]
 [-e|--regexp <pattern>]... [-f|--file <path>]... [-w|--word-regexp] [-x|--line-regexp] [-v|--invert-match]
 [-l|--files-with-matches] [--files-without-match] [-c|--count] [-q|--quiet|--silent] [-o|--only-matching]
-[-n|--line-number] [-s|--no-messages]
+[--files] [-n|--line-number] [-s|--no-messages]
 [--heading] [--no-heading] [--stats]
 [-g|--glob <glob>]... [-t|--type <type>]... [-T|--type-not <type>]...
 [--type-add <spec>]... [--type-list]
 [-A|--after-context <n>] [-B|--before-context <n>] [-C|--context <n>]
-[-U|--multiline] [--multiline-dotall] [-P|--pcre] [--hidden]
-[--color auto|always|never]
+[-U|--multiline] [--multiline-dotall] [-P|--pcre] [--hidden] [--binary]
+[-u|--unrestricted] [--color auto|always|never]
 [-j|--threads <n>]
 ```
 
@@ -78,7 +79,13 @@ Patterns are OR. `-e` / `--regexp` may be repeated. A positional pattern written
 
 `-o` / `--only-matching` changes text output to `path:line:column:text`, the matched slice, one line per hit. JSON and NDJSON stay `path`, `line`, `column`, `text`, `lineText`. `text` was already the slice. Context flags still fill `before` / `after` in JSON; text `-o` does not print context lines.
 
-Hidden files and directories are skipped by default. A name that starts with `.` is hidden. On Windows and macOS, the hidden file attribute is hidden too, so a content scan of a home directory does not walk `AppData`. `--hidden` searches both. Naming a file, or a directory, still searches that path: `ngrep pat .secret` reads `.secret`, and `ngrep pat .github` reads non-hidden children of `.github`. Hard skips stay skipped with or without `--hidden`, `--no-ignore`, or an explicit path: a directory named `.git` or `.ngrep`, the index directory, and symlinks. `-g` does not bring a skipped hidden path back (same rule as gitignore). A gitignore negation does not un-hide a dotfile; pass `--hidden`. `--no-ignore` does not imply `--hidden`. The index still stores hidden names and hidden-attribute files so `--hidden` can use it. An indexed search still decides hidden from the path string (a dot name), because the index does not store the attribute. A content scan skips both in the walk unless the flag is set.
+Hidden files and directories are skipped by default. A name that starts with `.` is hidden. On Windows and macOS, the hidden file attribute is hidden too, so a content scan of a home directory does not walk `AppData`. `--hidden` searches both. Naming a file, or a directory, still searches that path: `ngrep pat .secret` reads `.secret`, and `ngrep pat .github` reads non-hidden children of `.github`. Hard skips stay skipped with or without `--hidden`, `--no-ignore`, `--binary`, or an explicit path: a directory named `.git` or `.ngrep`, the index directory, and symlinks. `-g` does not bring a skipped hidden path back (same rule as gitignore). A gitignore negation does not un-hide a dotfile; pass `--hidden`. `--no-ignore` does not imply `--hidden`. The index still stores hidden names and hidden-attribute files so `--hidden` can use it. An indexed search still decides hidden from the path string (a dot name), because the index does not store the attribute. A content scan skips both in the walk unless the flag is set.
+
+`-u` / `--unrestricted` stacks like ripgrep, and it may be repeated. `-u` is `--no-ignore`. `-uu` is `--no-ignore --hidden`. `-uuu` is `--no-ignore --hidden --binary`. Separate `-u` flags stack the same way (`-u -u` is `-uu`). A fourth `-u` exits 2. ngrep only reads `.gitignore`, so `-u` does not turn off `.ignore`, `.rgignore`, or global git excludes (those files are not read). `.git`, `.ngrep`, the index directory, and symlinks stay skipped at every level, including `-uuu`. Ripgrep searches `.git` once `-uu` un-hides it.
+
+`--binary` searches a file that has a NUL byte in the first 8 KiB. Without it, that file is skipped and is not a match. With it, the bytes are searched as text and a hit is printed on the match line. That is partial parity with ripgrep: `rg --binary` (what `-uuu` turns on) stops at a match and prints `binary file matches` instead of the line, and `rg -a` is what prints the bytes. ngrep has no separate `-a` / `--text`. Files larger than 32 MiB stay skipped. The index does not store binary files, so `--binary` scans and the stderr note names `--binary`. `--binary` does not imply `--no-ignore` or `--hidden`.
+
+`--files` lists the files a search would walk, one relative path per line, and does not search. No pattern: `ngrep --files`, `ngrep --files src`, `ngrep --files -g '*.cs'`, `ngrep --files -t cs`. The positional is the path. `-e` and `-f` exit 2. Ignore, hidden, glob, and type filters are the same ones search uses, including `-u` / `-uu`. It does not read file contents, so a binary file and a file over 32 MiB are still listed (the same set `-uu` and `-uuu` list). It does not consult the index, so a file added after `index` is listed. `--format` does not change the lines. `-q` prints nothing and still exits 0 when any path would have been listed, or 1 when none would. A missing path is exit 2 (`-s` hides that line). `--files` cannot be combined with `-l`, `--files-without-match`, or `-c`. Hard skips stay unlisted.
 
 `--color` is `auto` (default), `always`, or `never`. `auto` colors text when stdout is a terminal, `NO_COLOR` is unset, and `TERM` is not `dumb`. `--color` alone means `auto`. JSON, NDJSON, and rgjson are never colored. Text uses magenta paths, green line numbers, blue columns, and bold red matches. There is no `--colors` spec.
 
@@ -108,9 +115,9 @@ Stdout formats are unchanged. “Files searched” counts files whose contents w
 
 | Code | When |
 | --- | --- |
-| 0 | Index or watch succeeded, search found at least one match (including `-q`), or `--type-list` / `--help` ran. |
-| 1 | Search finished and found no matches. |
-| 2 | Bad usage, missing path, invalid regex or glob, unknown type, canceled search, unreadable index, or another error. |
+| 0 | Index or watch succeeded, search found at least one match (including `-q`), `--files` listed at least one path (including `-q` when a path would have been listed), or `--type-list` / `--help` ran. |
+| 1 | Search finished and found no matches, or `--files` listed nothing. |
+| 2 | Bad usage, missing path, invalid regex or glob, unknown type, a fourth `-u`, canceled search, unreadable index, or another error. |
 
 The first Ctrl+C cancels a search and exits 2 after `search canceled` on stderr. Listing stops, and reads already in flight stop at the next chunk (the cancel token is not passed to `RandomAccess.ReadAsync`, so Windows does not `CancelIoEx` a handle that is about to be disposed). A second Ctrl+C exits immediately with code 2.
 
@@ -178,7 +185,7 @@ Default: `<root>/.ngrep/index` (`manifest.json`, `documents.ndjson`, `postings.b
 
 - Nested `.gitignore` files apply, from the git root down to the file. Outside a git checkout, only `.gitignore` files under the path you passed are used.
 - `.git`, `.ngrep`, the index directory, and symlinks are always skipped.
-- Binary files (NUL in the first 8 KiB) and files larger than 32 MiB are skipped.
+- Binary files (NUL in the first 8 KiB) are skipped unless `--binary` or `-uuu`. Files larger than 32 MiB are always skipped. `--files` lists both, because it does not read contents.
 - A parent directory that is ignored stays ignored; `!keep.txt` cannot resurrect a file inside `build/` if `build/` itself is ignored. `build/*` plus `!build/keep.txt` can. Details and the glob dialect are in [DESIGN.md](DESIGN.md).
 
 `testdata/sample/skip-me.log`, `src/Nested/scratch.tmp`, and `generated/out.txt` are force-added so the fixture is in git. ngrep still ignores them.
@@ -217,6 +224,7 @@ Still short of ripgrep:
 - The default regex engine is non-backtracking. ASCII patterns with a literal or a simple class run are confirmed on the bytes; everything else in the supported language goes to `RegexOptions.NonBacktracking`, which is linear but slower than ripgrep's lazy DFA on a dense character class with no literal. `-P` is the backtracking interpreter and can be slower still. Backreferences and lookaround are not in the default language. Teddy covers multi-literal fingerprints; it is not a DFA and it does not fold non-ASCII case. `RegexOptions.Compiled` is not used. `dotnet test` and `dotnet run` dispatch at runtime (`Avx512BW`, then `Avx2`, then SSE2 / SSSE3, then scalar). Default `dotnet publish -c Release -r linux-x64` does not. Native AOT's baseline is x86-64-v2, and it does not keep AVX2 or AVX-512 as optional light-up, so those `IsSupported` checks fold off and the native binary keeps the SSE2 / SSSE3 scan (no `%ymm` or `%zmm`). That binary does not fault on a CPU without AVX-512. `/p:IlcInstructionSet=x86-64-v3` emits AVX2, still no AVX-512, and requires AVX2. `/p:IlcInstructionSet=x86-64-v4` emits AVX-512 and will not run without it. The project leaves the property unset. The release workflow publishes the v3 and v4 binaries as separate assets. `dotnet run -c Release --project bench/Ngrep.Bench.csproj` times a warmed scan against `rg` when `rg` is on `PATH`.
 - Trigrams are three characters. A short alternative, a pattern that can match without a literal, lookaround, and backreferences still read every candidate. `-v` does too: a file that lacks the pattern is a hit, so postings cannot drop it. `--files-without-match` records those drops as paths without reading them when the prefilter is safe.
 - `-g` does not re-include a gitignored path or a hidden path. `--no-ignore` / `--no-ignore-vcs` opt out of `.gitignore` only. `--hidden` is separate. A gitignore whitelist does not un-hide a dotfile. A content scan treats a Windows or macOS hidden attribute like a dot name. An indexed search still uses the dot-name rule only.
+- `-uuu` / `--binary` prints a NUL-file match as text. Ripgrep's `--binary` prints `binary file matches` and does not print the line. There is no `-a` / `--text`. `.git` and `.ngrep` stay skipped at `-uuu`. ngrep does not read `.ignore` or `.rgignore`, so `-u` is `--no-ignore` for `.gitignore` only.
 - An empty `-f` pattern matches each line once. Ripgrep's empty regex also reports a zero-width match at every offset (`-o` prints one empty match per byte). There is no `RIPGREP_CONFIG_PATH`.
 - Headings are path plus `line:column:text`. Ripgrep’s default match line has no column unless `--column` is set. Auto headings require a terminal and more than one file whose contents were read. There is no `--vimgrep`, `--with-filename`, or `--null`.
 - `--stats` is five lines on stderr (files searched, files matched, lines matched, matches, elapsed ms). It is not ripgrep’s byte counts or elapsed breakdown, and it does not count prefilter drops as searched.

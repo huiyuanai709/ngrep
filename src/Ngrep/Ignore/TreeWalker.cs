@@ -72,6 +72,25 @@ internal static class TreeWalker
         return hiddenAttribute;
     }
 
+    /// <summary>
+    /// True when a content scan of <paramref name="walkRoot"/> would not yield <paramref name="fullPath"/>.
+    /// Hidden names are included, so a path the user named is not rejected only for a leading dot.
+    /// Symlinks are not yielded, so a named symlink is treated as not searched.
+    /// </summary>
+    public static bool IsIgnoredFile(string walkRoot, string fullPath)
+    {
+        var stats = new WalkStats();
+        foreach (var file in Enumerate(walkRoot, indexDirectory: null, stats, applyGitIgnore: true, includeHidden: true))
+        {
+            if (string.Equals(file.FullPath, fullPath, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     public static IEnumerable<WalkedFile> Enumerate(
         string walkRoot,
         string? indexDirectory,

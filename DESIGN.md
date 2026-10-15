@@ -21,11 +21,15 @@ Decoded file text is not kept. At most `workers × 4` files are being read (the 
 
 Index reads use the same `RandomAccess.ReadAsync` reader as search. The first buffer is 8 KiB, so a NUL in that window stops the read; a text file is then read in full or mapped at 256 KiB. Workers default to the processor count. `NGREP_THREADS` overrides that, and `NETGREP_THREADS` is used only when `NGREP_THREADS` is unset. With one worker the caller reads the files. With more, background threads read and the caller applies ids and path lines in path order.
 
-Shared options: `--format text|json|ndjson|rgjson`, `--index <dir>`. `rgjson` is search-only; `index` and `watch` exit 2 if it is set. Search also has `--ignore-case` / `-i`, `-E` / `--extended-regexp` / `--regex` (.NET regex, the default; not POSIX BRE or ERE, and not ripgrep's `-E` encoding), `-F` / `--fixed-strings` (literal text; exit 2 with `-E` or `-P`), `--scan`, `--no-ignore`, `--no-ignore-vcs`, `--hidden`, `-e` / `--regexp` (repeatable, OR), `-f` / `--file` (pattern files, OR), `-w` / `--word-regexp`, `-x` / `--line-regexp`, `-v` / `--invert-match`, `-l` / `--files-with-matches`, `--files-without-match`, `-c` / `--count`, `-q` / `--quiet` / `--silent`, `-n` / `--line-number` (accepted; line numbers are always printed), `-s` / `--no-messages`, `-o` / `--only-matching`, `--heading`, `--no-heading`, `--stats`, `-g` / `--glob`, `-t` / `--type`, `-T` / `--type-not`, `--type-add`, `--type-list`, `-A` / `-B` / `-C`, `-U` / `--multiline`, `--multiline-dotall`, `--color auto|always|never`, and `-j` / `--threads`.
+Shared options: `--format text|json|ndjson|rgjson`, `--index <dir>`. `rgjson` is search-only; `index` and `watch` exit 2 if it is set. Search also has `--ignore-case` / `-i`, `-E` / `--extended-regexp` / `--regex` (.NET regex, the default; not POSIX BRE or ERE, and not ripgrep's `-E` encoding), `-F` / `--fixed-strings` (literal text; exit 2 with `-E` or `-P`), `--scan`, `--no-ignore`, `--no-ignore-vcs`, `--hidden`, `--binary`, `-u` / `--unrestricted` (repeat up to three times), `--files`, `-e` / `--regexp` (repeatable, OR), `-f` / `--file` (pattern files, OR), `-w` / `--word-regexp`, `-x` / `--line-regexp`, `-v` / `--invert-match`, `-l` / `--files-with-matches`, `--files-without-match`, `-c` / `--count`, `-q` / `--quiet` / `--silent`, `-n` / `--line-number` (accepted; line numbers are always printed), `-s` / `--no-messages`, `-o` / `--only-matching`, `--heading`, `--no-heading`, `--stats`, `-g` / `--glob`, `-t` / `--type`, `-T` / `--type-not`, `--type-add`, `--type-list`, `-A` / `-B` / `-C`, `-U` / `--multiline`, `--multiline-dotall`, `--color auto|always|never`, and `-j` / `--threads`.
 
 `-e` values are patterns. `-f` values are pattern files. A positional token that appears before the first `-e` or `-f` is also a pattern. Any other positional is the single path. The default pattern language is .NET regular expressions (non-backtracking), the same engine as `-E` / `--regex` / `--extended-regexp`. Those flags are aliases of the default. `-F` selects literal text and cannot be combined with `-E` or `-P`. `-w` checks both ends of the match: a boundary is a transition between a word character (Unicode letter, digit, or `_`) and a non-word character, or either end of the text. `-x` requires the whole line. Line text drops a trailing CR. A literal must equal that text. A regex is `\A(?:pattern)\z` on that text, so the original pattern is what trigram extraction sees. `-v` emits every real line that contains no hit. A trailing newline is not an extra line, and an empty file has no lines. `column` is 1 and `text` is the line. `-n` does not change that shape. `-s` hides `Path not found` and `Unreadable` for a path the user named; the exit code is still 2. Walk-time unreadable files stay skipped. `-q` writes no match report and is mutually exclusive with `-c`, `-l`, and `--files-without-match`.
 
-Boolean short options may be clustered (`-nEi`). A value short ends the cluster and takes the rest of the token with `=` (`-nEepat`). A token that already starts with a value short is not rewritten. After `--`, tokens stay literal.
+Boolean short options may be clustered (`-nEi`, `-uu`). A value short ends the cluster and takes the rest of the token with `=` (`-nEepat`). A token that already starts with a value short is not rewritten. After `--`, tokens stay literal. `-u` / `--unrestricted` is counted before parse and rewritten, up to three times: `-u` adds `--no-ignore`, `-uu` also `--hidden`, `-uuu` also `--binary`. A fourth use exits 2. `.git`, `.ngrep`, the index directory, and symlinks stay skipped. ngrep does not read `.ignore` or `.rgignore`.
+
+`--files` prints the walk a content scan would open, one relative path per line, with no pattern. Ignore, hidden, glob, and type filters apply. It does not read bytes, so NUL files and files over 32 MiB are listed, and `-uu` and `-uuu` list the same paths. It does not use the index. `--format` is ignored. Exit 0 if any path is listed, 1 if none, 2 on error. `-q` suppresses the lines and keeps that code. `-e`, `-f`, `-l`, `--files-without-match`, and `-c` exit 2.
+
+`--binary` searches a file with a NUL in the first 8 KiB and prints the match as text. Ripgrep's `--binary` prints a warning and not the line. The 32 MiB cap stays. The index omits those files, so the search scans.
 
 `-l`, `--files-without-match`, `-c`, and `-q` select a report. More than one is exit 2. `-l` keeps the first hit in each file (leftmost index, or the first whole line when `-x` is set) and prints paths, unless `--stats` is set, in which case every hit is collected so the stderr line count is complete and the path list is unchanged. `--files-without-match` prints searched paths with no hit. When the trigram prefilter is safe, documents that miss the required literal are paths without a match and are not read. `-c` counts distinct matching lines per file and omits zeros. `-q` prints nothing on stdout and uses the same per-file stop as `-l` unless `--stats` is set. `-v` inverts the hit before that report: a file of only matching lines is a `--files-without-match` hit, and `-c -v` counts the other lines. Exit 0/1 follows whether that report was non-empty (`-q` included; its stdout stays empty). `-o` replaces `lineText` with `text` in text output only. Machine match objects are not renamed.
 
@@ -43,7 +47,7 @@ Globs follow gitignore syntax via the same interpreter regexes (no `RegexOptions
 
 Context is stored on the match as optional `before` / `after` arrays and is omitted from JSON when the user did not ask for it. Text context lines are `path-line-text`, or `line-text` under a heading. Groups that are not contiguous are split with `--`. A line that is both context and a match is printed once, as a match.
 
-Exit codes stay 0 / 1 / 2. `--type-list` is 0. A canceled search is 2 (`search canceled` on stderr).
+Exit codes stay 0 / 1 / 2. `--type-list` is 0. `--files` is 0 when it lists a path and 1 when it lists none. A fourth `-u` is 2. A canceled search is 2 (`search canceled` on stderr).
 
 `search` paths in the output are relative to the **index root** when an index is used (so `search ngrep src` still prints `src/App.cs`). A content scan prints paths relative to the directory that was scanned. Separators are `/`. Globs and types are matched against that same relative path. A path the user passed is searched even when that path is hidden. Components under it that start with `.` still need `--hidden`.
 
@@ -71,7 +75,7 @@ Line starts on the decoded text use the same dispatch, looking for UTF-16 `\n` 3
 
 Indexing and content scan share one walker.
 
-Hard skips, even if a gitignore negation, `--hidden`, or `--no-ignore` would bring them back:
+Hard skips, even if a gitignore negation, `--hidden`, `--no-ignore`, `--binary`, or `-uuu` would bring them back:
 
 - any directory named `.git` or `.ngrep` (including when that directory is the path you passed)
 - the index directory, when it sits inside the walk
@@ -93,7 +97,7 @@ Then gitignore:
 - Globs: `*` and `?` do not cross `/`. `**` crosses directories. `[abc]` and `[!abc]` work.
 - If a parent directory is ignored, everything under it is ignored. `build/` plus `!build/keep.txt` does **not** bring `keep.txt` back. `build/*` plus `!build/keep.txt` does, because the directory itself is not ignored. This matches git 2.43.
 
-Binary files (a `NUL` in the first 8192 bytes) and files over 32 MiB are not indexed. Global gitexcludes and `$HOME/.config/git/ignore` are not read.
+Binary files (a `NUL` in the first 8192 bytes) and files over 32 MiB are not indexed. `--binary` and the third `-u` search those NUL files as text and force a content scan. The 32 MiB cap stays. Global gitexcludes and `$HOME/.config/git/ignore` are not read. `.ignore` and `.rgignore` are not read.
 
 ## Libraries
 

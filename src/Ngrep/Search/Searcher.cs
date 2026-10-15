@@ -59,6 +59,9 @@ internal sealed class SearchQuery
 
     public bool IncludeHidden { get; init; }
 
+    /// <summary><c>--binary</c> / the third <c>-u</c>. Search files with a NUL in the first 8 KiB instead of skipping them.</summary>
+    public bool SearchBinary { get; init; }
+
     public bool Multiline { get; init; }
 
     public bool MultilineDotAll { get; init; }
@@ -191,7 +194,8 @@ internal static class Searcher
             return Finish([], usedIndex: false, note: null, workers: 1, usedPrefilter: false, without: null, tally, clock);
         }
 
-        var skipIndex = query.ForceScan || !plan.ApplyGitIgnore;
+        // Binary files are not in the index, so --binary has to read the tree.
+        var skipIndex = query.ForceScan || !plan.ApplyGitIgnore || plan.SearchBinary;
         if (!skipIndex && query.IndexDirectory != null)
         {
             if (ShortSubpath(query.IndexDirectory, start, plan))
@@ -445,9 +449,11 @@ internal static class Searcher
     private static string ScanNote(SearchQuery query, bool indexSkipped)
     {
         var ignore = query.NoIgnore ? "--no-ignore" : query.NoIgnoreVcs ? "--no-ignore-vcs" : null;
-        if (query.ForceScan && ignore != null)
+        var binary = query.SearchBinary ? "--binary" : null;
+        string? detail = ignore != null && binary != null ? $"{ignore}, {binary}" : ignore ?? binary;
+        if (query.ForceScan && detail != null)
         {
-            return $"content scan (--scan, {ignore})";
+            return $"content scan (--scan, {detail})";
         }
 
         if (query.ForceScan)
@@ -455,14 +461,14 @@ internal static class Searcher
             return "content scan (--scan)";
         }
 
-        if (indexSkipped && ignore != null)
+        if (indexSkipped && detail != null)
         {
-            return $"scanned content ({ignore})";
+            return $"scanned content ({detail})";
         }
 
-        if (ignore != null)
+        if (detail != null)
         {
-            return $"no index found; scanned content ({ignore})";
+            return $"no index found; scanned content ({detail})";
         }
 
         return "no index found; scanned content";
@@ -548,12 +554,8 @@ internal static class Searcher
         public StreamCount? Stream { get; } = stream;
     }
 
-    private static bool IsIgnoredFile(string walkRoot, string fullPath)
-    {
-        var stats = new WalkStats();
-        return !TreeWalker.Enumerate(walkRoot, null, stats, applyGitIgnore: true, includeHidden: true).Any(file =>
-            string.Equals(file.FullPath, fullPath, StringComparison.Ordinal));
-    }
+    private static bool IsIgnoredFile(string walkRoot, string fullPath) =>
+        TreeWalker.IsIgnoredFile(walkRoot, fullPath);
 
     private static async ValueTask<ConfirmResult> TryCollectAsync(
         ConfirmFile file,
@@ -575,7 +577,7 @@ internal static class Searcher
         var stop = ByteConfirm.ArmFresh(plan);
         try
         {
-            using var read = await TextFiles.ReadAsync(file.FullPath, stop, cancellation);
+            using var read = await TextFiles.ReadAsync(file.FullPath, stop, cancellation, plan.SearchBinary);
             ByteConfirm.Adopt(stop);
             if (MatchLoaded(read, file, plan, matches, stats, filesWithoutMatch, tally, errorIfUnreadable, out var text, out var examined, out var matched))
             {
