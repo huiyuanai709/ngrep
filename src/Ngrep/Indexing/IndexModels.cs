@@ -13,6 +13,9 @@ internal sealed class DocumentRecord
     public string Sha256 { get; set; } = "";
 
     public int[] LineStarts { get; set; } = [0];
+
+    /// <summary>UTF-8 ndjson object without the trailing newline. Cleared when size or mtime changes.</summary>
+    internal byte[]? CachedLine { get; set; }
 }
 
 internal sealed class IndexManifest

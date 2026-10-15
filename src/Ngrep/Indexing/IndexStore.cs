@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -35,7 +36,7 @@ internal static class IndexStore
         Directory.CreateDirectory(tempDir);
         File.WriteAllText(Path.Combine(tempDir, "manifest.json"), ManifestJson(manifest), Utf8);
         WriteDocuments(Path.Combine(tempDir, "documents.ndjson"), documents);
-        using (var stream = File.Create(Path.Combine(tempDir, "postings.bin")))
+        using (var stream = CreateWrite(Path.Combine(tempDir, "postings.bin")))
         {
             WritePostings(stream, postings);
             stream.Flush(flushToDisk: true);
@@ -173,36 +174,54 @@ internal static class IndexStore
         }
     }
 
+    private const int WriteBufferBytes = 1 << 20;
+
+    private static FileStream CreateWrite(string path) =>
+        new(path, FileMode.Create, FileAccess.Write, FileShare.None, WriteBufferBytes, FileOptions.SequentialScan);
+
     private static void WriteDocuments(string path, IReadOnlyList<DocumentRecord> documents)
     {
-        using var stream = File.Create(path);
-        foreach (var document in documents.OrderBy(d => d.Path, StringComparer.Ordinal))
+        var ordered = new DocumentRecord[documents.Count];
+        for (var i = 0; i < documents.Count; i++)
         {
-            using var memory = new MemoryStream();
-            using (var writer = new Utf8JsonWriter(memory, new JsonWriterOptions
-            {
-                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-            }))
-            {
-                writer.WriteStartObject();
-                writer.WriteNumber("id", document.Id);
-                writer.WriteString("path", document.Path);
-                writer.WriteNumber("size", document.Size);
-                writer.WriteNumber("mtimeUnixMs", document.MtimeUnixMs);
-                writer.WriteString("sha256", document.Sha256);
-                writer.WriteStartArray("lineStarts");
-                foreach (var start in document.LineStarts)
-                {
-                    writer.WriteNumberValue(start);
-                }
+            ordered[i] = documents[i];
+        }
 
-                writer.WriteEndArray();
-                writer.WriteEndObject();
-            }
-
-            stream.Write(memory.ToArray());
+        Array.Sort(ordered, static (left, right) => string.CompareOrdinal(left.Path, right.Path));
+        using var stream = CreateWrite(path);
+        foreach (var document in ordered)
+        {
+            document.CachedLine ??= SerializeDocument(document);
+            stream.Write(document.CachedLine);
             stream.WriteByte((byte)'\n');
         }
+    }
+
+    private static byte[] SerializeDocument(DocumentRecord document)
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions
+        {
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        }))
+        {
+            writer.WriteStartObject();
+            writer.WriteNumber("id", document.Id);
+            writer.WriteString("path", document.Path);
+            writer.WriteNumber("size", document.Size);
+            writer.WriteNumber("mtimeUnixMs", document.MtimeUnixMs);
+            writer.WriteString("sha256", document.Sha256);
+            writer.WriteStartArray("lineStarts");
+            foreach (var start in document.LineStarts)
+            {
+                writer.WriteNumberValue(start);
+            }
+
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+        }
+
+        return buffer.WrittenSpan.ToArray();
     }
 
     private static List<DocumentRecord> ReadDocuments(string path)
@@ -246,25 +265,51 @@ internal static class IndexStore
 
     public static void WritePostings(Stream stream, Dictionary<string, List<int>> postings)
     {
-        using var writer = new BinaryWriter(stream, Utf8, leaveOpen: true);
-        writer.Write(Encoding.ASCII.GetBytes("NGTR"));
-        writer.Write(IndexPaths.FormatVersion);
-        writer.Write(postings.Count);
-        foreach (var pair in postings.OrderBy(p => p.Key, StringComparer.Ordinal))
+        if (postings.Count == 0)
         {
-            var bytes = Encoding.UTF8.GetBytes(pair.Key);
-            if (bytes.Length > ushort.MaxValue)
+            using var empty = new BinaryWriter(stream, Utf8, leaveOpen: true);
+            empty.Write(Encoding.ASCII.GetBytes("NGTR"));
+            empty.Write(IndexPaths.FormatVersion);
+            empty.Write(0);
+            return;
+        }
+
+        var keys = ArrayPool<string>.Shared.Rent(postings.Count);
+        try
+        {
+            var count = 0;
+            foreach (var key in postings.Keys)
             {
-                throw new InvalidDataException($"Trigram is too long to store ({bytes.Length} bytes).");
+                keys[count++] = key;
             }
 
-            writer.Write((ushort)bytes.Length);
-            writer.Write(bytes);
-            writer.Write(pair.Value.Count);
-            foreach (var id in pair.Value)
+            Array.Sort(keys, 0, count, StringComparer.Ordinal);
+            using var writer = new BinaryWriter(stream, Utf8, leaveOpen: true);
+            writer.Write(Encoding.ASCII.GetBytes("NGTR"));
+            writer.Write(IndexPaths.FormatVersion);
+            writer.Write(count);
+            for (var i = 0; i < count; i++)
             {
-                writer.Write(id);
+                var key = keys[i];
+                var bytes = Encoding.UTF8.GetBytes(key);
+                if (bytes.Length > ushort.MaxValue)
+                {
+                    throw new InvalidDataException($"Trigram is too long to store ({bytes.Length} bytes).");
+                }
+
+                writer.Write((ushort)bytes.Length);
+                writer.Write(bytes);
+                var ids = postings[key];
+                writer.Write(ids.Count);
+                foreach (var id in ids)
+                {
+                    writer.Write(id);
+                }
             }
+        }
+        finally
+        {
+            ArrayPool<string>.Shared.Return(keys);
         }
     }
 
