@@ -40,6 +40,9 @@ internal static class SearchSyntax
         "--regexp",
         "-j",
         "--threads",
+        "-d",
+        "--max-depth",
+        "--maxdepth",
         "--color",
         "-f",
         "--file",
@@ -487,7 +490,7 @@ internal static class SearchSyntax
         return false;
     }
 
-    private const string ValueShorts = "efgtTABCjr";
+    private const string ValueShorts = "defgtTABCjr";
 
     private static bool TryExpandShortBundle(string arg, List<string> destination)
     {

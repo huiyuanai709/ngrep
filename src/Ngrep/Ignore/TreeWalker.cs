@@ -11,15 +11,19 @@ internal readonly struct WalkDir
     public string ScopeRelative { get; init; }
 
     public IgnoreStack Ignores { get; init; }
+
+    /// <summary>Ripgrep depth. The start path is 0. Its immediate children are 1.</summary>
+    public int Depth { get; init; }
 }
 
 internal readonly struct WalkOptions
 {
-    public WalkOptions(IgnorePolicy policy, bool includeHidden, string? indexRelative)
+    public WalkOptions(IgnorePolicy policy, bool includeHidden, string? indexRelative, int? maxDepth = null)
     {
         Policy = policy;
         IncludeHidden = includeHidden;
         IndexRelative = indexRelative;
+        MaxDepth = maxDepth;
     }
 
     public IgnorePolicy Policy { get; }
@@ -27,6 +31,12 @@ internal readonly struct WalkOptions
     public bool IncludeHidden { get; }
 
     public string? IndexRelative { get; }
+
+    /// <summary>
+    /// Ripgrep <c>-d</c>. Null walks without a cap. 0 is the start path and does not list a directory.
+    /// 1 lists that directory and stops. A directory is listed only when its depth is less than the cap.
+    /// </summary>
+    public int? MaxDepth { get; }
 }
 
 internal sealed class WalkStats
@@ -91,16 +101,39 @@ internal static class TreeWalker
         return true;
     }
 
+    /// <summary>
+    /// Depth of <paramref name="walkRelative"/> from the start path. <c>""</c> is 0, <c>a</c> is 1, <c>a/b</c> is 2.
+    /// </summary>
+    internal static int DepthOf(string walkRelative)
+    {
+        if (walkRelative.Length == 0)
+        {
+            return 0;
+        }
+
+        var depth = 1;
+        for (var i = 0; i < walkRelative.Length; i++)
+        {
+            if (walkRelative[i] == '/')
+            {
+                depth++;
+            }
+        }
+
+        return depth;
+    }
+
     public static IEnumerable<WalkedFile> Enumerate(
         string walkRoot,
         string? indexDirectory,
         WalkStats stats,
         IgnorePolicy? policy = null,
-        bool includeHidden = false)
+        bool includeHidden = false,
+        int? maxDepth = null)
     {
         var chosen = policy ?? IgnorePolicy.All;
         var root = CreateRoot(walkRoot, chosen);
-        var options = new WalkOptions(chosen, includeHidden, IndexRelative(root.Full, indexDirectory));
+        var options = new WalkOptions(chosen, includeHidden, IndexRelative(root.Full, indexDirectory), maxDepth);
         var stack = new Stack<WalkDir>();
         stack.Push(root);
         var files = new List<WalkedFile>(32);
@@ -121,8 +154,8 @@ internal static class TreeWalker
         }
     }
 
-    public static WalkOptions CreateOptions(string walkRootFull, string? indexDirectory, IgnorePolicy policy, bool includeHidden) =>
-        new(policy, includeHidden, IndexRelative(walkRootFull, indexDirectory));
+    public static WalkOptions CreateOptions(string walkRootFull, string? indexDirectory, IgnorePolicy policy, bool includeHidden, int? maxDepth = null) =>
+        new(policy, includeHidden, IndexRelative(walkRootFull, indexDirectory), maxDepth);
 
     public static WalkDir CreateRoot(string walkRoot, IgnorePolicy policy)
     {
@@ -138,16 +171,25 @@ internal static class TreeWalker
             WalkRelative = "",
             ScopeRelative = scopeRelative,
             Ignores = ignores,
+            Depth = 0,
         };
     }
 
     public static void Collect(WalkDir dir, WalkOptions options, WalkStats stats, List<WalkedFile> files, List<WalkDir> children, CancellationToken cancellation = default)
     {
         cancellation.ThrowIfCancellationRequested();
-        BeforeCollect?.Invoke(dir.Full);
-        cancellation.ThrowIfCancellationRequested();
         files.Clear();
         children.Clear();
+        // A directory at the cap is not listed. Its children would be deeper than the cap.
+        // Depth 0 therefore does not read the start directory. Ignore rules of a directory
+        // we do not list are left unread; ancestors were already loaded on the root.
+        if (options.MaxDepth is int limit && dir.Depth >= limit)
+        {
+            return;
+        }
+
+        BeforeCollect?.Invoke(dir.Full);
+        cancellation.ThrowIfCancellationRequested();
         var sink = new ListSink();
         if (!DirectoryEntries.TryList(dir.Full, ref sink, cancellation))
         {
@@ -210,12 +252,19 @@ internal static class TreeWalker
             var full = Path.Join(dir.Full, name);
             if (isDir)
             {
+                var childDepth = DepthOf(childWalk);
+                if (options.MaxDepth is int childLimit && childDepth >= childLimit)
+                {
+                    continue;
+                }
+
                 children.Add(new WalkDir
                 {
                     Full = full,
                     WalkRelative = childWalk,
                     ScopeRelative = scopeRelative,
                     Ignores = ignores,
+                    Depth = childDepth,
                 });
                 continue;
             }

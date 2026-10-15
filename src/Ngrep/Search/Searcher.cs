@@ -72,6 +72,12 @@ internal sealed class SearchQuery
 
     public bool IncludeHidden { get; init; }
 
+    /// <summary>
+    /// Ripgrep <c>-d</c> / <c>--max-depth</c>. Null does not cap depth.
+    /// 0 is the start path (a directory is not listed). 1 is its immediate children.
+    /// </summary>
+    public int? MaxDepth { get; init; }
+
     /// <summary><c>--binary</c> / the third <c>-u</c>. Search files with a NUL in the first 8 KiB instead of skipping them.</summary>
     public bool SearchBinary { get; init; }
 
@@ -192,6 +198,11 @@ internal static class Searcher
     public static async Task<SearchOutcome> Search(SearchQuery query)
     {
         query.CancellationToken.ThrowIfCancellationRequested();
+        if (query.MaxDepth is < 0)
+        {
+            throw new ArgumentException("--max-depth must be >= 0.");
+        }
+
         var clock = Stopwatch.StartNew();
         var tally = new SearchTally();
         var plan = MatchPlan.Create(query);
@@ -402,6 +413,13 @@ internal static class Searcher
 
             covered++;
 
+            // The snapshot covers this path. Deeper documents stay unopened; they still
+            // count as covered so a depth cap does not fall back to a content scan.
+            if (DepthExceeds(document.Path, prefix, prefixIsFile, query.MaxDepth))
+            {
+                continue;
+            }
+
             if (selectedIds != null && !selectedIds.Contains(document.Id))
             {
                 // A required literal is absent, so the file cannot match and is not opened.
@@ -551,6 +569,7 @@ internal static class Searcher
                 stats,
                 plan.Ignore,
                 plan.IncludeHidden,
+                query.MaxDepth,
                 plan.Filter,
                 degree,
                 cancellation,
@@ -565,6 +584,7 @@ internal static class Searcher
             stats,
             plan.Ignore,
             plan.IncludeHidden,
+            query.MaxDepth,
             plan.Filter,
             degree,
             cancellation,
@@ -969,6 +989,31 @@ internal static class Searcher
 
         outside = false;
         return rel == "." ? "" : rel;
+    }
+
+    /// <summary>
+    /// True when <paramref name="docPath"/> is deeper than <paramref name="maxDepth"/>
+    /// relative to the search path. An explicit file is depth 0.
+    /// </summary>
+    private static bool DepthExceeds(string docPath, string prefix, bool prefixIsFile, int? maxDepth)
+    {
+        if (maxDepth is not int limit)
+        {
+            return false;
+        }
+
+        var relative = prefixIsFile ? "" : RelativeDocument(docPath, prefix);
+        return TreeWalker.DepthOf(relative) > limit;
+    }
+
+    private static string RelativeDocument(string docPath, string prefix)
+    {
+        if (prefix.Length == 0 || docPath.Equals(prefix, StringComparison.Ordinal))
+        {
+            return prefix.Length == 0 ? docPath : "";
+        }
+
+        return docPath[(prefix.Length + 1)..];
     }
 
     private static bool Under(string docPath, string prefix, bool prefixIsFile)

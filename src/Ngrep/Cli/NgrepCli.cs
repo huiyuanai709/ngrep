@@ -304,6 +304,10 @@ internal static class NgrepCli
         {
             Description = "After the search, print files searched, files matched, lines matched, matches, and elapsed milliseconds on stderr. Stdout is unchanged. Collects every hit so -l line counts are complete.",
         };
+        var maxDepth = new Option<int>("-d", "--max-depth", "--maxdepth")
+        {
+            Description = "Limit directory walk depth, counted like ripgrep. 0 is the given path and does not list a directory. 1 is its immediate children. Ignore rules are unchanged.",
+        };
 
         var searchCommand = new Command(
             "search",
@@ -357,6 +361,7 @@ internal static class NgrepCli
         searchCommand.Options.Add(heading);
         searchCommand.Options.Add(noHeading);
         searchCommand.Options.Add(stats);
+        searchCommand.Options.Add(maxDepth);
         searchCommand.SetAction(async (result, cancellationToken) =>
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -428,6 +433,7 @@ internal static class NgrepCli
                     heading,
                     noHeading,
                     stats,
+                    maxDepth,
                     cts.Token);
             }
             catch (OperationCanceledException)
@@ -524,6 +530,7 @@ internal static class NgrepCli
         Option<bool> heading,
         Option<bool> noHeading,
         Option<bool> stats,
+        Option<int> maxDepth,
         CancellationToken cancellationToken)
     {
         var showTypes = result.GetValue(typeList);
@@ -675,6 +682,7 @@ internal static class NgrepCli
                     Types = Values(result, type),
                     TypeNots = Values(result, typeNot),
                     TypeAdds = adds,
+                    MaxDepth = MaxDepth(result, maxDepth),
                     MaxDegreeOfParallelism = ThreadCount(result, threads),
                     CancellationToken = cancellationToken,
                     Events = events,
@@ -924,6 +932,16 @@ internal static class NgrepCli
         }
 
         return 0;
+    }
+
+    private static int? MaxDepth(System.CommandLine.ParseResult result, Option<int> maxDepth)
+    {
+        if (!IsSet(result, maxDepth))
+        {
+            return null;
+        }
+
+        return result.GetValue(maxDepth);
     }
 
     private static int ThreadCount(System.CommandLine.ParseResult result, Option<int> threads)
