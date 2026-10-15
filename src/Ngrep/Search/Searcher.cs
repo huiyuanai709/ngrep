@@ -81,6 +81,9 @@ internal sealed class SearchQuery
 
     public bool IncludeHidden { get; init; }
 
+    /// <summary><c>-L</c> / <c>--follow</c>. The index does not store followed links, so search scans.</summary>
+    public bool FollowSymlinks { get; init; }
+
     /// <summary>
     /// Ripgrep <c>-d</c> / <c>--max-depth</c>. Null does not cap depth.
     /// 0 is the start path (a directory is not listed). 1 is its immediate children.
@@ -233,7 +236,7 @@ internal static class Searcher
         }
 
         // Binary files are not in the index, so --binary has to read the tree.
-        var skipIndex = query.ForceScan || !plan.ApplyGitIgnore || plan.SearchBinary;
+        var skipIndex = query.ForceScan || !plan.ApplyGitIgnore || plan.SearchBinary || query.FollowSymlinks;
         if (!skipIndex && query.IndexDirectory != null)
         {
             if (ShortSubpath(query.IndexDirectory, start, plan))
@@ -533,7 +536,28 @@ internal static class Searcher
     {
         var ignore = query.NoIgnore ? "--no-ignore" : query.NoIgnoreVcs ? "--no-ignore-vcs" : null;
         var binary = query.SearchBinary ? "--binary" : null;
-        string? detail = ignore != null && binary != null ? $"{ignore}, {binary}" : ignore ?? binary;
+        var follow = query.FollowSymlinks ? "--follow" : null;
+        string? detail = null;
+        if (ignore != null || binary != null || follow != null)
+        {
+            var parts = new List<string>(3);
+            if (ignore != null)
+            {
+                parts.Add(ignore);
+            }
+
+            if (binary != null)
+            {
+                parts.Add(binary);
+            }
+
+            if (follow != null)
+            {
+                parts.Add(follow);
+            }
+
+            detail = string.Join(", ", parts);
+        }
         if (query.ForceScan && detail != null)
         {
             return $"content scan (--scan, {detail})";
@@ -607,6 +631,7 @@ internal static class Searcher
                 plan.Ignore,
                 plan.IncludeHidden,
                 query.MaxDepth,
+                query.FollowSymlinks,
                 plan.Filter,
                 degree,
                 cancellation,
@@ -622,6 +647,7 @@ internal static class Searcher
             plan.Ignore,
             plan.IncludeHidden,
             query.MaxDepth,
+            query.FollowSymlinks,
             plan.Filter,
             degree,
             cancellation,

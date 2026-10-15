@@ -51,7 +51,7 @@ Search flags:
 [-g|--glob <glob>]... [-t|--type <type>]... [-T|--type-not <type>]...
 [--type-add <spec>]... [--type-list]
 [-A|--after-context <n>] [-B|--before-context <n>] [-C|--context <n>]
-[-U|--multiline] [--multiline-dotall] [-P|--pcre] [--hidden] [--binary]
+[-U|--multiline] [--multiline-dotall] [-P|--pcre] [--hidden] [--binary] [-L|--follow]
 [-u|--unrestricted] [--color auto|always|never]
 [-j|--threads <n>] [-d|--max-depth <n>]
 ```
@@ -128,9 +128,11 @@ The default `-E` engine is non-backtracking. Simple captures, named groups, and 
 
 `-d` / `--max-depth` (`--maxdepth` is the same flag) caps directory depth the way ripgrep does. Depth 0 is the path you named. Depth 1 is an immediate child of that path. Depth 2 is a child of those, and so on. `-d 0` on a directory lists nothing, because that directory is the start path and its files sit at depth 1. `-d 0` on a file still searches that file. `-d 1` reads only the files directly in the directory. `-d 2` also reads the files in its child directories. Omitting the flag walks the whole tree. `.gitignore`, `--hidden`, and `--no-ignore` / `--no-ignore-vcs` still decide what is skipped; the cap only stops descent. A directory that the cap does not list does not contribute a `.gitignore`. Ancestor ignore files still apply. An indexed search keeps the index and drops document paths deeper than the cap, so those files are not opened.
 
-Hidden files and directories are skipped by default. A name that starts with `.` is hidden. On Windows and macOS, the hidden file attribute is hidden too, so a content scan of a home directory does not walk `AppData`. `--hidden` searches both. Naming a file, or a directory, still searches that path: `ngrep pat .secret` reads `.secret`, and `ngrep pat .github` reads non-hidden children of `.github`. Hard skips stay skipped with or without `--hidden`, `--no-ignore`, `--binary`, or an explicit path: a directory named `.git` or `.ngrep`, the index directory, and symlinks. `-g` does not bring a skipped hidden path back (same rule as gitignore). A gitignore negation does not un-hide a dotfile; pass `--hidden`. `--no-ignore` does not imply `--hidden`. The index still stores hidden names and hidden-attribute files so `--hidden` can use it. An indexed search still decides hidden from the path string (a dot name), because the index does not store the attribute. A content scan skips both in the walk unless the flag is set.
+Hidden files and directories are skipped by default. A name that starts with `.` is hidden. On Windows and macOS, the hidden file attribute is hidden too, so a content scan of a home directory does not walk `AppData`. `--hidden` searches both. Naming a file, or a directory, still searches that path: `ngrep pat .secret` reads `.secret`, and `ngrep pat .github` reads non-hidden children of `.github`. Hard skips stay skipped with or without `--hidden`, `--no-ignore`, `--binary`, or an explicit path: a directory named `.git` or `.ngrep`, and the index directory. Symlinks are skipped too, unless `-L` / `--follow` is set. `-g` does not bring a skipped hidden path back (same rule as gitignore). A gitignore negation does not un-hide a dotfile; pass `--hidden`. `--no-ignore` does not imply `--hidden`. The index still stores hidden names and hidden-attribute files so `--hidden` can use it. An indexed search still decides hidden from the path string (a dot name), because the index does not store the attribute. A content scan skips both in the walk unless the flag is set.
 
-`-u` / `--unrestricted` stacks like ripgrep, and it may be repeated. `-u` is `--no-ignore` (every ignore file, including `.ignore` and `.rgignore`). `-uu` is `--no-ignore --hidden`. `-uuu` is `--no-ignore --hidden --binary`. Separate `-u` flags stack the same way (`-u -u` is `-uu`). A fourth `-u` exits 2. `.git`, `.ngrep`, the index directory, and symlinks stay skipped at every level, including `-uuu`. Ripgrep searches `.git` once `-uu` un-hides it. `--no-ignore-vcs` is narrower than `-u`: it still reads `.ignore` and `.rgignore`.
+`-L` / `--follow` follows symbolic links to files and directories. Without it, every symlink is skipped, including when `--hidden` or `--no-ignore` is set. The printed path is the link; the bytes are the target. A directory link is walked under that link path. The walk records the canonical path of each ancestor and does not enter a target already on that chain, so a cycle stops. A link to a sibling directory is still walked. A broken link is skipped. `index` and `watch` do not follow links, and the index has no symlink targets, so `-L` scans (`scanned content (--follow)` when an index would otherwise have been used).
+
+`-u` / `--unrestricted` stacks like ripgrep, and it may be repeated. `-u` is `--no-ignore` (every ignore file, including `.ignore` and `.rgignore`). `-uu` is `--no-ignore --hidden`. `-uuu` is `--no-ignore --hidden --binary`. Separate `-u` flags stack the same way (`-u -u` is `-uu`). A fourth `-u` exits 2. `.git`, `.ngrep`, and the index directory stay skipped at every level, including `-uuu`. Symlinks stay skipped unless `-L` / `--follow`. Ripgrep searches `.git` once `-uu` un-hides it. `--no-ignore-vcs` is narrower than `-u`: it still reads `.ignore` and `.rgignore`.
 
 `--binary` searches a file that has a NUL byte in the first 8 KiB. Without it, that file is skipped and is not a match. With it, the bytes are searched as text and a hit is printed on the match line. That is partial parity with ripgrep: `rg --binary` (what `-uuu` turns on) stops at a match and prints `binary file matches` instead of the line, and `rg -a` is what prints the bytes. ngrep has no separate `-a` / `--text`. Files larger than 32 MiB stay skipped. The index does not store binary files, so `--binary` scans and the stderr note names `--binary`. `--binary` does not imply `--no-ignore` or `--hidden`.
 
@@ -175,7 +177,7 @@ Each line is one argument. Leading and trailing whitespace is removed. Empty lin
 *.cs
 ```
 
-`watch` indexes once, then reindexes about 300 ms after a change. It is a thin `FileSystemWatcher` loop: it does not follow symlinks, it ignores its own index writes, and a `.gitignore` edit is just another incremental rebuild. Ctrl+C exits 0.
+`watch` indexes once, then reindexes about 300 ms after a change. It is a thin `FileSystemWatcher` loop: like `index`, it does not follow symlinks (search follows them only with `-L`), it ignores its own index writes, and a `.gitignore` edit is just another incremental rebuild. Ctrl+C exits 0.
 
 ### Exit codes
 
@@ -252,7 +254,7 @@ Default: `<root>/.ngrep/index` (`manifest.json`, `documents.ndjson`, `postings.b
 ## Ignore rules
 
 - Nested `.gitignore`, `.ignore`, and `.rgignore` files apply, from the git root down to the file. Outside a git checkout, only those files under the path you passed are used. `.gitignore` is still read there. `info/exclude` and the global excludes file (`core.excludesFile`, or `~/.config/git/ignore` when that key is unset) apply only inside a checkout, matched from the git root. Highest precedence first: `.rgignore`, `.ignore`, `.gitignore`, `info/exclude`, global. `--no-ignore-vcs` skips the three git sources. `--no-ignore` skips all five.
-- `.git`, `.ngrep`, the index directory, and symlinks are always skipped.
+- `.git`, `.ngrep`, and the index directory are always skipped. Symlinks are skipped unless `-L` / `--follow`.
 - Binary files (NUL in the first 8 KiB) are skipped unless `--binary` or `-uuu`. Files larger than 32 MiB are always skipped. `--files` lists both, because it does not read contents.
 - A parent directory that is ignored stays ignored; `!keep.txt` cannot resurrect a file inside `build/` if `build/` itself is ignored. `build/*` plus `!build/keep.txt` can. Details and the glob dialect are in [DESIGN.md](DESIGN.md).
 

@@ -54,6 +54,7 @@ internal static class AsyncScheduler
         IgnorePolicy policy,
         bool includeHidden,
         int? maxDepth,
+        bool followSymlinks,
         PathFilter filter,
         int workers,
         CancellationToken cancellation,
@@ -62,7 +63,8 @@ internal static class AsyncScheduler
     {
         cancellation.ThrowIfCancellationRequested();
         var root = TreeWalker.CreateRoot(walkRoot, policy);
-        var options = TreeWalker.CreateOptions(root.Full, indexDirectory, policy, includeHidden, maxDepth);
+        var options = TreeWalker.CreateOptions(root.Full, indexDirectory, policy, includeHidden, maxDepth, followSymlinks);
+        root = TreeWalker.Start(root, options);
         if (workers <= 1)
         {
             return await ScanSequential(root, options, stats, filter, cancellation, collect, stopOnMatch);
@@ -94,6 +96,7 @@ internal static class AsyncScheduler
         IgnorePolicy policy,
         bool includeHidden,
         int? maxDepth,
+        bool followSymlinks,
         PathFilter filter,
         int workers,
         CancellationToken cancellation,
@@ -102,7 +105,8 @@ internal static class AsyncScheduler
     {
         cancellation.ThrowIfCancellationRequested();
         var root = TreeWalker.CreateRoot(walkRoot, policy);
-        var options = TreeWalker.CreateOptions(root.Full, indexDirectory, policy, includeHidden, maxDepth);
+        var options = TreeWalker.CreateOptions(root.Full, indexDirectory, policy, includeHidden, maxDepth, followSymlinks);
+        root = TreeWalker.Start(root, options);
         if (workers <= 1)
         {
             await EmitSequential(root, options, stats, filter, cancellation, collect, onFile);

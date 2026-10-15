@@ -14,16 +14,20 @@ internal readonly struct WalkDir
 
     /// <summary>Ripgrep depth. The start path is 0. Its immediate children are 1.</summary>
     public int Depth { get; init; }
+
+    /// <summary>Set when <see cref="WalkOptions.FollowSymlinks"/> is on. Null otherwise.</summary>
+    public DirChain? Chain { get; init; }
 }
 
 internal readonly struct WalkOptions
 {
-    public WalkOptions(IgnorePolicy policy, bool includeHidden, string? indexRelative, int? maxDepth = null)
+    public WalkOptions(IgnorePolicy policy, bool includeHidden, string? indexRelative, int? maxDepth = null, bool followSymlinks = false)
     {
         Policy = policy;
         IncludeHidden = includeHidden;
         IndexRelative = indexRelative;
         MaxDepth = maxDepth;
+        FollowSymlinks = followSymlinks;
     }
 
     public IgnorePolicy Policy { get; }
@@ -37,6 +41,9 @@ internal readonly struct WalkOptions
     /// 1 lists that directory and stops. A directory is listed only when its depth is less than the cap.
     /// </summary>
     public int? MaxDepth { get; }
+
+    /// <summary><c>-L</c> / <c>--follow</c>. Off unless the caller opts in.</summary>
+    public bool FollowSymlinks { get; }
 }
 
 internal sealed class WalkStats
@@ -129,11 +136,13 @@ internal static class TreeWalker
         WalkStats stats,
         IgnorePolicy? policy = null,
         bool includeHidden = false,
-        int? maxDepth = null)
+        int? maxDepth = null,
+        bool followSymlinks = false)
     {
         var chosen = policy ?? IgnorePolicy.All;
         var root = CreateRoot(walkRoot, chosen);
-        var options = new WalkOptions(chosen, includeHidden, IndexRelative(root.Full, indexDirectory), maxDepth);
+        var options = new WalkOptions(chosen, includeHidden, IndexRelative(root.Full, indexDirectory), maxDepth, followSymlinks);
+        root = Start(root, options);
         var stack = new Stack<WalkDir>();
         stack.Push(root);
         var files = new List<WalkedFile>(32);
@@ -154,8 +163,30 @@ internal static class TreeWalker
         }
     }
 
-    public static WalkOptions CreateOptions(string walkRootFull, string? indexDirectory, IgnorePolicy policy, bool includeHidden, int? maxDepth = null) =>
-        new(policy, includeHidden, IndexRelative(walkRootFull, indexDirectory), maxDepth);
+    public static WalkOptions CreateOptions(string walkRootFull, string? indexDirectory, IgnorePolicy policy, bool includeHidden, int? maxDepth = null, bool followSymlinks = false) =>
+        new(policy, includeHidden, IndexRelative(walkRootFull, indexDirectory), maxDepth, followSymlinks);
+
+    /// <summary>
+    /// Records the walk root's canonical path when symlinks are followed.
+    /// Children copy that chain so a link back to an ancestor is not entered.
+    /// </summary>
+    public static WalkDir Start(WalkDir root, WalkOptions options)
+    {
+        if (!options.FollowSymlinks || root.Chain != null)
+        {
+            return root;
+        }
+
+        return new WalkDir
+        {
+            Full = root.Full,
+            WalkRelative = root.WalkRelative,
+            ScopeRelative = root.ScopeRelative,
+            Ignores = root.Ignores,
+            Depth = root.Depth,
+            Chain = new DirChain(SymlinkPath.Canonicalize(root.Full)),
+        };
+    }
 
     public static WalkDir CreateRoot(string walkRoot, IgnorePolicy policy)
     {
@@ -210,22 +241,30 @@ internal static class TreeWalker
             ignores = AddListedIgnoreFiles(ignores, dir, entries, options.Policy, stats);
         }
 
+        var chain = dir.Chain;
+        if (options.FollowSymlinks && chain == null)
+        {
+            chain = new DirChain(SymlinkPath.Canonicalize(dir.Full));
+        }
+
         foreach (var entry in entries)
         {
-            if (entry.Kind == DirentKind.Symlink)
+            var name = entry.Name;
+            var kind = entry.Kind;
+            if (kind == DirentKind.Symlink && !options.FollowSymlinks)
             {
                 continue;
             }
 
-            var name = entry.Name;
-            var isDir = entry.Kind == DirentKind.Directory;
-            if (entry.Kind == DirentKind.Other)
+            if (kind == DirentKind.Other)
             {
                 continue;
             }
 
             var childWalk = JoinRelative(dir.WalkRelative, name);
-            if (isDir && (name is ".git" or ".ngrep" || IsIndexPath(childWalk, options.IndexRelative)))
+            // .git, .ngrep, and the index directory stay skipped even when their names are links.
+            if ((kind is DirentKind.Directory or DirentKind.Symlink)
+                && (name is ".git" or ".ngrep" || IsIndexPath(childWalk, options.IndexRelative)))
             {
                 continue;
             }
@@ -238,6 +277,17 @@ internal static class TreeWalker
                 continue;
             }
 
+            string? followedCanonical = null;
+            if (kind == DirentKind.Symlink)
+            {
+                if (!TryFollow(Path.Join(dir.Full, name), chain!, out kind, out followedCanonical))
+                {
+                    stats.IncrementSkippedUnreadable();
+                    continue;
+                }
+            }
+
+            var isDir = kind == DirentKind.Directory;
             var scopeRelative = JoinRelative(dir.ScopeRelative, name);
             if (ignores.IsIgnored(scopeRelative, isDir, checkParents: false))
             {
@@ -258,6 +308,18 @@ internal static class TreeWalker
                     continue;
                 }
 
+                DirChain? next = null;
+                if (options.FollowSymlinks)
+                {
+                    var canonical = followedCanonical ?? Path.Join(chain!.Canonical, name);
+                    if (chain!.Contains(canonical))
+                    {
+                        continue;
+                    }
+
+                    next = chain.Descend(canonical);
+                }
+
                 children.Add(new WalkDir
                 {
                     Full = full,
@@ -265,11 +327,54 @@ internal static class TreeWalker
                     ScopeRelative = scopeRelative,
                     Ignores = ignores,
                     Depth = childDepth,
+                    Chain = next,
                 });
                 continue;
             }
 
             files.Add(new WalkedFile(full, childWalk));
+        }
+    }
+
+    /// <summary>
+    /// Classify a symlink the caller asked to follow. The returned canonical path is the
+    /// real directory target. File links report no canonical path; the walk still opens
+    /// the link path, which is the path printed to the user.
+    /// </summary>
+    private static bool TryFollow(string linkPath, DirChain parent, out DirentKind kind, out string? canonical)
+    {
+        kind = DirentKind.Other;
+        canonical = null;
+        try
+        {
+            var raw = new FileInfo(linkPath).LinkTarget;
+            if (string.IsNullOrEmpty(raw))
+            {
+                return false;
+            }
+
+            var target = Path.IsPathRooted(raw)
+                ? SymlinkPath.CanonicalizeRaw(raw)
+                : SymlinkPath.CanonicalizeRaw(Path.Join(parent.Canonical, raw));
+            var attributes = File.GetAttributes(target);
+            if ((attributes & FileAttributes.Directory) != 0)
+            {
+                kind = DirentKind.Directory;
+                canonical = target;
+                return true;
+            }
+
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                return false;
+            }
+
+            kind = DirentKind.File;
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
         }
     }
 
