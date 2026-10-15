@@ -471,6 +471,8 @@ internal static class NgrepCli
                 MultilineDotAll = result.GetValue(multilineDotAll),
                 Stats = wantStats,
                 Report = report,
+                CaptureText = report == ReportMode.Matches
+                    || (report == ReportMode.FilesWithMatches && parsedFormat == OutputFormat.RgJson),
                 BeforeContext = beforeCount,
                 AfterContext = afterCount,
                 Globs = Values(result, glob),

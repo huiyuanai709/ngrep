@@ -71,6 +71,12 @@ internal sealed class SearchQuery
     /// <summary>When set, <c>-l</c> does not stop at the first hit, so line stats are complete.</summary>
     public bool Stats { get; init; }
 
+    /// <summary>
+    /// When false, matches keep path and line numbers and leave <c>text</c> / <c>lineText</c> empty.
+    /// Default true. The CLI turns this off for reports that do not print those strings.
+    /// </summary>
+    public bool CaptureText { get; init; } = true;
+
     public int BeforeContext { get; init; }
 
     public int AfterContext { get; init; }
@@ -395,7 +401,7 @@ internal static class Searcher
         }
         finally
         {
-            ByteConfirm.Disarm();
+            ByteConfirm.Disarm(stop);
         }
     }
 

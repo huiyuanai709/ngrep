@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using Ngrep.Text;
 
@@ -50,7 +51,7 @@ internal static class ByteConfirm
             }
         }
 
-        var state = new StopState();
+        var state = Rent();
         state.Arm(any, max);
         return state.Stop;
     }
@@ -64,11 +65,24 @@ internal static class ByteConfirm
         }
     }
 
-    public static void Disarm()
+    public static void Disarm(ReadStop? stop = null)
     {
+        if (stop?.Target is StopState owned)
+        {
+            owned.Active = false;
+            if (ReferenceEquals(_state, owned))
+            {
+                _state = null;
+            }
+
+            Return(owned);
+            return;
+        }
+
         if (_state != null)
         {
             _state.Active = false;
+            _state = null;
         }
     }
 
@@ -151,7 +165,6 @@ internal static class ByteConfirm
     private static bool Collect(ReadOnlySpan<byte> span, string relativePath, MatchPlan plan, List<SearchMatch> matches)
     {
         plan.Literals!.TryAsciiOr(plan.IgnoreCase, out var any, out var each, out var lengths);
-        var hits = new List<Hit>(4);
         if (plan.StopAtFirst)
         {
             var bestAt = int.MaxValue;
@@ -172,57 +185,63 @@ internal static class ByteConfirm
                 return true;
             }
 
-            hits.Add(new Hit(bestAt, bestLen));
+            if (!Ascii.IsValid(span))
+            {
+                return false;
+            }
+
+            EmitOne(span, relativePath, new Hit(bestAt, bestLen), plan, matches);
+            return true;
         }
-        else
+
+        List<Hit>? hits = null;
+        for (var n = 0; n < lengths.Length; n++)
         {
-            for (var n = 0; n < lengths.Length; n++)
+            var scanner = each == null ? any : each[n];
+            var len = lengths[n];
+            var from = 0;
+            while (from <= span.Length - len)
             {
-                var scanner = each == null ? any : each[n];
-                var len = lengths[n];
-                var from = 0;
-                while (from <= span.Length - len)
+                var idx = Find(scanner, span, from, len, plan.Word);
+                if (idx < 0)
                 {
-                    var idx = Find(scanner, span, from, len, plan.Word);
-                    if (idx < 0)
-                    {
-                        break;
-                    }
-
-                    hits.Add(new Hit(idx, len));
-                    from = idx + len;
-                }
-            }
-
-            if (hits.Count > 1)
-            {
-                hits.Sort(static (left, right) =>
-                {
-                    var index = left.Index.CompareTo(right.Index);
-                    return index != 0 ? index : left.Length.CompareTo(right.Length);
-                });
-                var deduped = new List<Hit>(hits.Count);
-                foreach (var hit in hits)
-                {
-                    if (deduped.Count > 0)
-                    {
-                        var last = deduped[^1];
-                        if (last.Index == hit.Index && last.Length == hit.Length)
-                        {
-                            continue;
-                        }
-                    }
-
-                    deduped.Add(hit);
+                    break;
                 }
 
-                hits = deduped;
+                hits ??= new List<Hit>(4);
+                hits.Add(new Hit(idx, len));
+                from = idx + len;
             }
         }
 
-        if (hits.Count == 0)
+        if (hits == null)
         {
             return true;
+        }
+
+        if (hits.Count > 1)
+        {
+            hits.Sort(static (left, right) =>
+            {
+                var index = left.Index.CompareTo(right.Index);
+                return index != 0 ? index : left.Length.CompareTo(right.Length);
+            });
+            var deduped = new List<Hit>(hits.Count);
+            foreach (var hit in hits)
+            {
+                if (deduped.Count > 0)
+                {
+                    var last = deduped[^1];
+                    if (last.Index == hit.Index && last.Length == hit.Length)
+                    {
+                        continue;
+                    }
+                }
+
+                deduped.Add(hit);
+            }
+
+            hits = deduped;
         }
 
         // Byte offsets are char offsets only while the file is ASCII.
@@ -235,7 +254,7 @@ internal static class ByteConfirm
         // hit avoids building a line-start table for the rest of the file.
         if (!plan.WantsContext && hits.Count == 1)
         {
-            EmitOne(span, relativePath, hits[0], matches);
+            EmitOne(span, relativePath, hits[0], plan, matches);
             return true;
         }
 
@@ -249,8 +268,8 @@ internal static class ByteConfirm
                 relativePath,
                 line,
                 column,
-                AsciiText(span.Slice(hit.Index, hit.Length)),
-                LineText(span, starts, line),
+                Piece(plan, span.Slice(hit.Index, hit.Length)),
+                LineText(span, starts, line, plan),
                 before,
                 after,
                 hit.Index));
@@ -259,7 +278,7 @@ internal static class ByteConfirm
         return true;
     }
 
-    private static void EmitOne(ReadOnlySpan<byte> span, string relativePath, Hit hit, List<SearchMatch> matches)
+    private static void EmitOne(ReadOnlySpan<byte> span, string relativePath, Hit hit, MatchPlan plan, List<SearchMatch> matches)
     {
         var index = hit.Index;
         var line = 1 + span[..index].Count((byte)'\n');
@@ -285,8 +304,8 @@ internal static class ByteConfirm
             relativePath,
             line,
             index - start + 1,
-            AsciiText(span.Slice(index, hit.Length)),
-            AsciiText(span[start..textEnd]),
+            Piece(plan, span.Slice(index, hit.Length)),
+            Piece(plan, span[start..textEnd]),
             null,
             null,
             index));
@@ -361,7 +380,7 @@ internal static class ByteConfirm
         return starts;
     }
 
-    private static string LineText(ReadOnlySpan<byte> span, int[] starts, int line)
+    private static string LineText(ReadOnlySpan<byte> span, int[] starts, int line, MatchPlan plan)
     {
         if (line < 1 || line > starts.Length)
         {
@@ -380,10 +399,11 @@ internal static class ByteConfirm
             end = start;
         }
 
-        return AsciiText(span[start..end]);
+        return Piece(plan, span[start..end]);
     }
 
-    private static string AsciiText(ReadOnlySpan<byte> bytes) => Encoding.ASCII.GetString(bytes);
+    private static string Piece(MatchPlan plan, ReadOnlySpan<byte> bytes) =>
+        plan.CaptureText ? Encoding.ASCII.GetString(bytes) : "";
 
     private static (IReadOnlyList<ContextLine>? Before, IReadOnlyList<ContextLine>? After) Context(
         ReadOnlySpan<byte> span,
@@ -397,11 +417,12 @@ internal static class ByteConfirm
             return (null, null);
         }
 
-        return (SliceBefore(span, starts, line, plan.Before), SliceAfter(span, starts, lineCount, line, plan.After));
+        return (SliceBefore(span, starts, line, plan), SliceAfter(span, starts, lineCount, line, plan));
     }
 
-    private static ContextLine[] SliceBefore(ReadOnlySpan<byte> span, int[] starts, int line, int count)
+    private static ContextLine[] SliceBefore(ReadOnlySpan<byte> span, int[] starts, int line, MatchPlan plan)
     {
+        var count = plan.Before;
         if (count <= 0)
         {
             return [];
@@ -418,14 +439,15 @@ internal static class ByteConfirm
         for (var i = 0; i < length; i++)
         {
             var number = startLine + i;
-            lines[i] = new ContextLine(number, LineText(span, starts, number), number - 1 < starts.Length ? starts[number - 1] : 0);
+            lines[i] = new ContextLine(number, LineText(span, starts, number, plan), number - 1 < starts.Length ? starts[number - 1] : 0);
         }
 
         return lines;
     }
 
-    private static ContextLine[] SliceAfter(ReadOnlySpan<byte> span, int[] starts, int lineCount, int line, int count)
+    private static ContextLine[] SliceAfter(ReadOnlySpan<byte> span, int[] starts, int lineCount, int line, MatchPlan plan)
     {
+        var count = plan.After;
         if (count <= 0 || line >= lineCount)
         {
             return [];
@@ -437,10 +459,36 @@ internal static class ByteConfirm
         for (var i = 0; i < take; i++)
         {
             var number = line + 1 + i;
-            lines[i] = new ContextLine(number, LineText(span, starts, number), number - 1 < starts.Length ? starts[number - 1] : 0);
+            lines[i] = new ContextLine(number, LineText(span, starts, number, plan), number - 1 < starts.Length ? starts[number - 1] : 0);
         }
 
         return lines;
+    }
+
+    private static readonly ConcurrentBag<StopState> Pool = new();
+
+    private static int _pooled;
+
+    private static StopState Rent()
+    {
+        if (Pool.TryTake(out var state))
+        {
+            Interlocked.Decrement(ref _pooled);
+            return state;
+        }
+
+        return new StopState();
+    }
+
+    private static void Return(StopState state)
+    {
+        if (Interlocked.Increment(ref _pooled) > 64)
+        {
+            Interlocked.Decrement(ref _pooled);
+            return;
+        }
+
+        Pool.Add(state);
     }
 
     private readonly record struct Hit(int Index, int Length);

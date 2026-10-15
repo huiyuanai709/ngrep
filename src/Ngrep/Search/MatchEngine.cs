@@ -53,6 +53,12 @@ internal sealed class MatchPlan
     public bool StopAtFirst =>
         (Report == ReportMode.FilesWithMatches || Report == ReportMode.Quiet) && !CollectAll;
 
+    /// <summary>
+    /// False for <c>-c</c>, <c>-q</c>, and <c>-l</c> unless the output prints match text
+    /// (<c>--format rgjson</c> on <c>-l</c>). Line numbers are still recorded.
+    /// </summary>
+    public bool CaptureText { get; init; } = true;
+
     /// <summary>Regex matches may include a newline. Set by <c>-U</c> or <c>--multiline-dotall</c>.</summary>
     public bool CrossesLines => Multiline || MultilineDotAll;
 
@@ -162,6 +168,7 @@ internal sealed class MatchPlan
             MultilineDotAll = query.MultilineDotAll,
             IncludeHidden = query.IncludeHidden,
             CollectAll = query.Stats,
+            CaptureText = query.CaptureText,
             LineRegexp = query.LineRegexp,
             NoMessages = query.NoMessages,
             NonBacktracking = nonBacktracking,
@@ -260,7 +267,9 @@ internal sealed class MatchPlan
                     return true;
                 }
 
-                var value = Encoding.ASCII.GetString(bytes.Slice(candidate.Index, candidate.Length));
+                var value = plan.CaptureText
+                    ? Encoding.ASCII.GetString(bytes.Slice(candidate.Index, candidate.Length))
+                    : "";
                 hits!.Add(new Hit(candidate.Index, candidate.Length, value));
                 if (plan.StopAtFirst)
                 {
@@ -292,7 +301,7 @@ internal sealed class MatchPlan
             return false;
         }
 
-        EmitByteHits(bytes, relativePath, hits, matches);
+        EmitByteHits(bytes, relativePath, hits, matches, plan.CaptureText);
         matched = true;
         return true;
     }
@@ -373,7 +382,7 @@ internal sealed class MatchPlan
                         continue;
                     }
 
-                    var hit = new Hit(lineStart + match.Index, match.Length, match.Value);
+                    var hit = new Hit(lineStart + match.Index, match.Length, plan.CaptureText ? match.Value : "");
                     if (earliest == null || hit.Index < earliest.Value.Index || (hit.Index == earliest.Value.Index && hit.Length < earliest.Value.Length))
                     {
                         earliest = hit;
@@ -389,7 +398,7 @@ internal sealed class MatchPlan
             if (plan.StopAtFirst && earliest != null)
             {
                 hits!.Add(earliest.Value);
-                EmitByteHits(bytes, relativePath, hits, matches);
+                EmitByteHits(bytes, relativePath, hits, matches, plan.CaptureText);
                 matched = true;
                 return true;
             }
@@ -400,12 +409,12 @@ internal sealed class MatchPlan
             return true;
         }
 
-        EmitByteHits(bytes, relativePath, hits!, matches);
+        EmitByteHits(bytes, relativePath, hits!, matches, plan.CaptureText);
         matched = hits!.Count > 0;
         return true;
     }
 
-    private static void EmitByteHits(ReadOnlySpan<byte> bytes, string relativePath, List<Hit> hits, List<SearchMatch> matches)
+    private static void EmitByteHits(ReadOnlySpan<byte> bytes, string relativePath, List<Hit> hits, List<SearchMatch> matches, bool captureText = true)
     {
         hits.Sort(static (left, right) =>
         {
@@ -441,7 +450,7 @@ internal sealed class MatchPlan
                 lineNo,
                 hit.Index - lineStart + 1,
                 hit.Value,
-                Encoding.ASCII.GetString(bytes[lineStart..textEnd]),
+                captureText ? Encoding.ASCII.GetString(bytes[lineStart..textEnd]) : "",
                 null,
                 null,
                 hit.Index));
@@ -463,7 +472,7 @@ internal sealed class MatchPlan
                     continue;
                 }
 
-                var lineText = LineMap.LineText(text, starts, line);
+                var lineText = plan.CaptureText ? LineMap.LineText(text, starts, line) : "";
                 var (before, after) = Context(text, starts, lineCount, line, plan);
                 var offset = line - 1 < starts.Length ? starts[line - 1] : 0;
                 matches.Add(new SearchMatch(relativePath, line, 1, lineText, lineText, before, after, offset));
@@ -573,8 +582,8 @@ internal sealed class MatchPlan
             relativePath,
             line,
             column,
-            hit.Value,
-            LineMap.LineText(text, starts, line),
+            plan.CaptureText ? hit.Value : "",
+            plan.CaptureText ? LineMap.LineText(text, starts, line) : "",
             before,
             after,
             hit.Index));

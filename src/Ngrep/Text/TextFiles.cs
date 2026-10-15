@@ -34,14 +34,16 @@ internal static class TextFiles
         Convert.ToHexStringLower(SHA256.HashData(bytes));
 
     /// <summary>
-    /// Reads file bytes for search. Buffers come from the array pool so a continuation
-    /// can resume on another thread. <paramref name="stop"/> is consulted after each chunk,
-    /// once the leading bytes have passed the NUL probe. Returning true ends the read before
-    /// EOF. A miss still reads the whole file. Files at or above <see cref="MmapThreshold"/>
-    /// map once the length is known; mapping has no async form.
+    /// Reads file bytes for search. The <see cref="ValueTask{TResult}"/> is already complete:
+    /// <see cref="RandomAccess.Read"/> runs on the calling worker, so a warm small file does not
+    /// allocate an async state machine or hop to another pool thread. <paramref name="stop"/> is
+    /// consulted after each chunk, once the leading bytes have passed the NUL probe. Returning
+    /// true ends the read before EOF. A miss still reads the whole file. Files at or above
+    /// <see cref="MmapThreshold"/> map once the length is known.
     /// </summary>
-    public static async ValueTask<PooledBytes> ReadAsync(string path, ReadStop? stop, CancellationToken cancellation)
+    public static ValueTask<PooledBytes> ReadAsync(string path, ReadStop? stop, CancellationToken cancellation)
     {
+        cancellation.ThrowIfCancellationRequested();
         SafeFileHandle? handle = null;
         try
         {
@@ -50,12 +52,12 @@ internal static class TextFiles
                 FileMode.Open,
                 FileAccess.Read,
                 FileShare.Read,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-            return await ReadFromAsync(handle, stop, cancellation);
+                OpenOptions);
+            return new ValueTask<PooledBytes>(ReadFrom(handle, stop, cancellation));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return PooledBytes.Unreadable();
+            return new ValueTask<PooledBytes>(PooledBytes.Unreadable());
         }
         finally
         {
@@ -64,10 +66,17 @@ internal static class TextFiles
     }
 
     /// <summary>
+    /// Unix <c>SequentialScan</c> is <c>posix_fadvise</c>, a syscall that does not help one
+    /// small read. Windows stores the hint in the open call, so it stays on.
+    /// </summary>
+    private static readonly FileOptions OpenOptions =
+        OperatingSystem.IsWindows() ? FileOptions.SequentialScan : FileOptions.None;
+
+    /// <summary>
     /// Files smaller than the first buffer are one read and no length syscall.
     /// A full buffer means the file may be larger, so the length is checked then.
     /// </summary>
-    private static async ValueTask<PooledBytes> ReadFromAsync(SafeFileHandle handle, ReadStop? stop, CancellationToken cancellation)
+    private static PooledBytes ReadFrom(SafeFileHandle handle, ReadStop? stop, CancellationToken cancellation)
     {
         var first = 64 * 1024;
         byte[]? buffer = null;
@@ -128,7 +137,7 @@ internal static class TextFiles
                     break;
                 }
 
-                var read = await RandomAccess.ReadAsync(handle, buffer.AsMemory(offset, want), offset, cancellation);
+                var read = RandomAccess.Read(handle, buffer.AsSpan(offset, want), offset);
                 if (read == 0)
                 {
                     break;

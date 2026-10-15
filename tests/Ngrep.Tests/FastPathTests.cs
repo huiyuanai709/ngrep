@@ -67,6 +67,33 @@ public class FastPathTests
     }
 
     [Fact]
+    public void Summary_reports_skip_line_text_and_keep_counts()
+    {
+        using var tree = new TempDir();
+        File.WriteAllText(tree.File("a.txt"), "alpha netgrep beta\nnetgrep\n");
+
+        var listed = Search(tree.Root, "netgrep", report: ReportMode.FilesWithMatches, captureText: false);
+        var match = Assert.Single(listed.Matches);
+        Assert.Equal("a.txt", match.Path);
+        Assert.Equal(1, match.Line);
+        Assert.Equal(7, match.Column);
+        Assert.Equal("", match.Text);
+        Assert.Equal("", match.LineText);
+
+        var counted = Search(tree.Root, "netgrep", report: ReportMode.Count, captureText: false);
+        Assert.Equal(2, counted.Matches.Count);
+        Assert.Equal(2, counted.LinesMatched);
+        Assert.All(counted.Matches, hit =>
+        {
+            Assert.Equal("", hit.Text);
+            Assert.Equal("", hit.LineText);
+        });
+
+        var quiet = Search(tree.Root, "netgrep", report: ReportMode.Quiet, captureText: false);
+        Assert.Equal("", Assert.Single(quiet.Matches).Text);
+    }
+
+    [Fact]
     public void Regex_literal_prefilter_confirms_only_real_lines()
     {
         using var tree = new TempDir();
@@ -106,7 +133,8 @@ public class FastPathTests
         string pattern,
         bool regex = false,
         bool word = false,
-        ReportMode report = ReportMode.Matches)
+        ReportMode report = ReportMode.Matches,
+        bool captureText = true)
     {
         return Searcher.Search(new SearchQuery
         {
@@ -115,6 +143,7 @@ public class FastPathTests
             Regex = regex,
             WordRegexp = word,
             Report = report,
+            CaptureText = captureText,
             MaxDegreeOfParallelism = 1,
         }).GetAwaiter().GetResult();
     }

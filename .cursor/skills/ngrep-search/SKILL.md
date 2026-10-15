@@ -24,7 +24,7 @@ The first positional is the pattern. `ngrep .` searches for `.`. To search this 
 
 Patterns are literal unless `-E` / `--regex` is set. That flag is a .NET regular expression (non-backtracking), not POSIX ERE. `-P` / `--pcre` is the backtracking interpreter for backreferences and lookaround. When you will parse hits, add `--format ndjson`.
 
-Search reads file bytes asynchronously (task workers and async reads). Files of at least 256 KiB are memory-mapped. That is the only search mode.
+Search reads file bytes on task workers. Files of at least 256 KiB are memory-mapped. That is the only search mode.
 
 ```bash
 ngrep --format ndjson TODO .
