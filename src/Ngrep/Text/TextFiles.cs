@@ -41,14 +41,21 @@ internal static class TextFiles
     /// map once the length is known; mapping has no async form and uses its own handle.
     /// </summary>
     public static ValueTask<PooledBytes> ReadAsync(string path, ReadStop? stop, CancellationToken cancellation) =>
-        ReadAsync(path, stop, cancellation, 64 * 1024);
+        ReadAsync(path, stop, cancellation, searchBinary: false);
+
+    /// <param name="searchBinary">
+    /// When true, a NUL in the first 8 KiB does not skip the file. <c>--binary</c> and <c>-uuu</c> set this.
+    /// The 32 MiB cap still applies.
+    /// </param>
+    public static ValueTask<PooledBytes> ReadAsync(string path, ReadStop? stop, CancellationToken cancellation, bool searchBinary) =>
+        ReadAsync(path, stop, cancellation, 64 * 1024, searchBinary);
 
     /// <param name="initialBuffer">
     /// First read size. Values below <see cref="BinaryProbeLength"/> are raised so a NUL
     /// in the probe window aborts before the rest of the file is read. Search uses 64 KiB.
     /// Index uses the probe length: tiny files finish in that one read, and binaries stop there.
     /// </param>
-    internal static async ValueTask<PooledBytes> ReadAsync(string path, ReadStop? stop, CancellationToken cancellation, int initialBuffer)
+    internal static async ValueTask<PooledBytes> ReadAsync(string path, ReadStop? stop, CancellationToken cancellation, int initialBuffer, bool searchBinary = false)
     {
         SafeFileHandle? handle = null;
         try
@@ -59,7 +66,7 @@ internal static class TextFiles
                 FileAccess.Read,
                 FileShare.Read,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
-            return await ReadFromAsync(handle, path, stop, cancellation, initialBuffer).ConfigureAwait(false);
+            return await ReadFromAsync(handle, path, stop, cancellation, initialBuffer, searchBinary).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -120,7 +127,7 @@ internal static class TextFiles
     /// Files smaller than the first buffer are one read and no length syscall.
     /// A full buffer means the file may be larger, so the length is checked then.
     /// </summary>
-    private static async ValueTask<PooledBytes> ReadFromAsync(SafeFileHandle handle, string path, ReadStop? stop, CancellationToken cancellation, int initialBuffer)
+    private static async ValueTask<PooledBytes> ReadFromAsync(SafeFileHandle handle, string path, ReadStop? stop, CancellationToken cancellation, int initialBuffer, bool searchBinary)
     {
         var first = Math.Max(initialBuffer, BinaryProbeLength);
         byte[]? buffer = null;
@@ -155,7 +162,7 @@ internal static class TextFiles
 
                     if (lengthLong >= MmapThreshold
                         && lengthLong <= int.MaxValue
-                        && TryMap(path, (int)lengthLong, stop, out var mapped))
+                        && TryMap(path, (int)lengthLong, stop, searchBinary, out var mapped))
                     {
                         if (cancellation.IsCancellationRequested)
                         {
@@ -207,7 +214,7 @@ internal static class TextFiles
                 if (!checkedBinary && (offset >= BinaryProbeLength || endOfFile))
                 {
                     checkedBinary = true;
-                    if (IsBinary(buffer.AsSpan(0, offset)))
+                    if (!searchBinary && IsBinary(buffer.AsSpan(0, offset)))
                     {
                         return PooledBytes.Binary();
                     }
@@ -226,7 +233,7 @@ internal static class TextFiles
                 }
             }
 
-            if (!checkedBinary && IsBinary(buffer.AsSpan(0, Math.Min(offset, BinaryProbeLength))))
+            if (!checkedBinary && !searchBinary && IsBinary(buffer.AsSpan(0, Math.Min(offset, BinaryProbeLength))))
             {
                 return PooledBytes.Binary();
             }
@@ -248,7 +255,7 @@ internal static class TextFiles
         }
     }
 
-    private static bool TryMap(string path, int length, ReadStop? stop, out PooledBytes mapped)
+    private static bool TryMap(string path, int length, ReadStop? stop, bool searchBinary, out PooledBytes mapped)
     {
         MemoryMappedFile? file = null;
         MemoryMappedViewAccessor? view = null;
@@ -271,7 +278,7 @@ internal static class TextFiles
                 view.SafeMemoryMappedViewHandle.AcquirePointer(ref pointer);
                 acquired = true;
                 var span = new ReadOnlySpan<byte>(pointer, length);
-                if (IsBinary(span))
+                if (!searchBinary && IsBinary(span))
                 {
                     view.SafeMemoryMappedViewHandle.ReleasePointer();
                     acquired = false;

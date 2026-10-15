@@ -48,6 +48,7 @@ internal static class SearchSyntax
     public static string[] Rewrite(string[] args)
     {
         args = ExpandShortBundles(args);
+        args = ApplyUnrestricted(args);
         if (args.Length == 0 || HasSubcommand(args))
         {
             return args;
@@ -59,7 +60,7 @@ internal static class SearchSyntax
         return rewritten;
     }
 
-    public static BoundSearch Bind(ParseResult result, bool typeList)
+    public static BoundSearch Bind(ParseResult result, bool typeList, bool listFiles = false)
     {
         var patterns = new List<string>();
         var files = new List<string>();
@@ -102,6 +103,23 @@ internal static class SearchSyntax
                 continue;
             }
 
+            // --files takes a path and no pattern. -e / -f are rejected below.
+            if (listFiles)
+            {
+                if (token.Value.Length == 0)
+                {
+                    throw new ArgumentException("Path is empty.");
+                }
+
+                if (path != null)
+                {
+                    throw new ArgumentException("Too many arguments. Usage: ngrep --files [path]");
+                }
+
+                path = token.Value;
+                continue;
+            }
+
             if (!sawPatternSource && !tookPositionalPattern)
             {
                 if (token.Value.Length == 0)
@@ -120,6 +138,16 @@ internal static class SearchSyntax
             }
 
             path = token.Value;
+        }
+
+        if (listFiles)
+        {
+            if (patterns.Count > 0 || files.Count > 0)
+            {
+                throw new ArgumentException("--files does not take a pattern.");
+            }
+
+            return new BoundSearch([], [], path ?? ".");
         }
 
         if (patterns.Count == 0 && files.Count == 0)
@@ -217,13 +245,104 @@ internal static class SearchSyntax
 
         for (var i = 0; i < args.Length; i++)
         {
-            if (args[i] == "--type-list")
+            if (args[i] is "--type-list" or "--files")
             {
                 return false;
             }
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// <c>-u</c> / <c>--unrestricted</c> stacks like ripgrep, up to three times.
+    /// One is <c>--no-ignore</c>, two also <c>--hidden</c>, three also <c>--binary</c>.
+    /// The tokens are rewritten here so a repeated flag is not rejected by the parser.
+    /// A fourth use is an error. Tokens after <c>--</c> are patterns, not flags.
+    /// </summary>
+    private static string[] ApplyUnrestricted(string[] args)
+    {
+        var count = 0;
+        var kept = new List<string>(args.Length + 3);
+        var passthrough = false;
+        foreach (var arg in args)
+        {
+            if (passthrough)
+            {
+                kept.Add(arg);
+                continue;
+            }
+
+            if (arg == "--")
+            {
+                passthrough = true;
+                kept.Add(arg);
+                continue;
+            }
+
+            if (arg is "-u" or "--unrestricted")
+            {
+                count++;
+                continue;
+            }
+
+            kept.Add(arg);
+        }
+
+        if (count == 0)
+        {
+            return kept.ToArray();
+        }
+
+        if (count > 3)
+        {
+            throw new ArgumentException("-u/--unrestricted can be repeated at most 3 times.");
+        }
+
+        var insertAt = kept.Count;
+        for (var i = 0; i < kept.Count; i++)
+        {
+            if (kept[i] == "--")
+            {
+                insertAt = i;
+                break;
+            }
+        }
+
+        if (count >= 1 && !ContainsFlag(kept, "--no-ignore"))
+        {
+            kept.Insert(insertAt++, "--no-ignore");
+        }
+
+        if (count >= 2 && !ContainsFlag(kept, "--hidden"))
+        {
+            kept.Insert(insertAt++, "--hidden");
+        }
+
+        if (count >= 3 && !ContainsFlag(kept, "--binary"))
+        {
+            kept.Insert(insertAt, "--binary");
+        }
+
+        return kept.ToArray();
+    }
+
+    private static bool ContainsFlag(List<string> args, string flag)
+    {
+        foreach (var arg in args)
+        {
+            if (arg == "--")
+            {
+                return false;
+            }
+
+            if (arg == flag)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool IsValueOption(string token)
@@ -270,7 +389,7 @@ internal static class SearchSyntax
     private static bool IsFileOption(string token) => token is "-f" or "--file";
 
     /// <summary>
-    /// Boolean shorts may share one token (<c>-nEi</c>). A value short ends the cluster and
+    /// Boolean shorts may share one token (<c>-nEi</c>, <c>-uu</c>). A value short ends the cluster and
     /// keeps the rest of the token (<c>-nEepat</c> is <c>-n -E -epat</c>). A token that starts
     /// with a value short is left as an attached value (<c>-epat</c>, <c>-A2</c>).
     /// </summary>
@@ -302,7 +421,7 @@ internal static class SearchSyntax
         return expanded.ToArray();
     }
 
-    private const string BoolShorts = "iEFPqnsxvwlcoU";
+    private const string BoolShorts = "iEFPqnsxvwlcoUu";
 
     private const string ValueShorts = "efgtTABCj";
 
