@@ -39,6 +39,12 @@ internal sealed class SearchQuery
 
     public bool IgnoreCase { get; init; }
 
+    /// <summary>
+    /// Per-pattern case folding when smart-case patterns disagree.
+    /// Null when every pattern uses <see cref="IgnoreCase"/>.
+    /// </summary>
+    public bool[]? PatternIgnoreCase { get; init; }
+
     public bool Regex { get; init; }
 
     public bool ForceScan { get; init; }
@@ -642,7 +648,7 @@ internal static class Searcher
         }
 
         // The byte automaton already scans. A literal prefilter would read the file again.
-        if (plan.BytePrograms == null && !plan.Invert && plan.Literals != null && plan.Literals.Misses(read.Span, plan.IgnoreCase))
+        if (plan.BytePrograms == null && !plan.Invert && plan.Literals != null && plan.Literals.Misses(read.Span, plan.PrefilterIgnoreCase))
         {
             tally.File(matched: false);
             filesWithoutMatch?.Add(file.RelativePath);

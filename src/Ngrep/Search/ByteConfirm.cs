@@ -16,7 +16,7 @@ internal static class ByteConfirm
     public static bool CanHandle(MatchPlan plan)
     {
         // -x is a whole-line match. A substring hit in the bytes is not enough.
-        if (plan.Invert || plan.Regex || plan.LineRegexp || plan.Literals == null)
+        if (plan.MixedCase || plan.Invert || plan.Regex || plan.LineRegexp || plan.Literals == null)
         {
             return false;
         }

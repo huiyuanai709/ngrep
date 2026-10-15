@@ -49,6 +49,7 @@ internal static class SearchSyntax
     {
         args = ExpandShortBundles(args);
         args = ApplyUnrestricted(args);
+        args = PreferLast(args);
         if (args.Length == 0 || HasSubcommand(args))
         {
             return args;
@@ -421,7 +422,70 @@ internal static class SearchSyntax
         return expanded.ToArray();
     }
 
-    private const string BoolShorts = "iEFPqnsxvwlcoUu";
+    private const string BoolShorts = "iEFPqnsxvwlcoUuS";
+
+    private static readonly HashSet<string> KnownFlags = new(StringComparer.Ordinal)
+    {
+        "--format", "--index", "--help", "-h", "-?", "--version",
+        "--ignore-case", "-i", "--smart-case", "-S", "--case-sensitive",
+        "--regex", "-E", "--extended-regexp", "--fixed-strings", "-F", "--pcre", "-P",
+        "--scan", "-g", "--glob", "-t", "--type", "-T", "--type-not", "--type-list", "--type-add",
+        "-A", "--after-context", "-B", "--before-context", "-C", "--context",
+        "-e", "--regexp", "-f", "--file", "-w", "--word-regexp", "-x", "--line-regexp",
+        "-v", "--invert-match", "--no-ignore", "--no-ignore-vcs", "-j", "--threads",
+        "-l", "--files-with-matches", "--files-without-match", "-c", "--count",
+        "-q", "--quiet", "--silent", "-n", "--line-number", "-s", "--no-messages",
+        "-o", "--only-matching", "--hidden", "--color", "-U", "--multiline",
+        "--multiline-dotall", "--heading", "--no-heading", "--stats",
+        "--files", "--binary", "-u", "--unrestricted",
+    };
+
+    /// <summary>
+    /// A config word that starts with <c>-</c> must be a flag ngrep accepts.
+    /// Values and patterns are not checked here.
+    /// </summary>
+    internal static bool IsKnownFlag(string argument)
+    {
+        if (argument.Length < 2 || argument[0] != '-' || argument == "--")
+        {
+            return true;
+        }
+
+        var body = argument;
+        var eq = argument.IndexOf('=');
+        if (eq >= 0)
+        {
+            body = argument[..eq];
+        }
+
+        if (KnownFlags.Contains(body))
+        {
+            return true;
+        }
+
+        if (body.Length > 2 && body[1] != '-' && ValueShorts.Contains(body[1]))
+        {
+            return true;
+        }
+
+        if (body.Length > 2 && body[1] != '-' && eq < 0)
+        {
+            for (var i = 1; i < body.Length; i++)
+            {
+                if (BoolShorts.Contains(body[i]))
+                {
+                    continue;
+                }
+
+                // A value short ends the cluster and keeps the rest as its operand.
+                return ValueShorts.Contains(body[i]);
+            }
+
+            return true;
+        }
+
+        return false;
+    }
 
     private const string ValueShorts = "efgtTABCj";
 
@@ -467,4 +531,297 @@ internal static class SearchSyntax
         destination.AddRange(parts);
         return true;
     }
+
+    /// <summary>
+    /// <c>index</c>, <c>watch</c>, help, and version do not read the config file.
+    /// A bare <c>ngrep</c> with no arguments does not either.
+    /// </summary>
+    internal static bool SkipsConfig(string[] args)
+    {
+        if (args.Length == 0)
+        {
+            return true;
+        }
+
+        var commandAt = IndexOfCommand(args);
+        if (commandAt >= 0 && args[commandAt] is "index" or "watch")
+        {
+            return true;
+        }
+
+        for (var i = 0; i < args.Length; i++)
+        {
+            var arg = args[i];
+            if (arg == "--")
+            {
+                break;
+            }
+
+            if (arg is "--help" or "-h" or "-?" or "--version")
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Places config arguments before the user's search arguments so a later CLI flag wins.
+    /// An explicit <c>search</c> token stays where it is; the config words follow it.
+    /// </summary>
+    internal static string[] PrependConfig(string[] args, string[] configArgs)
+    {
+        if (configArgs.Length == 0)
+        {
+            return args;
+        }
+
+        var commandAt = IndexOfCommand(args);
+        if (commandAt >= 0 && args[commandAt] == "search")
+        {
+            var merged = new string[args.Length + configArgs.Length];
+            var head = commandAt + 1;
+            Array.Copy(args, merged, head);
+            configArgs.CopyTo(merged, head);
+            Array.Copy(args, head, merged, head + configArgs.Length, args.Length - head);
+            return merged;
+        }
+
+        var prepended = new string[args.Length + configArgs.Length];
+        configArgs.CopyTo(prepended, 0);
+        args.CopyTo(prepended, configArgs.Length);
+        return prepended;
+    }
+
+    private static int IndexOfCommand(string[] args)
+    {
+        var sawPatternSource = false;
+        for (var i = 0; i < args.Length; i++)
+        {
+            var arg = args[i];
+            if (arg == "--")
+            {
+                return -1;
+            }
+
+            if (arg is "--help" or "-h" or "-?" or "--version")
+            {
+                return -1;
+            }
+
+            if (arg.StartsWith('-'))
+            {
+                var name = OptionName(arg);
+                if (IsPatternSource(name))
+                {
+                    sawPatternSource = true;
+                }
+
+                if (arg.Contains('='))
+                {
+                    continue;
+                }
+
+                if (arg.Length > 2 && arg[0] == '-' && arg[1] != '-' && ValueOptions.Contains(arg[..2]))
+                {
+                    continue;
+                }
+
+                if (ValueOptions.Contains(arg) || ValueOptions.Contains(name))
+                {
+                    i++;
+                }
+
+                continue;
+            }
+
+            if (sawPatternSource)
+            {
+                return -1;
+            }
+
+            return i;
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// The last occurrence of a single-value option wins, and a repeated boolean is kept once.
+    /// Distinct case flags stay in order so the last of <c>-i</c>, <c>-S</c>, and <c>--case-sensitive</c> wins.
+    /// </summary>
+    private static string[] PreferLast(string[] args)
+    {
+        var spans = new List<ArgSpan>();
+        var passthrough = false;
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (passthrough)
+            {
+                continue;
+            }
+
+            var arg = args[i];
+            if (arg == "--")
+            {
+                passthrough = true;
+                continue;
+            }
+
+            if (BoolKey(arg) is { } boolKey)
+            {
+                spans.Add(new ArgSpan(i, i + 1, boolKey));
+                continue;
+            }
+
+            if (!TrySingleValue(arg, out var key, out var attached))
+            {
+                continue;
+            }
+
+            var end = i + 1;
+            if (!attached && end < args.Length && !args[end].StartsWith('-'))
+            {
+                end++;
+            }
+
+            spans.Add(new ArgSpan(i, end, key));
+        }
+
+        if (spans.Count < 2)
+        {
+            return args;
+        }
+
+        var last = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var s = 0; s < spans.Count; s++)
+        {
+            last[spans[s].Key] = s;
+        }
+
+        var drop = new bool[args.Length];
+        var dropped = false;
+        for (var s = 0; s < spans.Count; s++)
+        {
+            if (last[spans[s].Key] == s)
+            {
+                continue;
+            }
+
+            for (var i = spans[s].Start; i < spans[s].End; i++)
+            {
+                drop[i] = true;
+                dropped = true;
+            }
+        }
+
+        if (!dropped)
+        {
+            return args;
+        }
+
+        var kept = new List<string>(args.Length - 1);
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (!drop[i])
+            {
+                kept.Add(args[i]);
+            }
+        }
+
+        return kept.ToArray();
+    }
+
+    private static string? BoolKey(string arg)
+    {
+        var name = OptionName(arg);
+        return name switch
+        {
+            "-i" or "--ignore-case" => "ignore-case",
+            "-S" or "--smart-case" => "smart-case",
+            "--case-sensitive" => "case-sensitive",
+            "-E" or "--regex" or "--extended-regexp" => "regex",
+            "-F" or "--fixed-strings" => "fixed-strings",
+            "-P" or "--pcre" => "pcre",
+            "--scan" => "scan",
+            "--type-list" => "type-list",
+            "-w" or "--word-regexp" => "word-regexp",
+            "-x" or "--line-regexp" => "line-regexp",
+            "-v" or "--invert-match" => "invert-match",
+            "--no-ignore" => "no-ignore",
+            "--no-ignore-vcs" => "no-ignore-vcs",
+            "-l" or "--files-with-matches" => "files-with-matches",
+            "--files-without-match" => "files-without-match",
+            "-c" or "--count" => "count",
+            "-q" or "--quiet" or "--silent" => "quiet",
+            "-n" or "--line-number" => "line-number",
+            "-s" or "--no-messages" => "no-messages",
+            "-o" or "--only-matching" => "only-matching",
+            "--hidden" => "hidden",
+            "--binary" => "binary",
+            "--files" => "files",
+            "-U" or "--multiline" => "multiline",
+            "--multiline-dotall" => "multiline-dotall",
+            "--heading" => "heading",
+            "--no-heading" => "no-heading",
+            "--stats" => "stats",
+            _ => null,
+        };
+    }
+
+    private static bool TrySingleValue(string arg, out string key, out bool attached)
+    {
+        attached = false;
+        key = "";
+        if (arg.Length < 2 || arg[0] != '-' || arg == "--")
+        {
+            return false;
+        }
+
+        var body = arg;
+        var eq = arg.IndexOf('=');
+        if (eq >= 0)
+        {
+            attached = true;
+            body = arg[..eq];
+        }
+
+        key = body switch
+        {
+            "--format" => "format",
+            "--index" => "index",
+            "--color" => "color",
+            "-A" or "--after-context" => "after",
+            "-B" or "--before-context" => "before",
+            "-C" or "--context" => "context",
+            "-j" or "--threads" => "threads",
+            _ => "",
+        };
+        if (key.Length > 0)
+        {
+            return true;
+        }
+
+        if (body.Length > 2 && body[1] != '-')
+        {
+            key = body[..2] switch
+            {
+                "-A" => "after",
+                "-B" => "before",
+                "-C" => "context",
+                "-j" => "threads",
+                _ => "",
+            };
+            if (key.Length > 0)
+            {
+                attached = true;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private readonly record struct ArgSpan(int Start, int End, string Key);
 }
