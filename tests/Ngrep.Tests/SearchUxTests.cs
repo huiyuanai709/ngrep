@@ -340,6 +340,7 @@ public class SearchUxTests
         Assert.Contains("--glob", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--type-list", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--after-context", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--max-count", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--word-regexp", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--invert-match", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--regexp", capture.Stdout, StringComparison.Ordinal);

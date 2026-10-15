@@ -46,6 +46,12 @@ internal sealed class MatchPlan
 
     public required int After { get; init; }
 
+    /// <summary>
+    /// Matching lines per file. Null is unlimited. 0 is rejected here; the searcher
+    /// returns before any read when the query is 0.
+    /// </summary>
+    public int? MaxCount { get; init; }
+
     public required PathFilter Filter { get; init; }
 
     public LiteralQuery? Literals { get; init; }
@@ -171,6 +177,11 @@ internal sealed class MatchPlan
             throw new ArgumentException("Context length must be >= 0.");
         }
 
+        if (query.MaxCount is < 0)
+        {
+            throw new ArgumentException("-m/--max-count must be a non-negative integer.");
+        }
+
         var crosses = query.Multiline || query.MultilineDotAll;
         return new MatchPlan
         {
@@ -184,6 +195,7 @@ internal sealed class MatchPlan
             Invert = query.InvertMatch,
             Before = query.BeforeContext,
             After = query.AfterContext,
+            MaxCount = query.MaxCount,
             Filter = PathFilter.Create(query.Globs, query.Types, query.TypeNots, query.TypeAdds),
             Literals = literalsQuery,
             Ignore = query.NoIgnore
@@ -325,7 +337,7 @@ internal sealed class MatchPlan
             return false;
         }
 
-        EmitByteHits(bytes, relativePath, hits, matches);
+        EmitByteHits(bytes, relativePath, hits, matches, plan.MaxCount);
         matched = true;
         return true;
     }
@@ -360,6 +372,7 @@ internal sealed class MatchPlan
 
         var countOnly = plan.Report == ReportMode.FilesWithoutMatch && !plan.CollectAll;
         var hits = countOnly ? null : new List<Hit>();
+        var matchedLines = 0;
         foreach (var lineStart in lineStarts)
         {
             var end = lineStart;
@@ -387,6 +400,7 @@ internal sealed class MatchPlan
             }
 
             Hit? earliest = null;
+            var beforeHits = hits!.Count;
             for (var i = 0; i < plan.Regexes.Length; i++)
             {
                 if (plan.Patterns[i].Length == 0)
@@ -422,9 +436,14 @@ internal sealed class MatchPlan
             if (plan.StopAtFirst && earliest != null)
             {
                 hits!.Add(earliest.Value);
-                EmitByteHits(bytes, relativePath, hits, matches);
+                EmitByteHits(bytes, relativePath, hits, matches, plan.MaxCount);
                 matched = true;
                 return true;
+            }
+
+            if (hits!.Count > beforeHits && plan.MaxCount is int maxLines && ++matchedLines >= maxLines)
+            {
+                break;
             }
         }
 
@@ -433,12 +452,12 @@ internal sealed class MatchPlan
             return true;
         }
 
-        EmitByteHits(bytes, relativePath, hits!, matches);
+        EmitByteHits(bytes, relativePath, hits!, matches, plan.MaxCount);
         matched = hits!.Count > 0;
         return true;
     }
 
-    private static void EmitByteHits(ReadOnlySpan<byte> bytes, string relativePath, List<Hit> hits, List<SearchMatch> matches)
+    private static void EmitByteHits(ReadOnlySpan<byte> bytes, string relativePath, List<Hit> hits, List<SearchMatch> matches, int? maxLines = null)
     {
         hits.Sort(static (left, right) =>
         {
@@ -449,6 +468,7 @@ internal sealed class MatchPlan
         var cursor = 0;
         var sharedStart = -1;
         string? sharedText = null;
+        var budget = new LineBudget(maxLines);
         foreach (var hit in Dedup(hits))
         {
             var lineStart = hit.Index;
@@ -459,6 +479,11 @@ internal sealed class MatchPlan
 
             lineNo += bytes[cursor..lineStart].Count((byte)'\n');
             cursor = lineStart;
+            if (!budget.Allow(lineNo))
+            {
+                break;
+            }
+
             var end = lineStart;
             while (end < bytes.Length && bytes[end] != (byte)'\n')
             {
@@ -508,7 +533,7 @@ internal sealed class MatchPlan
                 var (before, after) = Context(text, starts, lineCount, line, plan);
                 var offset = line - 1 < starts.Length ? starts[line - 1] : 0;
                 matches.Add(new SearchMatch(relativePath, line, 1, lineText, lineText, before, after, offset));
-                if (plan.StopAtFirst)
+                if (plan.StopAtFirst || (plan.MaxCount is int limit && matches.Count >= limit))
                 {
                     return;
                 }
@@ -541,16 +566,23 @@ internal sealed class MatchPlan
         }
 
         var hits = new List<Hit>();
+        // One pattern can stop at the Nth line. Several patterns still have to be merged
+        // so an earlier hit from a later pattern is not dropped.
+        var lineLimit = plan.Patterns.Length == 1 ? plan.MaxCount ?? 0 : 0;
         if (plan.Regex)
         {
             for (var i = 0; i < plan.Regexes!.Length; i++)
             {
                 if (plan.Patterns[i].Length == 0)
                 {
-                    CollectEmpty(text, plan.Word, hits);
+                    CollectEmpty(text, plan.Word, hits, lineLimit);
                     continue;
                 }
 
+                var line = 1;
+                var cursor = 0;
+                var kept = 0;
+                var lastLine = 0;
                 foreach (Match match in plan.Regexes[i].Matches(text))
                 {
                     if (!match.Success)
@@ -568,6 +600,11 @@ internal sealed class MatchPlan
                         continue;
                     }
 
+                    if (lineLimit > 0 && !AcceptLimitedLine(text, match.Index, lineLimit, ref line, ref cursor, ref kept, ref lastLine))
+                    {
+                        break;
+                    }
+
                     hits.Add(new Hit(match.Index, match.Length, match.Value));
                 }
             }
@@ -579,11 +616,11 @@ internal sealed class MatchPlan
                 var pattern = plan.Patterns[i];
                 if (pattern.Length == 0)
                 {
-                    CollectEmpty(text, plan.Word, hits);
+                    CollectEmpty(text, plan.Word, hits, lineLimit);
                     continue;
                 }
 
-                CollectLiteral(text, pattern, ComparisonAt(plan, i), plan.Word, hits);
+                CollectLiteral(text, pattern, ComparisonAt(plan, i), plan.Word, hits, lineLimit);
             }
         }
 
@@ -595,8 +632,14 @@ internal sealed class MatchPlan
 
         var deduped = Dedup(hits);
         var cache = default(SharedLine);
+        var budget = new LineBudget(plan.MaxCount);
         foreach (var hit in deduped)
         {
+            if (!budget.Allow(LineMap.Map(starts, hit.Index).Line))
+            {
+                break;
+            }
+
             AddHit(text, starts, lineCount, relativePath, plan, hit, matches, ref cache);
         }
     }
@@ -658,7 +701,7 @@ internal sealed class MatchPlan
             }
 
             AddHit(text, starts, lineCount, relativePath, plan, hit, matches, ref cache);
-            if (plan.StopAtFirst)
+            if (plan.StopAtFirst || (plan.MaxCount is int limit && matches.Count >= limit))
             {
                 return;
             }
@@ -801,8 +844,14 @@ internal sealed class MatchPlan
             return index != 0 ? index : left.Length.CompareTo(right.Length);
         });
         var cache = default(SharedLine);
+        var budget = new LineBudget(plan.MaxCount);
         foreach (var hit in Dedup(hits))
         {
+            if (!budget.Allow(LineMap.Map(starts, hit.Index).Line))
+            {
+                break;
+            }
+
             AddHit(text, starts, lineCount, relativePath, plan, hit, matches, ref cache);
         }
     }
@@ -1181,19 +1230,26 @@ internal sealed class MatchPlan
     /// An empty pattern matches every line once, at column 1. Ripgrep's empty regex also
     /// reports a zero-width match at every offset; text output still shows each line once.
     /// </summary>
-    private static void CollectEmpty(string text, bool word, List<Hit> hits)
+    private static void CollectEmpty(string text, bool word, List<Hit> hits, int maxLines = 0)
     {
         if (text.Length == 0)
         {
             return;
         }
 
+        var kept = 0;
         var from = 0;
         while (from < text.Length)
         {
             if (!word || WordBoundary.At(text, from, 0))
             {
+                if (maxLines > 0 && kept >= maxLines)
+                {
+                    return;
+                }
+
                 hits.Add(new Hit(from, 0, ""));
+                kept++;
             }
 
             var newline = text.IndexOf('\n', from);
@@ -1245,13 +1301,17 @@ internal sealed class MatchPlan
         }
     }
 
-    private static void CollectLiteral(string text, string pattern, StringComparison comparison, bool word, List<Hit> hits)
+    private static void CollectLiteral(string text, string pattern, StringComparison comparison, bool word, List<Hit> hits, int maxLines = 0)
     {
         if (pattern.Length == 0 || pattern.Length > text.Length)
         {
             return;
         }
 
+        var line = 1;
+        var cursor = 0;
+        var kept = 0;
+        var lastLine = 0;
         var from = 0;
         while (from <= text.Length - pattern.Length)
         {
@@ -1263,6 +1323,11 @@ internal sealed class MatchPlan
 
             if (!word || WordBoundary.At(text, idx, pattern.Length))
             {
+                if (maxLines > 0 && !AcceptLimitedLine(text, idx, maxLines, ref line, ref cursor, ref kept, ref lastLine))
+                {
+                    return;
+                }
+
                 hits.Add(new Hit(idx, pattern.Length, text.Substring(idx, pattern.Length)));
                 from = idx + pattern.Length;
             }
@@ -1271,6 +1336,36 @@ internal sealed class MatchPlan
                 from = idx + 1;
             }
         }
+    }
+
+    /// <summary>
+    /// True when <paramref name="index"/> still belongs to one of the first <paramref name="maxLines"/> lines.
+    /// The cursor walks forward so each newline is counted once.
+    /// </summary>
+    private static bool AcceptLimitedLine(string text, int index, int maxLines, ref int line, ref int cursor, ref int kept, ref int lastLine)
+    {
+        for (var i = cursor; i < index && i < text.Length; i++)
+        {
+            if (text[i] == '\n')
+            {
+                line++;
+            }
+        }
+
+        cursor = index;
+        if (kept > 0 && line == lastLine)
+        {
+            return true;
+        }
+
+        if (kept >= maxLines)
+        {
+            return false;
+        }
+
+        kept++;
+        lastLine = line;
+        return true;
     }
 
     private static List<Hit> Dedup(List<Hit> hits)
@@ -1448,4 +1543,93 @@ internal static class VerbatimPattern
         value is '.' or '|' or '(' or ')' or '[' or ']' or '{' or '}' or '^' or '$' or '*' or '+' or '?';
 
     private static bool IsEscapedLiteral(char value) => IsMeta(value) || value == '\\';
+}
+
+/// <summary>
+/// Counts distinct matching lines toward <c>-m</c>. Another hit on the current line stays allowed.
+/// </summary>
+internal struct LineBudget
+{
+    private readonly int _limit;
+    private int _lines;
+    private int _line;
+
+    public LineBudget(int? maxCount)
+    {
+        _limit = maxCount ?? int.MaxValue;
+        _lines = 0;
+        _line = 0;
+    }
+
+    public bool Allow(int line)
+    {
+        if (_lines > 0 && line == _line)
+        {
+            return true;
+        }
+
+        if (_lines >= _limit)
+        {
+            return false;
+        }
+
+        _lines++;
+        _line = line;
+        return true;
+    }
+}
+
+internal static class MatchLimits
+{
+    public static void Trim(List<SearchMatch> matches, int maxLines)
+    {
+        if (matches.Count == 0)
+        {
+            return;
+        }
+
+        if (maxLines <= 0)
+        {
+            matches.Clear();
+            return;
+        }
+
+        if (matches.Count > 1)
+        {
+            matches.Sort(static (left, right) =>
+            {
+                var line = left.Line.CompareTo(right.Line);
+                if (line != 0)
+                {
+                    return line;
+                }
+
+                var column = left.Column.CompareTo(right.Column);
+                return column != 0 ? column : left.Text.Length.CompareTo(right.Text.Length);
+            });
+        }
+
+        var lines = 0;
+        var lineNo = 0;
+        var keep = 0;
+        for (; keep < matches.Count; keep++)
+        {
+            var next = matches[keep].Line;
+            if (keep == 0 || next != lineNo)
+            {
+                if (lines == maxLines)
+                {
+                    break;
+                }
+
+                lines++;
+                lineNo = next;
+            }
+        }
+
+        if (keep < matches.Count)
+        {
+            matches.RemoveRange(keep, matches.Count - keep);
+        }
+    }
 }

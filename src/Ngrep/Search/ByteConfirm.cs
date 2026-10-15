@@ -31,9 +31,39 @@ internal static class ByteConfirm
     /// </summary>
     public static ReadStop? ArmFresh(MatchPlan plan)
     {
-        if (!plan.StopAtFirst || plan.WantsContext || plan.Word || !CanHandle(plan))
+        if (plan.Word || !CanHandle(plan) || PatternHasNewline(plan))
         {
             return null;
+        }
+
+        int? lines = null;
+        var after = 0;
+        if (plan.MaxCount is int maxCount && maxCount > 0)
+        {
+            lines = maxCount;
+            after = plan.After;
+        }
+
+        if (plan.StopAtFirst)
+        {
+            if (lines is int capped)
+            {
+                lines = Math.Min(capped, 1);
+            }
+            else if (!plan.WantsContext)
+            {
+                lines = 1;
+            }
+        }
+
+        if (lines is not int limit)
+        {
+            return null;
+        }
+
+        if (plan.MaxCount is null)
+        {
+            after = 0;
         }
 
         if (!plan.Literals!.TryAsciiOr(plan.IgnoreCase, out var any, out _, out var lengths))
@@ -51,8 +81,21 @@ internal static class ByteConfirm
         }
 
         var state = new StopState();
-        state.Arm(any, max);
+        state.Arm(any, max, limit, after);
         return state.Stop;
+    }
+
+    private static bool PatternHasNewline(MatchPlan plan)
+    {
+        foreach (var pattern in plan.Patterns)
+        {
+            if (pattern.IndexOf('\n') >= 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Makes <see cref="TryHandle"/> see the stop state <paramref name="stop"/> closes over.</summary>
@@ -174,17 +217,64 @@ internal static class ByteConfirm
 
             hits.Add(new Hit(bestAt, bestLen));
         }
+        else if (plan.Word && plan.MaxCount is int wordMax && lengths.Length == 1)
+        {
+            var len = lengths[0];
+            var scanner = each == null ? any : each[0];
+            var from = 0;
+            var line = 1;
+            var cursor = 0;
+            var kept = 0;
+            var last = 0;
+            while (from <= span.Length - len)
+            {
+                var idx = Find(scanner, span, from, len, word: true);
+                if (idx < 0)
+                {
+                    break;
+                }
+
+                for (var i = cursor; i < idx; i++)
+                {
+                    if (span[i] == (byte)'\n')
+                    {
+                        line++;
+                    }
+                }
+
+                cursor = idx;
+                if (kept == 0 || line != last)
+                {
+                    if (kept >= wordMax)
+                    {
+                        break;
+                    }
+
+                    kept++;
+                    last = line;
+                }
+
+                hits.Add(new Hit(idx, len));
+                from = idx + len;
+            }
+        }
         else
         {
+            var exclusive = int.MaxValue;
+            if (!plan.Word && plan.MaxCount is int maxLines && maxLines > 0 && !PatternHasNewline(plan))
+            {
+                exclusive = MatchingPrefixEnd(any, span, maxLines);
+            }
+
             for (var n = 0; n < lengths.Length; n++)
             {
                 var scanner = each == null ? any : each[n];
                 var len = lengths[n];
                 var from = 0;
-                while (from <= span.Length - len)
+                while (from < exclusive && from <= span.Length - len)
                 {
                     var idx = Find(scanner, span, from, len, plan.Word);
-                    if (idx < 0)
+                    if (idx < 0 || idx >= exclusive)
                     {
                         break;
                     }
@@ -302,6 +392,36 @@ internal static class ByteConfirm
             null,
             null,
             index));
+    }
+
+    /// <summary>
+    /// Byte index where hits past the first <paramref name="maxLines"/> matching lines begin.
+    /// The scanner is not word-aware; callers skip this when <c>-w</c> is set.
+    /// </summary>
+    private static int MatchingPrefixEnd(SimdLiteralScanner scanner, ReadOnlySpan<byte> span, int maxLines)
+    {
+        var from = 0;
+        var lines = 0;
+        while (from < span.Length && lines < maxLines)
+        {
+            var rel = scanner.IndexOfAny(span[from..]);
+            if (rel < 0)
+            {
+                return span.Length;
+            }
+
+            var idx = from + rel;
+            var nl = span[idx..].IndexOf((byte)'\n');
+            lines++;
+            if (nl < 0)
+            {
+                return span.Length;
+            }
+
+            from = idx + nl + 1;
+        }
+
+        return from;
     }
 
     private static int Find(SimdLiteralScanner scanner, ReadOnlySpan<byte> span, int from, int length, bool word)
@@ -471,15 +591,38 @@ internal static class ByteConfirm
 
         private SimdLiteralScanner? _scanner;
 
-        private int _accepted;
+        private int _scan;
 
         private int _maxLength;
 
-        public void Arm(SimdLiteralScanner scanner, int maxLength)
+        private int _lineLimit;
+
+        private int _afterLines;
+
+        private int _matchedLines;
+
+        private bool _awaitingLineEnd;
+
+        private int _holdIndex;
+
+        private bool _collectingAfter;
+
+        private int _afterScan;
+
+        private int _afterSeen;
+
+        public void Arm(SimdLiteralScanner scanner, int maxLength, int lineLimit, int afterLines)
         {
             _scanner = scanner;
             _maxLength = Math.Max(1, maxLength);
-            _accepted = 0;
+            _lineLimit = Math.Max(1, lineLimit);
+            _afterLines = Math.Max(0, afterLines);
+            _scan = 0;
+            _matchedLines = 0;
+            _awaitingLineEnd = false;
+            _collectingAfter = false;
+            _afterScan = 0;
+            _afterSeen = 0;
             Hit = -1;
             NonAscii = false;
             Active = true;
@@ -492,36 +635,117 @@ internal static class ByteConfirm
                 return false;
             }
 
-            var start = _accepted;
-            if (start > span.Length)
+            if (_collectingAfter)
             {
-                start = 0;
+                return ConsumeAfter(span, endOfFile);
             }
 
-            // A miss is final for an ASCII needle, so the bytes are not validated.
-            // Only a hit checks that the prefix is ASCII, and only the new window is scanned.
-            var rel = _scanner.IndexOfAny(span[start..]);
-            if (rel < 0)
+            while (true)
             {
-                _accepted = endOfFile ? span.Length : Math.Max(start, span.Length - _maxLength + 1);
+                if (_awaitingLineEnd)
+                {
+                    var held = span[_holdIndex..].IndexOf((byte)'\n');
+                    if (held < 0)
+                    {
+                        if (!endOfFile)
+                        {
+                            return false;
+                        }
+
+                        return FinishMatchingLine(span, span.Length, endOfFile);
+                    }
+
+                    _awaitingLineEnd = false;
+                    if (FinishMatchingLine(span, _holdIndex + held + 1, endOfFile))
+                    {
+                        return true;
+                    }
+
+                    continue;
+                }
+
+                if (_scan > span.Length)
+                {
+                    _scan = 0;
+                }
+
+                // A miss is final for an ASCII needle, so the bytes are not validated.
+                // Only a hit checks that the prefix is ASCII, and only the new window is scanned.
+                var rel = _scanner.IndexOfAny(span[_scan..]);
+                if (rel < 0)
+                {
+                    _scan = endOfFile ? span.Length : Math.Max(_scan, span.Length - _maxLength + 1);
+                    return false;
+                }
+
+                var idx = _scan + rel;
+                if (!Ascii.IsValid(span[..(idx + 1)]))
+                {
+                    NonAscii = true;
+                    return false;
+                }
+
+                if (Hit < 0)
+                {
+                    Hit = idx;
+                }
+
+                _matchedLines++;
+                var newline = span[idx..].IndexOf((byte)'\n');
+                if (newline < 0)
+                {
+                    if (!endOfFile)
+                    {
+                        _awaitingLineEnd = true;
+                        _holdIndex = idx;
+                        return false;
+                    }
+
+                    return true;
+                }
+
+                if (FinishMatchingLine(span, idx + newline + 1, endOfFile))
+                {
+                    return true;
+                }
+            }
+        }
+
+        private bool FinishMatchingLine(ReadOnlySpan<byte> span, int lineEnd, bool endOfFile)
+        {
+            if (_matchedLines < _lineLimit)
+            {
+                _scan = lineEnd;
                 return false;
             }
 
-            var idx = start + rel;
-            if (!Ascii.IsValid(span[..(idx + 1)]))
-            {
-                NonAscii = true;
-                return false;
-            }
-
-            Hit = idx;
-            if (endOfFile || span[idx..].IndexOf((byte)'\n') >= 0)
+            if (_afterLines <= 0)
             {
                 return true;
             }
 
-            _accepted = idx;
-            return false;
+            _collectingAfter = true;
+            _afterScan = lineEnd;
+            _afterSeen = 0;
+            return ConsumeAfter(span, endOfFile);
+        }
+
+        private bool ConsumeAfter(ReadOnlySpan<byte> span, bool endOfFile)
+        {
+            for (var i = _afterScan; i < span.Length; i++)
+            {
+                if (span[i] == (byte)'\n')
+                {
+                    _afterSeen++;
+                    if (_afterSeen >= _afterLines)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            _afterScan = span.Length;
+            return endOfFile;
         }
     }
 }
