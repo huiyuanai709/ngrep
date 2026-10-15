@@ -1,4 +1,5 @@
 using System.CommandLine;
+using System.CommandLine.Parsing;
 using System.Text;
 using Ngrep.Ignore;
 using Ngrep.Indexing;
@@ -218,7 +219,7 @@ internal static class NgrepCli
         };
         var listFiles = new Option<bool>("--files")
         {
-            Description = "List files that would be searched, one relative path per line, and do not search. No pattern. Respects ignore files, hidden names, globs, and types. Exit 0 if any path is listed, 1 if none, and 2 on error. Does not read file contents, so binary files and files over 32 MiB are listed. Does not use the index. --format is ignored. -q prints nothing and keeps that exit code.",
+            Description = "List files that would be searched, one relative path per line, and do not search. No pattern. Respects ignore files, hidden names, globs, and types. Exit 0 if any path is listed, 1 if none, and 2 on error. Does not read file contents, so binary files and files over 32 MiB are listed. Does not use the index. --format is ignored. -0 / --null prints each path followed by NUL. -q prints nothing and keeps that exit code.",
         };
         var filesWith = new Option<bool>("--files-with-matches", "-l")
         {
@@ -238,7 +239,31 @@ internal static class NgrepCli
         };
         var lineNumber = new Option<bool>("--line-number", "-n")
         {
-            Description = "Accepted for grep compatibility. Text output always includes the 1-based line number (path:line:column:text, or line:column:text under a heading).",
+            Description = "Print 1-based line numbers in text output. This is the default. -N / --no-line-number turns them off; the last of the two wins.",
+        };
+        var noLineNumber = new Option<bool>("--no-line-number", "-N")
+        {
+            Description = "Omit line numbers from text output. The default is to print them. -n turns them back on; the last flag wins. json, ndjson, and rgjson ignore this flag.",
+        };
+        var column = new Option<bool>("--column")
+        {
+            Description = "Print 1-based columns in text output. This is the default, unlike ripgrep. --no-column turns them off; the last flag wins.",
+        };
+        var noColumn = new Option<bool>("--no-column")
+        {
+            Description = "Omit columns from text output. The default is to print them. --column turns them back on; the last flag wins. json, ndjson, and rgjson ignore this flag.",
+        };
+        var vimgrep = new Option<bool>("--vimgrep")
+        {
+            Description = "Print each text match as path:line:column:text. Forces line numbers and columns, and disables headings. Overrides -N, --no-column, and --heading.",
+        };
+        var nullPaths = new Option<bool>("--null", "-0")
+        {
+            Description = "Follow each printed path with NUL instead of the usual newline or separator. Applies to match lines, context, headings, -c, -l, --files-without-match, and --files. json, ndjson, and rgjson ignore this flag. --files still honors it.",
+        };
+        var replace = new Option<string>("--replace", "-r")
+        {
+            Description = "Replace matches in text output. Does not modify files. The default regex, -E, and -P expand $0, $&, $N, ${N}, $name, and ${name}; $$ is a literal $. A missing group is empty. -F inserts the text literally. -S folds the same patterns the search folds. json, ndjson, and rgjson ignore this flag.",
         };
         var noMessages = new Option<bool>("--no-messages", "-s")
         {
@@ -315,6 +340,12 @@ internal static class NgrepCli
         searchCommand.Options.Add(count);
         searchCommand.Options.Add(quiet);
         searchCommand.Options.Add(lineNumber);
+        searchCommand.Options.Add(noLineNumber);
+        searchCommand.Options.Add(column);
+        searchCommand.Options.Add(noColumn);
+        searchCommand.Options.Add(vimgrep);
+        searchCommand.Options.Add(nullPaths);
+        searchCommand.Options.Add(replace);
         searchCommand.Options.Add(noMessages);
         searchCommand.Options.Add(onlyMatching);
         searchCommand.Options.Add(hidden);
@@ -381,6 +412,13 @@ internal static class NgrepCli
                     fixedStrings,
                     noMessages,
                     onlyMatching,
+                    lineNumber,
+                    noLineNumber,
+                    column,
+                    noColumn,
+                    vimgrep,
+                    nullPaths,
+                    replace,
                     hidden,
                     color,
                     multiline,
@@ -470,6 +508,13 @@ internal static class NgrepCli
         Option<bool> fixedStrings,
         Option<bool> noMessages,
         Option<bool> onlyMatching,
+        Option<bool> lineNumber,
+        Option<bool> noLineNumber,
+        Option<bool> column,
+        Option<bool> noColumn,
+        Option<bool> vimgrep,
+        Option<bool> nullPaths,
+        Option<string> replace,
         Option<bool> hidden,
         Option<string> color,
         Option<bool> multiline,
@@ -493,7 +538,7 @@ internal static class NgrepCli
 
         if (result.GetValue(listFiles))
         {
-            return ListFiles(result, glob, type, typeNot, adds, noIgnore, noIgnoreVcs, hidden, quiet, noMessages, filesWith, filesWithout, count, cancellationToken);
+            return ListFiles(result, glob, type, typeNot, adds, noIgnore, noIgnoreVcs, hidden, quiet, noMessages, filesWith, filesWithout, count, nullPaths, cancellationToken);
         }
 
         var bound = SearchSyntax.Bind(result, typeList: false);
@@ -517,6 +562,40 @@ internal static class NgrepCli
         var wantStats = result.GetValue(stats);
         var forceHeading = result.GetValue(heading);
         var suppressHeading = result.GetValue(noHeading);
+        var lineNumbers = ResolveSwitch(result, fallback: true, lineNumber, noLineNumber);
+        var showColumn = ResolveSwitch(result, fallback: true, column, noColumn);
+        if (result.GetValue(vimgrep))
+        {
+            lineNumbers = true;
+            showColumn = true;
+            forceHeading = false;
+            suppressHeading = true;
+        }
+
+        LineReplacer? replacer = null;
+        if (parsedFormat == OutputFormat.Text && IsSet(result, replace) && !result.GetValue(invert))
+        {
+            replacer = LineReplacer.Create(
+                result.GetValue(replace) ?? "",
+                !result.GetValue(fixedStrings),
+                patterns,
+                casing.IgnoreCase,
+                result.GetValue(pcre),
+                result.GetValue(lineRegexp),
+                result.GetValue(multilineDotAll),
+                casing.PerPattern);
+        }
+
+        SearchPresentation Present(bool heading) => new(
+            report,
+            result.GetValue(onlyMatching),
+            colorOn,
+            heading,
+            lineNumbers,
+            showColumn,
+            result.GetValue(nullPaths),
+            replacer);
+
         var autoHeading = parsedFormat == OutputFormat.Text
             && report == ReportMode.Matches
             && !suppressHeading
@@ -532,7 +611,7 @@ internal static class NgrepCli
         {
             stream = new MachineOutput.MatchStream(
                 parsedFormat,
-                new SearchPresentation(report, result.GetValue(onlyMatching), colorOn, useHeading),
+                Present(useHeading),
                 autoHeading);
             events = new SearchEvents
             {
@@ -603,7 +682,7 @@ internal static class NgrepCli
             MachineOutput.WriteMatches(
                 outcome.Matches,
                 parsedFormat,
-                new SearchPresentation(report, result.GetValue(onlyMatching), colorOn, quietHeading),
+                Present(quietHeading),
                 outcome.FilesWithoutMatch,
                 outcome.ElapsedMilliseconds);
         }
@@ -633,6 +712,7 @@ internal static class NgrepCli
         Option<bool> filesWith,
         Option<bool> filesWithout,
         Option<bool> count,
+        Option<bool> nullPaths,
         CancellationToken cancellationToken)
     {
         if (result.GetValue(filesWith) || result.GetValue(filesWithout) || result.GetValue(count))
@@ -668,9 +748,14 @@ internal static class NgrepCli
 
         if (!result.GetValue(quiet))
         {
+            var presentation = new SearchPresentation(
+                ReportMode.FilesWithMatches,
+                OnlyMatching: false,
+                Color: false,
+                NullPaths: result.GetValue(nullPaths));
             foreach (var path in paths)
             {
-                Console.WriteLine(path);
+                TextLayout.WriteFilePath(path, presentation);
             }
         }
 
@@ -765,6 +850,64 @@ internal static class NgrepCli
         }
 
         return value;
+    }
+
+    /// <summary>
+    /// Last explicit flag wins. <paramref name="enable"/> and <paramref name="disable"/> are a pair
+    /// such as <c>-n</c> / <c>-N</c>. When neither appears, <paramref name="fallback"/> is used.
+    /// </summary>
+    private static bool ResolveSwitch(
+        System.CommandLine.ParseResult result,
+        bool fallback,
+        Option<bool> enable,
+        Option<bool> disable)
+    {
+        bool? value = null;
+        foreach (var token in result.Tokens)
+        {
+            if (token.Type != TokenType.Option)
+            {
+                continue;
+            }
+
+            // Aliases omits the option's Name, so --no-column (a name with no short alias)
+            // is invisible if only Aliases is checked.
+            if (Names(enable, token.Value))
+            {
+                value = true;
+            }
+            else if (Names(disable, token.Value))
+            {
+                value = false;
+            }
+        }
+
+        return value ?? fallback;
+    }
+
+    private static bool Names(Option option, string token)
+    {
+        var name = token;
+        var eq = name.IndexOf('=');
+        if (eq >= 0)
+        {
+            name = name[..eq];
+        }
+
+        if (string.Equals(name, option.Name, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        foreach (var alias in option.Aliases)
+        {
+            if (string.Equals(name, alias, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool IsSet(System.CommandLine.ParseResult result, Option option)

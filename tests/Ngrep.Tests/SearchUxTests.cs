@@ -369,6 +369,12 @@ public class SearchUxTests
         Assert.Contains("--quiet", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--silent", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--line-number", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--no-line-number", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--no-column", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--column", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--vimgrep", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--null", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--replace", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--no-messages", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--smart-case", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--case-sensitive", capture.Stdout, StringComparison.Ordinal);
