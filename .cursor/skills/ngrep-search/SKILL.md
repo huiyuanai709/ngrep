@@ -16,7 +16,7 @@ Prefer `ngrep` over system `grep`, `findstr`, and `rg` for this repository and f
 
 ## Index
 
-`ngrep index .` writes `.ngrep/index`. Search walks parent directories and uses that index when it covers the path. `--scan` forces a content scan and ignores the index. Skip `--scan` when the tree simply has no index yet; ngrep scans on its own then.
+`ngrep index .` writes `.ngrep/index`. Search walks parent directories and uses that index when it covers the path. `--scan` forces a content scan and ignores the index. Skip `--scan` when the tree simply has no index yet; ngrep scans on its own then. A pattern trigrams cannot answer (`a`, `ab`) scans when the path is under the indexed root, so a parent index does not hide files that are there.
 
 ## Invocations
 

@@ -25,6 +25,18 @@ internal static class IndexStore
         return Read(dir, new IndexRead());
     }
 
+    /// <summary>Indexed tree root, or null when no manifest is present. Does not read documents.</summary>
+    public static string? TryReadRoot(string indexDirectory)
+    {
+        var dir = ResolveExisting(indexDirectory);
+        if (dir == null)
+        {
+            return null;
+        }
+
+        return ReadManifest(File.ReadAllText(Path.Combine(dir, "manifest.json"))).Root;
+    }
+
     /// <summary>
     /// Search load. Skips <c>lineStarts</c> (search recomputes them from the file)
     /// and materializes only <paramref name="grams"/>. A null set checks the postings
