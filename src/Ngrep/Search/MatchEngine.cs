@@ -414,6 +414,8 @@ internal sealed class MatchPlan
         });
         var lineNo = 1;
         var cursor = 0;
+        var sharedStart = -1;
+        string? sharedText = null;
         foreach (var hit in Dedup(hits))
         {
             var lineStart = hit.Index;
@@ -436,12 +438,18 @@ internal sealed class MatchPlan
                 textEnd--;
             }
 
+            if (sharedText == null || lineStart != sharedStart)
+            {
+                sharedStart = lineStart;
+                sharedText = Encoding.ASCII.GetString(bytes[lineStart..textEnd]);
+            }
+
             matches.Add(new SearchMatch(
                 relativePath,
                 lineNo,
                 hit.Index - lineStart + 1,
                 hit.Value,
-                Encoding.ASCII.GetString(bytes[lineStart..textEnd]),
+                sharedText,
                 null,
                 null,
                 hit.Index));
@@ -486,7 +494,8 @@ internal sealed class MatchPlan
         {
             if (FirstHit(text, plan) is { } first)
             {
-                AddHit(text, starts, lineCount, relativePath, plan, first, matches);
+                var firstLine = default(SharedLine);
+                AddHit(text, starts, lineCount, relativePath, plan, first, matches, ref firstLine);
             }
 
             return;
@@ -552,9 +561,10 @@ internal sealed class MatchPlan
         });
 
         var deduped = Dedup(hits);
+        var cache = default(SharedLine);
         foreach (var hit in deduped)
         {
-            AddHit(text, starts, lineCount, relativePath, plan, hit, matches);
+            AddHit(text, starts, lineCount, relativePath, plan, hit, matches, ref cache);
         }
     }
 
@@ -565,19 +575,37 @@ internal sealed class MatchPlan
         string relativePath,
         MatchPlan plan,
         Hit hit,
-        List<SearchMatch> matches)
+        List<SearchMatch> matches,
+        ref SharedLine cache)
     {
         var (line, column) = LineMap.Map(starts, hit.Index);
-        var (before, after) = Context(text, starts, lineCount, line, plan);
+        if (!cache.Ready || cache.Line != line)
+        {
+            cache.Ready = true;
+            cache.Line = line;
+            cache.Text = LineMap.LineText(text, starts, line);
+            (cache.Before, cache.After) = Context(text, starts, lineCount, line, plan);
+        }
+
         matches.Add(new SearchMatch(
             relativePath,
             line,
             column,
             hit.Value,
-            LineMap.LineText(text, starts, line),
-            before,
-            after,
+            cache.Text!,
+            cache.Before,
+            cache.After,
             hit.Index));
+    }
+
+    /// <summary>One decoded line, reused by every hit on that line.</summary>
+    private struct SharedLine
+    {
+        public bool Ready;
+        public int Line;
+        public string? Text;
+        public IReadOnlyList<ContextLine>? Before;
+        public IReadOnlyList<ContextLine>? After;
     }
 
     private static void CollectLines(
@@ -588,6 +616,7 @@ internal sealed class MatchPlan
         MatchPlan plan,
         List<SearchMatch> matches)
     {
+        var cache = default(SharedLine);
         for (var line = 1; line <= lineCount; line++)
         {
             if (!WholeLineHit(text, starts, line, plan, out var hit))
@@ -595,7 +624,7 @@ internal sealed class MatchPlan
                 continue;
             }
 
-            AddHit(text, starts, lineCount, relativePath, plan, hit, matches);
+            AddHit(text, starts, lineCount, relativePath, plan, hit, matches, ref cache);
             if (plan.StopAtFirst)
             {
                 return;
@@ -740,9 +769,10 @@ internal sealed class MatchPlan
             var index = left.Index.CompareTo(right.Index);
             return index != 0 ? index : left.Length.CompareTo(right.Length);
         });
+        var cache = default(SharedLine);
         foreach (var hit in Dedup(hits))
         {
-            AddHit(text, starts, lineCount, relativePath, plan, hit, matches);
+            AddHit(text, starts, lineCount, relativePath, plan, hit, matches, ref cache);
         }
     }
 

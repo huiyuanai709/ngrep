@@ -241,18 +241,30 @@ internal static class ByteConfirm
 
         var starts = LineStarts(span);
         var lineCount = span.Length == 0 ? 0 : span[^1] == (byte)'\n' ? starts.Length - 1 : starts.Length;
+        // Hits are in order. A minified line can contain the needle thousands of times;
+        // one string (and one context pair) is shared by every hit on that line.
+        var sharedLine = 0;
+        string? sharedText = null;
+        IReadOnlyList<ContextLine>? sharedBefore = null;
+        IReadOnlyList<ContextLine>? sharedAfter = null;
         foreach (var hit in hits)
         {
             var (line, column) = LineMap.Map(starts, hit.Index);
-            var (before, after) = Context(span, starts, lineCount, line, plan);
+            if (sharedText == null || line != sharedLine)
+            {
+                sharedLine = line;
+                sharedText = LineText(span, starts, line);
+                (sharedBefore, sharedAfter) = Context(span, starts, lineCount, line, plan);
+            }
+
             matches.Add(new SearchMatch(
                 relativePath,
                 line,
                 column,
                 AsciiText(span.Slice(hit.Index, hit.Length)),
-                LineText(span, starts, line),
-                before,
-                after,
+                sharedText,
+                sharedBefore,
+                sharedAfter,
                 hit.Index));
         }
 
