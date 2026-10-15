@@ -51,7 +51,7 @@ Search flags:
 [-A|--after-context <n>] [-B|--before-context <n>] [-C|--context <n>]
 [-U|--multiline] [--multiline-dotall] [-P|--pcre] [--hidden] [--binary]
 [-u|--unrestricted] [--color auto|always|never]
-[-j|--threads <n>]
+[-j|--threads <n>] [-d|--max-depth <n>]
 ```
 
 `index` writes `<path>/.ngrep/index` unless `--index` is set. Running it again updates changed files and drops deleted ones (size + mtime, then SHA-256). A second pass does not read bytes when size and mtime still match. File reads use the same async pipeline as search (`NGREP_THREADS`, else `NETGREP_THREADS`, else the processor count). `-q` skips the per-path stderr lines.
@@ -93,6 +93,8 @@ The default `-E` engine is non-backtracking. Simple captures, named groups, and 
 `-v` changes what a hit is. `-l -v` lists files that contain at least one non-matching line. `--files-without-match -v` lists files whose every line matches (an empty file has no lines, so it is listed). `-c -v` counts non-matching lines. Exit 0 means the selected report was non-empty; exit 1 means it was empty.
 
 `-o` / `--only-matching` changes text output to `path:line:column:text`, the matched slice, one line per hit. JSON and NDJSON stay `path`, `line`, `column`, `text`, `lineText`. `text` was already the slice. Context flags still fill `before` / `after` in JSON; text `-o` does not print context lines.
+
+`-d` / `--max-depth` (`--maxdepth` is the same flag) caps directory depth the way ripgrep does. Depth 0 is the path you named. Depth 1 is an immediate child of that path. Depth 2 is a child of those, and so on. `-d 0` on a directory lists nothing, because that directory is the start path and its files sit at depth 1. `-d 0` on a file still searches that file. `-d 1` reads only the files directly in the directory. `-d 2` also reads the files in its child directories. Omitting the flag walks the whole tree. `.gitignore`, `--hidden`, and `--no-ignore` / `--no-ignore-vcs` still decide what is skipped; the cap only stops descent. A directory that the cap does not list does not contribute a `.gitignore`. Ancestor ignore files still apply. An indexed search keeps the index and drops document paths deeper than the cap, so those files are not opened.
 
 Hidden files and directories are skipped by default. A name that starts with `.` is hidden. On Windows and macOS, the hidden file attribute is hidden too, so a content scan of a home directory does not walk `AppData`. `--hidden` searches both. Naming a file, or a directory, still searches that path: `ngrep pat .secret` reads `.secret`, and `ngrep pat .github` reads non-hidden children of `.github`. Hard skips stay skipped with or without `--hidden`, `--no-ignore`, `--binary`, or an explicit path: a directory named `.git` or `.ngrep`, the index directory, and symlinks. `-g` does not bring a skipped hidden path back (same rule as gitignore). A gitignore negation does not un-hide a dotfile; pass `--hidden`. `--no-ignore` does not imply `--hidden`. The index still stores hidden names and hidden-attribute files so `--hidden` can use it. An indexed search still decides hidden from the path string (a dot name), because the index does not store the attribute. A content scan skips both in the walk unless the flag is set.
 
@@ -185,7 +187,7 @@ Dialect gaps that remain:
 - `-q` does not suppress the stderr scan note (`no index found; scanned content` and the same family). Without `--stats` it stops the walk at the first matching file. `--stats` still finishes the walk so the counts stay complete.
 - `-s` does not cover unreadable files discovered while walking a directory. Those stay skipped, with no diagnostic and no exit 2. `-s` also does not hide usage errors, bad regexes, or missing pattern files.
 - An unknown character in a short cluster is not expanded (`-nZ` is an error). Options after `--` are literals.
-- Search is always recursive. `-r` / `--replace` does not change that.
+- Search walks the tree unless `-d` / `--max-depth` caps it. `-r` / `--replace` is print-only and does not change that. `-d 1` reads only the files directly in the directory you named.
 - `-c`, `-l`, `-q`, and `--files-without-match` cannot be combined. POSIX only defines the first three.
 
 ### Match fields
