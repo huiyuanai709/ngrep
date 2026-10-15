@@ -101,12 +101,52 @@ public class FastPathTests
         Assert.Equal(["dot.txt:1:1:foo.bar"], Texts(verbatim));
     }
 
+    [Fact]
+    public void Many_hits_on_one_line_share_that_line()
+    {
+        using var tree = new TempDir();
+        var line = string.Concat(Enumerable.Repeat("enum", 4000));
+        File.WriteAllText(tree.File("bundle.js"), line + "\n");
+        var before = GC.GetTotalAllocatedBytes(true);
+        var found = Search(tree.Root, "enum");
+        var allocated = GC.GetTotalAllocatedBytes(true) - before;
+
+        Assert.Equal(4000, found.Matches.Count);
+        Assert.Equal(1, found.Matches[0].Line);
+        Assert.Equal(1, found.Matches[0].Column);
+        Assert.Equal(5, found.Matches[1].Column);
+        var shared = found.Matches[0].LineText;
+        Assert.Equal(line, shared);
+        Assert.All(found.Matches, match => Assert.Same(shared, match.LineText));
+        // A fresh copy per hit would be about 4000 * 32 KiB. The shared line stays small.
+        Assert.True(allocated < 8 * 1024 * 1024, $"allocated {allocated}");
+
+        File.WriteAllText(tree.File("wide.js"), "é" + line);
+        var wide = Search(tree.Root, "enum");
+        var wideHits = wide.Matches.Where(match => match.Path == "wide.js").ToArray();
+        Assert.Equal(4000, wideHits.Length);
+        Assert.Equal(2, wideHits[0].Column);
+        Assert.All(wideHits, match => Assert.Same(wideHits[0].LineText, match.LineText));
+
+        File.WriteAllText(tree.File("ctx.txt"), "before\nenum enum\nafter\n");
+        var context = Search(tree.Root, "enum", before: 1, after: 1);
+        var pair = context.Matches.Where(match => match.Path == "ctx.txt").ToArray();
+        Assert.Equal(2, pair.Length);
+        Assert.Same(pair[0].LineText, pair[1].LineText);
+        Assert.Same(pair[0].Before, pair[1].Before);
+        Assert.Same(pair[0].After, pair[1].After);
+        Assert.Equal("before", Assert.Single(pair[0].Before!).Text);
+        Assert.Equal("after", Assert.Single(pair[0].After!).Text);
+    }
+
     private static SearchOutcome Search(
         string root,
         string pattern,
         bool regex = false,
         bool word = false,
-        ReportMode report = ReportMode.Matches)
+        ReportMode report = ReportMode.Matches,
+        int before = 0,
+        int after = 0)
     {
         return Searcher.Search(new SearchQuery
         {
@@ -115,6 +155,8 @@ public class FastPathTests
             Regex = regex,
             WordRegexp = word,
             Report = report,
+            BeforeContext = before,
+            AfterContext = after,
             MaxDegreeOfParallelism = 1,
         }).GetAwaiter().GetResult();
     }
