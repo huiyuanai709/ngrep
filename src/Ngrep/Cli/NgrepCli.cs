@@ -81,8 +81,9 @@ internal static class NgrepCli
         };
 
         var root = new RootCommand(
-            "Search a tree. `ngrep <pattern> [path]` is the same as `ngrep search`. " +
+            "Search a tree. `ngrep <pattern> [PATH...]` is the same as `ngrep search`. " +
             "Uses an index when one is found; otherwise scans file contents. " +
+            "Each PATH is a separate root. No PATH searches `.`. " +
             "NGREP_CONFIG_PATH, when set, prepends search arguments from that file (one argument per line).");
         root.Options.Add(format);
         root.Options.Add(index);
@@ -108,7 +109,7 @@ internal static class NgrepCli
 
         var positionals = new Argument<string[]>("pattern")
         {
-            Description = "Search pattern and optional path: <pattern> [path]. With --files, the pattern is omitted and the positional is the path. With -e or -f, every -e value is a pattern and every -f value is a pattern file (OR). A positional written before the first -e or -f is also a pattern; any later positional is the path.",
+            Description = "Search pattern and optional paths: <pattern> [PATH...]. With --files, the pattern is omitted and the positional is the path. With -e or -f, every -e value is a pattern and every -f value is a pattern file (OR). A positional written before the first -e or -f is also a pattern; any later positional is a path. No path searches `.`.",
             Arity = ArgumentArity.ZeroOrMore,
         };
         var ignoreCase = new Option<bool>("--ignore-case", "-i")
@@ -307,6 +308,7 @@ internal static class NgrepCli
         var searchCommand = new Command(
             "search",
             "Query the index, or scan contents when no index covers the path. Patterns are .NET regular expressions unless -F. " +
+            "Each PATH is a root; no PATH searches `.`. " +
             "NGREP_CONFIG_PATH prepends search arguments from that file.");
         searchCommand.Arguments.Add(positionals);
         searchCommand.Options.Add(ignoreCase);
@@ -605,6 +607,17 @@ internal static class NgrepCli
             && report == ReportMode.Matches
             && !suppressHeading
             && forceHeading;
+        var noted = new HashSet<string>(StringComparer.Ordinal);
+        void EmitNote(string? note)
+        {
+            if (string.IsNullOrEmpty(note) || !noted.Add(note))
+            {
+                return;
+            }
+
+            MachineOutput.Note(note);
+        }
+
         MachineOutput.MatchStream? stream = null;
         SearchEvents? events = null;
         if (report != ReportMode.Quiet)
@@ -615,58 +628,80 @@ internal static class NgrepCli
                 autoHeading);
             events = new SearchEvents
             {
-                Note = MachineOutput.Note,
+                Note = EmitNote,
                 Batch = stream.File,
             };
         }
 
-        SearchOutcome outcome;
-        try
+        var roots = bound.Paths;
+        var multiple = roots.Length > 1;
+        var extra = patterns.Count > 1 ? patterns[1..] : [];
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var parts = new List<SearchOutcome>(roots.Length);
+        var pathFailed = false;
+        foreach (var root in roots)
         {
-            outcome = await Searcher.Search(new SearchQuery
+            cancellationToken.ThrowIfCancellationRequested();
+            try
             {
-                Pattern = patterns[0],
-                AdditionalPatterns = patterns.Count > 1 ? patterns[1..] : [],
-                Path = bound.Path,
-                IndexDirectory = result.GetValue(index),
-                IgnoreCase = casing.IgnoreCase,
-                PatternIgnoreCase = casing.PerPattern,
-                // -E/--regex is an alias of this default. -F opts out. -P keeps regex and switches engines.
-                Regex = !result.GetValue(fixedStrings),
-                Backtracking = result.GetValue(pcre),
-                ForceScan = result.GetValue(scan),
-                WordRegexp = result.GetValue(word),
-                InvertMatch = result.GetValue(invert),
-                LineRegexp = result.GetValue(lineRegexp),
-                NoMessages = result.GetValue(noMessages),
-                NoIgnore = result.GetValue(noIgnore),
-                NoIgnoreVcs = result.GetValue(noIgnoreVcs),
-                IncludeHidden = result.GetValue(hidden),
-                SearchBinary = result.GetValue(binary),
-                Multiline = result.GetValue(multiline),
-                MultilineDotAll = result.GetValue(multilineDotAll),
-                Stats = wantStats,
-                Report = report,
-                BeforeContext = beforeCount,
-                AfterContext = afterCount,
-                Globs = Values(result, glob),
-                Types = Values(result, type),
-                TypeNots = Values(result, typeNot),
-                TypeAdds = adds,
-                MaxDegreeOfParallelism = ThreadCount(result, threads),
-                CancellationToken = cancellationToken,
-                Events = events,
-            });
-        }
-        catch (SearchPathException ex)
-        {
-            if (!ex.Suppress)
-            {
-                Console.Error.WriteLine(ex.Message);
+                var part = await Searcher.Search(new SearchQuery
+                {
+                    Pattern = patterns[0],
+                    AdditionalPatterns = extra,
+                    Path = root,
+                    DisplayRoot = Searcher.MultiRootDisplay(root, multiple),
+                    IndexDirectory = result.GetValue(index),
+                    IgnoreCase = casing.IgnoreCase,
+                    PatternIgnoreCase = casing.PerPattern,
+                    // -E/--regex is an alias of this default. -F opts out. -P keeps regex and switches engines.
+                    Regex = !result.GetValue(fixedStrings),
+                    Backtracking = result.GetValue(pcre),
+                    ForceScan = result.GetValue(scan),
+                    WordRegexp = result.GetValue(word),
+                    InvertMatch = result.GetValue(invert),
+                    LineRegexp = result.GetValue(lineRegexp),
+                    NoMessages = result.GetValue(noMessages),
+                    NoIgnore = result.GetValue(noIgnore),
+                    NoIgnoreVcs = result.GetValue(noIgnoreVcs),
+                    IncludeHidden = result.GetValue(hidden),
+                    SearchBinary = result.GetValue(binary),
+                    Multiline = result.GetValue(multiline),
+                    MultilineDotAll = result.GetValue(multilineDotAll),
+                    Stats = wantStats,
+                    Report = report,
+                    BeforeContext = beforeCount,
+                    AfterContext = afterCount,
+                    Globs = Values(result, glob),
+                    Types = Values(result, type),
+                    TypeNots = Values(result, typeNot),
+                    TypeAdds = adds,
+                    MaxDegreeOfParallelism = ThreadCount(result, threads),
+                    CancellationToken = cancellationToken,
+                    Events = events,
+                });
+                parts.Add(part);
+                EmitNote(part.Note);
+                if (report == ReportMode.Quiet && !wantStats && part.MatchCount > 0)
+                {
+                    break;
+                }
             }
+            catch (SearchPathException ex)
+            {
+                pathFailed = true;
+                if (!ex.Suppress)
+                {
+                    Console.Error.WriteLine(ex.Message);
+                }
+            }
+        }
 
+        if (parts.Count == 0)
+        {
             return ExitCodes.Error;
         }
+
+        var outcome = CombineOutcomes(parts, clock.ElapsedMilliseconds);
 
         if (stream != null)
         {
@@ -695,7 +730,62 @@ internal static class NgrepCli
         var produced = report == ReportMode.FilesWithoutMatch
             ? outcome.WithoutCount > 0
             : outcome.MatchCount > 0;
+        if (pathFailed)
+        {
+            return ExitCodes.Error;
+        }
+
         return produced ? ExitCodes.Success : ExitCodes.NoMatches;
+    }
+
+    private static SearchOutcome CombineOutcomes(List<SearchOutcome> parts, long elapsedMilliseconds)
+    {
+        var searched = 0;
+        var matched = 0;
+        var lines = 0;
+        var matches = 0;
+        var without = 0;
+        var workers = 1;
+        var usedIndex = parts.Count > 0;
+        var prefilter = false;
+        foreach (var part in parts)
+        {
+            searched += part.FilesSearched;
+            matched += part.FilesMatched;
+            lines += part.LinesMatched;
+            matches += part.MatchCount;
+            without += part.WithoutCount;
+            if (part.Workers > workers)
+            {
+                workers = part.Workers;
+            }
+
+            if (!part.UsedIndex)
+            {
+                usedIndex = false;
+            }
+
+            if (part.UsedTrigramPrefilter)
+            {
+                prefilter = true;
+            }
+        }
+
+        return new SearchOutcome
+        {
+            Matches = [],
+            UsedIndex = usedIndex,
+            UsedTrigramPrefilter = prefilter,
+            Confirmation = workers > 1 ? "parallel" : "sequential",
+            Workers = workers,
+            FilesSearched = searched,
+            FilesMatched = matched,
+            LinesMatched = lines,
+            MatchCount = matches,
+            WithoutCount = without,
+            Streamed = true,
+            ElapsedMilliseconds = elapsedMilliseconds,
+        };
     }
 
     private static int ListFiles(
@@ -729,7 +819,7 @@ internal static class NgrepCli
                 ? IgnorePolicy.None
                 : result.GetValue(noIgnoreVcs) ? IgnorePolicy.CustomOnly : IgnorePolicy.All;
             paths = FileList.Collect(
-                bound.Path,
+                bound.Paths[0],
                 policy,
                 includeHidden: result.GetValue(hidden),
                 filter,

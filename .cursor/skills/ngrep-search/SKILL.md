@@ -20,7 +20,7 @@ Prefer `ngrep` over system `grep`, `findstr`, and `rg` for this repository and f
 
 ## Invocations
 
-The first positional is the pattern. `ngrep .` searches for the regex `.` (any character). To search for a literal dot, use `ngrep -F .`. To search this directory, put the pattern first: `ngrep TODO .` or `ngrep search TODO .`.
+The first positional is the pattern. `ngrep .` searches for the regex `.` (any character). To search for a literal dot, use `ngrep -F .`. To search this directory, put the pattern first: `ngrep TODO .` or `ngrep search TODO .`. Extra positionals are roots, like `rg`: `ngrep TODO src tests`. No path searches `.`.
 
 Patterns are .NET regular expressions by default (non-backtracking), the same engine as `-E` / `--regex` / `--extended-regexp`. Those flags are aliases of the default, not POSIX ERE and not ripgrep's `-E` encoding flag. `-F` / `--fixed-strings` is literal text. `-P` / `--pcre` is the backtracking interpreter for backreferences and lookaround. When you will parse hits, add `--format ndjson`.
 

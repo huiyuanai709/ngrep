@@ -3,10 +3,10 @@ using System.CommandLine.Parsing;
 
 namespace Ngrep.Cli;
 
-internal readonly record struct BoundSearch(string[] Patterns, string[] PatternFiles, string Path);
+internal readonly record struct BoundSearch(string[] Patterns, string[] PatternFiles, string[] Paths);
 
 /// <summary>
-/// <c>ngrep &lt;pattern&gt; [path]</c> is rewritten to <c>search</c> unless the first positional
+/// <c>ngrep &lt;pattern&gt; [PATH...]</c> is rewritten to <c>search</c> unless the first positional
 /// token is <c>index</c>, <c>search</c>, or <c>watch</c>. <c>--</c> forces the search form so a
 /// pattern named <c>index</c> is not taken as a command.
 /// </summary>
@@ -67,7 +67,8 @@ internal static class SearchSyntax
     {
         var patterns = new List<string>();
         var files = new List<string>();
-        string? path = null;
+        var paths = new List<string>();
+        string? filePath = null;
         var sawPatternSource = false;
         var tookPositionalPattern = false;
         string? pending = null;
@@ -114,12 +115,12 @@ internal static class SearchSyntax
                     throw new ArgumentException("Path is empty.");
                 }
 
-                if (path != null)
+                if (filePath != null)
                 {
                     throw new ArgumentException("Too many arguments. Usage: ngrep --files [path]");
                 }
 
-                path = token.Value;
+                filePath = token.Value;
                 continue;
             }
 
@@ -135,12 +136,7 @@ internal static class SearchSyntax
                 continue;
             }
 
-            if (path != null)
-            {
-                throw new ArgumentException("Too many arguments. Usage: ngrep <pattern> [path]");
-            }
-
-            path = token.Value;
+            paths.Add(token.Value);
         }
 
         if (listFiles)
@@ -150,20 +146,20 @@ internal static class SearchSyntax
                 throw new ArgumentException("--files does not take a pattern.");
             }
 
-            return new BoundSearch([], [], path ?? ".");
+            return new BoundSearch([], [], filePath == null ? ["."] : [filePath]);
         }
 
         if (patterns.Count == 0 && files.Count == 0)
         {
             if (typeList)
             {
-                return new BoundSearch([], [], ".");
+                return new BoundSearch([], [], ["."]);
             }
 
-            throw new ArgumentException("Pattern is required. Usage: ngrep <pattern> [path]");
+            throw new ArgumentException("Pattern is required. Usage: ngrep <pattern> [PATH...]");
         }
 
-        return new BoundSearch(patterns.ToArray(), files.ToArray(), path ?? ".");
+        return new BoundSearch(patterns.ToArray(), files.ToArray(), paths.Count == 0 ? ["."] : paths.ToArray());
     }
 
     private static void TakePatternSource(string name, string value, List<string> patterns, List<string> files)
