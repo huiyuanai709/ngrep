@@ -38,7 +38,7 @@ internal static class TextFiles
     /// can resume on another thread. <paramref name="stop"/> is consulted after each chunk,
     /// once the leading bytes have passed the NUL probe. Returning true ends the read before
     /// EOF. A miss still reads the whole file. Files at or above <see cref="MmapThreshold"/>
-    /// map once the length is known; mapping has no async form.
+    /// map once the length is known; mapping has no async form and uses its own handle.
     /// </summary>
     public static ValueTask<PooledBytes> ReadAsync(string path, ReadStop? stop, CancellationToken cancellation) =>
         ReadAsync(path, stop, cancellation, 64 * 1024);
@@ -59,7 +59,7 @@ internal static class TextFiles
                 FileAccess.Read,
                 FileShare.Read,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
-            return await ReadFromAsync(handle, stop, cancellation, initialBuffer).ConfigureAwait(false);
+            return await ReadFromAsync(handle, path, stop, cancellation, initialBuffer).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -67,15 +67,60 @@ internal static class TextFiles
         }
         finally
         {
-            handle?.Dispose();
+            if (handle != null)
+            {
+                DisposeReadHandle(handle);
+            }
         }
+    }
+
+    /// <summary>
+    /// Closes a handle opened with <see cref="FileOptions.Asynchronous"/>.
+    /// On Windows that handle is bound to the thread pool at open. Disposing the
+    /// <see cref="SafeFileHandle"/> alone calls CloseHandle and then frees the cached
+    /// overlapped (which clears its completion callback) while the binding can still
+    /// deliver a packet. The packet runs on a pool thread,
+    /// <c>Win32ThreadPoolNativeOverlapped.CompleteWithCallback</c> calls a null callback,
+    /// and that <see cref="NullReferenceException"/> is unhandled, so the process dies.
+    /// <see cref="FileStream"/> disposes the binding before the handle. Mapping must not
+    /// use this handle either: a section created from an IOCP-bound handle posts
+    /// completions that are not our overlapped.
+    /// </summary>
+    private static void DisposeReadHandle(SafeFileHandle handle)
+    {
+        if (handle.IsClosed)
+        {
+            return;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                // bufferSize 1 keeps FileStream off its own buffer. The bool is unused by
+                // the runtime; the handle's asynchronous flag selects the Windows strategy,
+                // whose dispose closes the thread-pool binding first.
+                var stream = new FileStream(handle, FileAccess.Read, 1, isAsync: true);
+                stream.Dispose();
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or ObjectDisposedException)
+            {
+                if (handle.IsClosed)
+                {
+                    return;
+                }
+            }
+        }
+
+        handle.Dispose();
     }
 
     /// <summary>
     /// Files smaller than the first buffer are one read and no length syscall.
     /// A full buffer means the file may be larger, so the length is checked then.
     /// </summary>
-    private static async ValueTask<PooledBytes> ReadFromAsync(SafeFileHandle handle, ReadStop? stop, CancellationToken cancellation, int initialBuffer)
+    private static async ValueTask<PooledBytes> ReadFromAsync(SafeFileHandle handle, string path, ReadStop? stop, CancellationToken cancellation, int initialBuffer)
     {
         var first = Math.Max(initialBuffer, BinaryProbeLength);
         byte[]? buffer = null;
@@ -110,8 +155,14 @@ internal static class TextFiles
 
                     if (lengthLong >= MmapThreshold
                         && lengthLong <= int.MaxValue
-                        && TryMap(handle, (int)lengthLong, stop, out var mapped))
+                        && TryMap(path, (int)lengthLong, stop, out var mapped))
                     {
+                        if (cancellation.IsCancellationRequested)
+                        {
+                            mapped.Dispose();
+                            throw new OperationCanceledException(cancellation);
+                        }
+
                         return mapped;
                     }
 
@@ -136,7 +187,11 @@ internal static class TextFiles
                     break;
                 }
 
-                var read = await RandomAccess.ReadAsync(handle, buffer.AsMemory(offset, want), offset, cancellation).ConfigureAwait(false);
+                // CancellationToken.None: passing the caller's token makes ReadAsync call
+                // CancelIoEx. That completion races the dispose below on Windows and is the
+                // same null-callback crash. The token is checked between chunks instead.
+                var read = await RandomAccess.ReadAsync(handle, buffer.AsMemory(offset, want), offset, CancellationToken.None).ConfigureAwait(false);
+                cancellation.ThrowIfCancellationRequested();
                 if (read == 0)
                 {
                     break;
@@ -160,6 +215,7 @@ internal static class TextFiles
 
                 if (stop != null && checkedBinary && stop(buffer.AsSpan(0, offset), endOfFile))
                 {
+                    cancellation.ThrowIfCancellationRequested();
                     owned = true;
                     return PooledBytes.Ok(buffer, offset);
                 }
@@ -175,6 +231,7 @@ internal static class TextFiles
                 return PooledBytes.Binary();
             }
 
+            cancellation.ThrowIfCancellationRequested();
             owned = true;
             return PooledBytes.Ok(buffer, offset);
         }
@@ -191,20 +248,22 @@ internal static class TextFiles
         }
     }
 
-    private static bool TryMap(SafeFileHandle handle, int length, ReadStop? stop, out PooledBytes mapped)
+    private static bool TryMap(string path, int length, ReadStop? stop, out PooledBytes mapped)
     {
         MemoryMappedFile? file = null;
         MemoryMappedViewAccessor? view = null;
         var acquired = false;
         try
         {
+            // Own handle, opened without FILE_FLAG_OVERLAPPED. The read handle is already
+            // bound to the Windows thread pool; mapping that handle and then closing it
+            // delivers completions CompleteWithCallback cannot survive.
             file = MemoryMappedFile.CreateFromFile(
-                handle,
+                path,
+                FileMode.Open,
                 mapName: null,
                 capacity: length,
-                access: MemoryMappedFileAccess.Read,
-                inheritability: HandleInheritability.None,
-                leaveOpen: true);
+                access: MemoryMappedFileAccess.Read);
             view = file.CreateViewAccessor(0, length, MemoryMappedFileAccess.Read);
             unsafe
             {
