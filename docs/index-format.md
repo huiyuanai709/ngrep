@@ -58,7 +58,7 @@ then trigramCount records, sorted by trigram UTF-8 bytes (ordinal):
         int32[]  docIds, sorted ascending, unique
 ```
 
-A literal query of length >= 3 is answered by intersecting the posting lists of every trigram in the lowercased pattern, then checking the candidate files. Case-sensitive search still uses the folded lists and rejects false positives while reading the file. Queries shorter than 3 characters, and `--regex` queries, scan every indexed document (still honor the path filter) because v1 does not trigram-filter regex.
+A literal query of length >= 3 is answered by intersecting the posting lists of every trigram in the lowercased pattern, then checking the candidate files. Case-sensitive search still uses the folded lists and rejects false positives while reading the file. Queries shorter than 3 characters, and `--regex` queries that are not trigram-safe, read every indexed document when the search path is the indexed root (still honor the path filter) because v1 does not trigram-filter them. The same query under a subdirectory scans that directory instead of treating a missing document row as no match.
 
 ## Incremental updates
 

@@ -190,6 +190,11 @@ internal static class Searcher
         var skipIndex = query.ForceScan || !plan.ApplyGitIgnore;
         if (!skipIndex && query.IndexDirectory != null)
         {
+            if (ShortSubpath(query.IndexDirectory, start, plan))
+            {
+                return await ScanAndFinish(start, plan, workers, query, ShortSubpathNote, tally, clock);
+            }
+
             var explicitIndex = LoadForSearch(query.IndexDirectory, plan)
                 ?? throw new InvalidDataException($"Index not found at {Path.GetFullPath(query.IndexDirectory)}.");
             return await SearchIndex(explicitIndex, start, query, plan, workers, tally, clock);
@@ -200,6 +205,11 @@ internal static class Searcher
             var discovered = IndexPaths.Discover(start);
             if (discovered != null)
             {
+                if (ShortSubpath(discovered, start, plan))
+                {
+                    return await ScanAndFinish(start, plan, workers, query, ShortSubpathNote, tally, clock);
+                }
+
                 var index = LoadForSearch(discovered, plan);
                 if (index != null)
                 {
@@ -209,10 +219,48 @@ internal static class Searcher
         }
 
         var note = ScanNote(query, indexSkipped: skipIndex && !query.ForceScan && IndexWouldApply(start, query));
-        var scanned = await ContentScan(start, plan, workers, query.CancellationToken, tally, query, note);
-        if (query.Events?.Batch != null)
+        return await ScanAndFinish(start, plan, workers, query, note, tally, clock);
+    }
+
+    /// <summary>
+    /// Trigrams cannot name this pattern, and the path sits strictly inside the indexed root.
+    /// The document list is not a safe file set: a later file, or a directory the parent
+    /// snapshot omitted, would be reported as a miss. Scan that path instead.
+    /// </summary>
+    private static bool ShortSubpath(string indexDirectory, string start, MatchPlan plan)
+    {
+        if (plan.CanUseTrigrams)
         {
-            return FinishStream(usedIndex: false, note, scanned.Workers, usedPrefilter: false, scanned.Stream!, tally, clock);
+            return false;
+        }
+
+        var root = IndexStore.TryReadRoot(indexDirectory);
+        if (string.IsNullOrEmpty(root) || !Directory.Exists(root))
+        {
+            return false;
+        }
+
+        var prefix = RelativeTo(root, start, out var outside, out _);
+        return !outside && prefix.Length > 0;
+    }
+
+    private const string ShortSubpathNote = "pattern is not covered by trigrams; scanned content";
+
+    private const string UnindexedPathNote = "path is not in the index; scanned content";
+
+    private static async Task<SearchOutcome> ScanAndFinish(
+        string start,
+        MatchPlan plan,
+        int workers,
+        SearchQuery query,
+        string? note,
+        SearchTally tally,
+        Stopwatch clock)
+    {
+        var scanned = await ContentScan(start, plan, workers, query.CancellationToken, tally, query, note);
+        if (scanned.Stream != null)
+        {
+            return FinishStream(usedIndex: false, note, scanned.Workers, usedPrefilter: false, scanned.Stream, tally, clock);
         }
 
         return Finish(scanned.Matches, usedIndex: false, note, scanned.Workers, usedPrefilter: false, scanned.Without, tally, clock);
@@ -278,13 +326,12 @@ internal static class Searcher
         if (outside)
         {
             const string note = "path is outside the indexed root; scanned content";
-            var scanned = await ContentScan(start, plan, workers, query.CancellationToken, tally, query, note);
-            if (scanned.Stream != null)
-            {
-                return FinishStream(usedIndex: false, note, scanned.Workers, usedPrefilter: false, scanned.Stream!, tally, clock);
-            }
+            return await ScanAndFinish(start, plan, workers, query, note, tally, clock);
+        }
 
-            return Finish(scanned.Matches, usedIndex: false, note, scanned.Workers, usedPrefilter: false, scanned.Without, tally, clock);
+        if (prefix.Length > 0 && !plan.CanUseTrigrams)
+        {
+            return await ScanAndFinish(start, plan, workers, query, ShortSubpathNote, tally, clock);
         }
 
         HashSet<int>? selectedIds = null;
@@ -299,6 +346,7 @@ internal static class Searcher
         var files = new List<ConfirmFile>();
         var jobs = stream != null ? new List<EmitJob>() : null;
         var without = plan.Report == ReportMode.FilesWithoutMatch ? new ConcurrentBag<string>() : null;
+        var covered = 0;
         foreach (var document in index.Documents)
         {
             if (prefix.Length > 0 && !Under(document.Path, prefix, prefixIsFile))
@@ -315,6 +363,8 @@ internal static class Searcher
             {
                 continue;
             }
+
+            covered++;
 
             if (selectedIds != null && !selectedIds.Contains(document.Id))
             {
@@ -341,6 +391,14 @@ internal static class Searcher
             {
                 files.Add(file);
             }
+        }
+
+        if (prefix.Length > 0 && covered == 0)
+        {
+            // The snapshot has no row under this path. A walk can still see files
+            // (added after index, or ignored only because the index root applied a
+            // parent .gitignore that this search does not).
+            return await ScanAndFinish(start, plan, workers, query, UnindexedPathNote, tally, clock);
         }
 
         var degree = (stream != null ? jobs!.Count : files.Count) > 1 ? workers : 1;
