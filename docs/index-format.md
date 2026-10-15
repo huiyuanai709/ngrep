@@ -62,18 +62,18 @@ A literal query of length >= 3 is answered by intersecting the posting lists of 
 
 ## Incremental updates
 
-`ngrep index` on an existing directory is a per-file update, and each added, updated, or removed document is committed before the next one:
+`ngrep index` on an existing directory updates one in-memory snapshot, then commits it once:
 
-- unchanged size and mtime: keep the document and its postings; no commit for that file
-- same SHA-256: refresh size and mtime in memory; the new timestamps are stored in the final commit
-- content change: delete that `id` from every posting list, insert the new trigrams, then commit
-- path missing from the walk: after every walked file has been considered, delete that document and its postings, then commit that one removal
+- unchanged size and mtime: keep the document and its postings; the file is not read
+- same SHA-256: refresh size and mtime in memory; the new timestamps are stored in the commit
+- content change: delete that `id` from every posting list, insert the new trigrams
+- path missing from the walk: after every walked file has been considered, delete that document and its postings (ordinal path order)
 
-A commit rewrites `manifest.json`, `documents.ndjson`, and `postings.bin` into `<index>.tmp` and replaces `<index>` only after those files are complete. The committed directory is a normal v1 index: `documentCount` matches the rows, and postings refer only to ids in that snapshot. `.ngrep/` therefore appears when the first document is committed, not when the walk ends.
+A commit rewrites `manifest.json`, `documents.ndjson`, and `postings.bin` into `<index>.tmp` and replaces `<index>` only after those files are complete. The committed directory is a normal v1 index: `documentCount` matches the rows, and postings refer only to ids in that snapshot. `.ngrep/` appears when that commit finishes, not as each file is read.
 
-Removals wait until the walk finishes, then run one path at a time in ordinal path order. Until a stale path is committed, it stays in the index. A killed process leaves the last successful commit: files already added or updated are searchable, files not yet visited are absent from a new index (or still present from the previous index), and deletions that were not committed yet are still present. A crash while writing the temp directory does not replace a good index.
+A killed `ngrep index` or `watch` leaves the previous commit untouched. A crash while writing the temp directory does not replace a good index. The final commit also covers an empty tree and refreshes `updatedUtc`.
 
-Unchanged files are not given their own commit. A crash before the final commit keeps their previous records. Those records still describe the same bytes when the hash matched. The final commit also covers an empty tree and refreshes `updatedUtc`.
+A caller that supplies a persistence callback is the exception: each added, updated, or removed document is committed before the callback returns, then one more commit stores unchanged hash refreshes and `updatedUtc`. That prefix is what a crash keeps. Removals in that mode still run one path at a time after the walk.
 
 v1 still rewrites the three files as a whole on every commit. It is not a write-ahead log. A later version can shard postings by document id without changing the trigram or line/column rules.
 

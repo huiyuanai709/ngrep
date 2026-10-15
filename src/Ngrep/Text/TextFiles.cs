@@ -40,7 +40,15 @@ internal static class TextFiles
     /// EOF. A miss still reads the whole file. Files at or above <see cref="MmapThreshold"/>
     /// map once the length is known; mapping has no async form.
     /// </summary>
-    public static async ValueTask<PooledBytes> ReadAsync(string path, ReadStop? stop, CancellationToken cancellation)
+    public static ValueTask<PooledBytes> ReadAsync(string path, ReadStop? stop, CancellationToken cancellation) =>
+        ReadAsync(path, stop, cancellation, 64 * 1024);
+
+    /// <param name="initialBuffer">
+    /// First read size. Values below <see cref="BinaryProbeLength"/> are raised so a NUL
+    /// in the probe window aborts before the rest of the file is read. Search uses 64 KiB.
+    /// Index uses the probe length: tiny files finish in that one read, and binaries stop there.
+    /// </param>
+    internal static async ValueTask<PooledBytes> ReadAsync(string path, ReadStop? stop, CancellationToken cancellation, int initialBuffer)
     {
         SafeFileHandle? handle = null;
         try
@@ -51,7 +59,7 @@ internal static class TextFiles
                 FileAccess.Read,
                 FileShare.Read,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
-            return await ReadFromAsync(handle, stop, cancellation);
+            return await ReadFromAsync(handle, stop, cancellation, initialBuffer).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -67,9 +75,9 @@ internal static class TextFiles
     /// Files smaller than the first buffer are one read and no length syscall.
     /// A full buffer means the file may be larger, so the length is checked then.
     /// </summary>
-    private static async ValueTask<PooledBytes> ReadFromAsync(SafeFileHandle handle, ReadStop? stop, CancellationToken cancellation)
+    private static async ValueTask<PooledBytes> ReadFromAsync(SafeFileHandle handle, ReadStop? stop, CancellationToken cancellation, int initialBuffer)
     {
-        var first = 64 * 1024;
+        var first = Math.Max(initialBuffer, BinaryProbeLength);
         byte[]? buffer = null;
         var owned = false;
         try
@@ -128,7 +136,7 @@ internal static class TextFiles
                     break;
                 }
 
-                var read = await RandomAccess.ReadAsync(handle, buffer.AsMemory(offset, want), offset, cancellation);
+                var read = await RandomAccess.ReadAsync(handle, buffer.AsMemory(offset, want), offset, cancellation).ConfigureAwait(false);
                 if (read == 0)
                 {
                     break;
