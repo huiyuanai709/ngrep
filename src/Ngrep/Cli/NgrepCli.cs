@@ -219,7 +219,11 @@ internal static class NgrepCli
         };
         var binary = new Option<bool>("--binary")
         {
-            Description = "Search files with a NUL byte in the first 8 KiB. Those files are skipped otherwise. Matches are printed as text. Ripgrep's --binary stops and prints a warning instead of the line. Forces a content scan, because the index omits binary files. Files over 32 MiB stay skipped.",
+            Description = "Search files with a NUL byte in the first 8 KiB and print matching lines. Those files are skipped otherwise. Ripgrep's --binary prints \"binary file matches\" instead of the line; this flag prints the line. -a/--text is the same search. Forces a content scan, because the index omits binary files. Files over 32 MiB stay skipped.",
+        };
+        var text = new Option<bool>("--text", "-a")
+        {
+            Description = "Search binary files as if they were text and print matching lines, like ripgrep -a/--text. A NUL in the first 8 KiB does not skip the file. Stdin is included. --binary is the same search. Forces a content scan. Files over 32 MiB stay skipped.",
         };
         var threads = new Option<int>("-j", "--threads")
         {
@@ -351,6 +355,7 @@ internal static class NgrepCli
         searchCommand.Options.Add(noIgnoreVcs);
         searchCommand.Options.Add(unrestricted);
         searchCommand.Options.Add(binary);
+        searchCommand.Options.Add(text);
         searchCommand.Options.Add(threads);
         searchCommand.Options.Add(listFiles);
         searchCommand.Options.Add(filesWith);
@@ -423,6 +428,7 @@ internal static class NgrepCli
                     noIgnoreVcs,
                     listFiles,
                     binary,
+                    text,
                     threads,
                     filesWith,
                     filesWithout,
@@ -522,6 +528,7 @@ internal static class NgrepCli
         Option<bool> noIgnoreVcs,
         Option<bool> listFiles,
         Option<bool> binary,
+        Option<bool> text,
         Option<int> threads,
         Option<bool> filesWith,
         Option<bool> filesWithout,
@@ -705,6 +712,7 @@ internal static class NgrepCli
                     IncludeHidden = result.GetValue(hidden),
                     FollowSymlinks = result.GetValue(follow),
                     SearchBinary = result.GetValue(binary),
+                    SearchText = result.GetValue(text),
                     Multiline = result.GetValue(multiline),
                     MultilineDotAll = result.GetValue(multilineDotAll),
                     Stats = wantStats,

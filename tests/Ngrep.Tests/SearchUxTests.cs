@@ -355,6 +355,8 @@ public class SearchUxTests
         Assert.Contains("-L", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--unrestricted", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--binary", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--text", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("binary files as if they were text", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("one relative path per line", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--color", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--multiline", capture.Stdout, StringComparison.Ordinal);

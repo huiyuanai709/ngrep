@@ -44,7 +44,7 @@ internal static class TextFiles
         ReadAsync(path, stop, cancellation, searchBinary: false);
 
     /// <param name="searchBinary">
-    /// When true, a NUL in the first 8 KiB does not skip the file. <c>--binary</c> and <c>-uuu</c> set this.
+    /// When true, a NUL in the first 8 KiB does not skip the file. <c>--binary</c>, <c>-a</c>/<c>--text</c>, and <c>-uuu</c> set this.
     /// The 32 MiB cap still applies.
     /// </param>
     public static ValueTask<PooledBytes> ReadAsync(string path, ReadStop? stop, CancellationToken cancellation, bool searchBinary) =>

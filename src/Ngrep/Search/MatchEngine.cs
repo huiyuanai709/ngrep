@@ -39,7 +39,7 @@ internal sealed class MatchPlan
 
     public bool IncludeHidden { get; init; }
 
-    /// <summary>Search NUL files instead of skipping them. Set by <c>--binary</c> and <c>-uuu</c>.</summary>
+    /// <summary>Search NUL files instead of skipping them. Set by <c>--binary</c>, <c>-a</c>/<c>--text</c>, and <c>-uuu</c>.</summary>
     public bool SearchBinary { get; init; }
 
     public required int Before { get; init; }
@@ -205,7 +205,7 @@ internal sealed class MatchPlan
             Multiline = crosses,
             MultilineDotAll = query.MultilineDotAll,
             IncludeHidden = query.IncludeHidden,
-            SearchBinary = query.SearchBinary,
+            SearchBinary = query.SearchBinary || query.SearchText,
             CollectAll = query.Stats,
             LineRegexp = query.LineRegexp,
             NoMessages = query.NoMessages,

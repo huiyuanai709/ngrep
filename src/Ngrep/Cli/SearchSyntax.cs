@@ -429,7 +429,7 @@ internal static class SearchSyntax
         return expanded.ToArray();
     }
 
-    private const string BoolShorts = "iEFPqnsxvwlcoUuSN0L";
+    private const string BoolShorts = "iEFPqnsxvwlcoUuSN0La";
 
     private static readonly HashSet<string> KnownFlags = new(StringComparer.Ordinal)
     {
@@ -447,7 +447,7 @@ internal static class SearchSyntax
         "-s", "--no-messages",
         "-o", "--only-matching", "--hidden", "--color", "-U", "--multiline",
         "--multiline-dotall", "--heading", "--no-heading", "--stats",
-        "--files", "--binary", "-u", "--unrestricted",
+        "--files", "--binary", "-a", "--text", "-u", "--unrestricted",
     };
 
     /// <summary>
@@ -770,6 +770,7 @@ internal static class SearchSyntax
             "-o" or "--only-matching" => "only-matching",
             "--hidden" => "hidden",
             "--binary" => "binary",
+            "-a" or "--text" => "text",
             "--files" => "files",
             "-U" or "--multiline" => "multiline",
             "--multiline-dotall" => "multiline-dotall",

@@ -48,6 +48,7 @@ ngrep --format ndjson -C 2 TODO .
 - `-t`: built-in file type. Repeatable.
 - `-l`: one path per file with a hit. `-c`: `path:count` of matching lines.
 - `-m N` / `--max-count N`: at most N matching lines per file, then stop that file. Other files continue. `0` searches nothing.
+- `-a` / `--text`: search a file with a NUL in the first 8 KiB and print matching lines, including stdin. `--binary` does the same search and also prints the line. Without either flag those files are skipped.
 - `--format ndjson`: one JSON object per line. Default to this when parsing hits.
 - `--format json`: one JSON object for the whole report.
 - `--format rgjson`: search-only event stream (`begin`, `match`, `context`, `end`, `summary`).

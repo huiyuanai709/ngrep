@@ -81,4 +81,4 @@ v1 still rewrites the three files as a whole on every commit. It is not a write-
 
 ## What is not in the index
 
-The index walker does not enter `.git` or `.ngrep` directories, symlinks, or the index directory itself when it lives inside the tree. Search follows symlinks only with `-L` / `--follow`, and that search scans because those targets are not documents. Gitignore rules drop files before they are hashed. A file whose first 8192 bytes contain a `NUL` is binary and is not a document. Files larger than 32 MiB are skipped.
+The index walker does not enter `.git` or `.ngrep` directories, symlinks, or the index directory itself when it lives inside the tree. Search follows symlinks only with `-L` / `--follow`, and that search scans because those targets are not documents. Gitignore rules drop files before they are hashed. A file whose first 8192 bytes contain a `NUL` is binary and is not a document. Search reads those files with `-a` / `--text` or `--binary` and prints matching lines; that search scans. Files larger than 32 MiB are skipped.
