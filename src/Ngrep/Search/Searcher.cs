@@ -109,6 +109,12 @@ internal sealed class SearchQuery
 
     public int AfterContext { get; init; }
 
+    /// <summary>
+    /// Matching lines per file before that file is stopped. Null means no limit.
+    /// 0 reports nothing and does not read file bytes.
+    /// </summary>
+    public int? MaxCount { get; init; }
+
     public IReadOnlyList<string> Globs { get; init; } = [];
 
     public IReadOnlyList<string> Types { get; init; } = [];
@@ -231,6 +237,12 @@ internal static class Searcher
         }
 
         if (HiddenPaths.ContainsHardSkip(start))
+        {
+            return Finish([], usedIndex: false, note: null, workers: 1, usedPrefilter: false, without: null, tally, clock);
+        }
+
+        // ripgrep treats 0 as legal and searches nothing. The path is still checked above.
+        if (query.MaxCount == 0)
         {
             return Finish([], usedIndex: false, note: null, workers: 1, usedPrefilter: false, without: null, tally, clock);
         }
@@ -724,16 +736,33 @@ internal static class Searcher
             ByteConfirm.Adopt(stop);
             if (MatchLoaded(read, file, plan, matches, stats, filesWithoutMatch, tally, errorIfUnreadable, out var text, out var examined, out var matched))
             {
-                return new ConfirmResult(examined, matched);
+                return Done(plan, matches, examined, matched);
             }
 
             matched = CollectDecoded(text, file, plan, matches, filesWithoutMatch, tally);
-            return new ConfirmResult(true, matched);
+            return Done(plan, matches, examined: true, matched);
         }
         finally
         {
             ByteConfirm.Disarm();
         }
+    }
+
+    /// <summary>
+    /// Drops matching lines past <c>-m</c>. Callers stop their own scan; this keeps every
+    /// path, including ones that already buffered the file, inside the same limit.
+    /// </summary>
+    private static ConfirmResult Done(MatchPlan plan, List<SearchMatch> matches, bool examined, bool matched)
+    {
+        if (plan.MaxCount is int max && matches.Count > 0)
+        {
+            MatchLimits.Trim(matches, max);
+            // Files-without-match can record a hit without storing lines. Only a list
+            // that actually held matches is rewritten from what remains after the limit.
+            matched = matches.Count > 0;
+        }
+
+        return new ConfirmResult(examined, matched);
     }
 
     /// <summary>True when the file is finished. False when <paramref name="text"/> must be matched as a string.</summary>

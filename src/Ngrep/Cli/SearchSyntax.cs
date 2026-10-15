@@ -36,6 +36,8 @@ internal static class SearchSyntax
         "--before-context",
         "-C",
         "--context",
+        "-m",
+        "--max-count",
         "-e",
         "--regexp",
         "-j",
@@ -436,6 +438,7 @@ internal static class SearchSyntax
         "--regex", "-E", "--extended-regexp", "--fixed-strings", "-F", "--pcre", "-P",
         "--scan", "-g", "--glob", "-t", "--type", "-T", "--type-not", "--type-list", "--type-add",
         "-A", "--after-context", "-B", "--before-context", "-C", "--context",
+        "-m", "--max-count",
         "-e", "--regexp", "-f", "--file", "-w", "--word-regexp", "-x", "--line-regexp",
         "-v", "--invert-match", "--no-ignore", "--no-ignore-vcs", "-j", "--threads",
         "-l", "--files-with-matches", "--files-without-match", "-c", "--count",
@@ -494,7 +497,7 @@ internal static class SearchSyntax
         return false;
     }
 
-    private const string ValueShorts = "defgtTABCjr";
+    private const string ValueShorts = "defgtTABCjrm";
 
     private static bool TryExpandShortBundle(string arg, List<string> destination)
     {
@@ -802,6 +805,7 @@ internal static class SearchSyntax
             "-A" or "--after-context" => "after",
             "-B" or "--before-context" => "before",
             "-C" or "--context" => "context",
+            "-m" or "--max-count" => "max-count",
             "-j" or "--threads" => "threads",
             _ => "",
         };
@@ -817,6 +821,7 @@ internal static class SearchSyntax
                 "-A" => "after",
                 "-B" => "before",
                 "-C" => "context",
+                "-m" => "max-count",
                 "-j" => "threads",
                 _ => "",
             };

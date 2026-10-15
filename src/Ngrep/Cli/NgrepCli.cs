@@ -179,6 +179,10 @@ internal static class NgrepCli
         {
             Description = "Lines of context before and after each match. -A and -B override that side.",
         };
+        var maxCount = new Option<int>("-m", "--max-count")
+        {
+            Description = "Stop each file after NUM matching lines and keep searching the others. A line with several hits counts once. 0 searches nothing. The last -m/--max-count wins.",
+        };
         var regexp = new Option<string[]>("-e", "--regexp")
         {
             Description = "Pattern to search for. Repeatable. Matches if any pattern matches (OR).",
@@ -337,6 +341,7 @@ internal static class NgrepCli
         searchCommand.Options.Add(after);
         searchCommand.Options.Add(before);
         searchCommand.Options.Add(context);
+        searchCommand.Options.Add(maxCount);
         searchCommand.Options.Add(regexp);
         searchCommand.Options.Add(patternFile);
         searchCommand.Options.Add(word);
@@ -443,6 +448,7 @@ internal static class NgrepCli
                     noHeading,
                     stats,
                     maxDepth,
+                    maxCount,
                     cts.Token);
             }
             catch (OperationCanceledException)
@@ -541,6 +547,7 @@ internal static class NgrepCli
         Option<bool> noHeading,
         Option<bool> stats,
         Option<int> maxDepth,
+        Option<int> maxCount,
         CancellationToken cancellationToken)
     {
         var showTypes = result.GetValue(typeList);
@@ -575,6 +582,18 @@ internal static class NgrepCli
         if (beforeCount < 0 || afterCount < 0)
         {
             throw new ArgumentException("Context length must be >= 0.");
+        }
+
+        int? maxCountValue = null;
+        if (IsSet(result, maxCount))
+        {
+            var parsedMax = result.GetValue(maxCount);
+            if (parsedMax < 0)
+            {
+                throw new ArgumentException("-m/--max-count must be a non-negative integer.");
+            }
+
+            maxCountValue = parsedMax;
         }
 
         var parsedFormat = OutputFormats.Parse(result.GetValue(format));
@@ -692,6 +711,7 @@ internal static class NgrepCli
                     Report = report,
                     BeforeContext = beforeCount,
                     AfterContext = afterCount,
+                    MaxCount = maxCountValue,
                     Globs = Values(result, glob),
                     Types = Values(result, type),
                     TypeNots = Values(result, typeNot),
