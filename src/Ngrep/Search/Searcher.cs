@@ -88,7 +88,11 @@ internal sealed class SearchQuery
 
     public CancellationToken CancellationToken { get; init; }
 
-    /// <summary>When set, matches are emitted in path order as each file finishes and are not retained.</summary>
+    /// <summary>
+    /// When set, matches are handed off as each file is confirmed and are not retained.
+    /// Index search emits in path order. A content scan emits as soon as the file is
+    /// confirmed and does not wait for the rest of the walk.
+    /// </summary>
     public SearchEvents? Events { get; init; }
 }
 
@@ -502,29 +506,19 @@ internal static class Searcher
         var stopOnMatch = plan.Report == ReportMode.Quiet && plan.StopAtFirst;
         if (stream != null && !stopOnMatch)
         {
-            var listed = new List<ConfirmFile>();
-            foreach (var file in TreeWalker.Enumerate(start, IndexPaths.DefaultFor(start), stats, plan.ApplyGitIgnore, plan.IncludeHidden))
-            {
-                if (plan.Filter.Accepts(file.RelativePath))
-                {
-                    listed.Add(new ConfirmFile(file.FullPath, file.RelativePath));
-                }
-            }
-
-            listed.Sort(static (left, right) => string.CompareOrdinal(left.RelativePath, right.RelativePath));
-            var jobs = new EmitJob[listed.Count];
-            for (var i = 0; i < listed.Count; i++)
-            {
-                jobs[i] = new EmitJob(true, listed[i]);
-            }
-
-            await AsyncScheduler.EmitOrdered(
-                jobs,
+            // Do not list or sort the tree before reading. Hits print as each file is
+            // confirmed, while later directories are still being walked.
+            await AsyncScheduler.EmitScan(
+                start,
+                IndexPaths.DefaultFor(start),
+                stats,
+                plan.ApplyGitIgnore,
+                plan.IncludeHidden,
+                plan.Filter,
                 degree,
                 cancellation,
                 (file, local, token) => TryCollectAsync(file, plan, local, stats, filesWithoutMatch: null, tally, token),
-                (job, matches, result) => stream.Accept(job, matches, result),
-                stopOnMatch: false);
+                (file, matches, result) => stream.Accept(new EmitJob(true, file), matches, result));
             return new ScanResult([], degree, null, stream);
         }
 
