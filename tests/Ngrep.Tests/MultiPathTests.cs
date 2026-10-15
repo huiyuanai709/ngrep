@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Ngrep.Cli;
 using Ngrep.Search;
+using Ngrep.Text;
 
 namespace Ngrep.Tests;
 
@@ -68,9 +69,18 @@ public class MultiPathTests
 
         using (Cwd(tree.Root))
         {
-            var run = Run("needle", "--format", "ndjson", "-j", "1");
-            Assert.Equal(ExitCodes.Success, run.Code);
-            Assert.Equal(["only.txt"], Paths(run.Stdout));
+            // A pipe would search stdin. This case is a terminal, which still searches `.`.
+            StandardInput.SetRedirected(false);
+            try
+            {
+                var run = Run("needle", "--format", "ndjson", "-j", "1");
+                Assert.Equal(ExitCodes.Success, run.Code);
+                Assert.Equal(["only.txt"], Paths(run.Stdout));
+            }
+            finally
+            {
+                StandardInput.SetRedirected(null);
+            }
         }
     }
 

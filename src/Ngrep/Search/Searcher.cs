@@ -42,6 +42,15 @@ internal sealed class SearchQuery
     /// </summary>
     public string? DisplayRoot { get; init; }
 
+    /// <summary>
+    /// Read file contents from <see cref="StandardInput"/> (or process stdin) instead of <see cref="Path"/>.
+    /// The index, ignore rules, globs, and types do not apply: the stream is the whole search.
+    /// </summary>
+    public bool SearchStdin { get; init; }
+
+    /// <summary>Content bytes when <see cref="SearchStdin"/> is set. Null opens process stdin.</summary>
+    public Stream? StandardInput { get; init; }
+
     public string? IndexDirectory { get; init; }
 
     public bool IgnoreCase { get; init; }
@@ -203,6 +212,11 @@ internal static class Searcher
             throw new ArgumentException("--max-depth must be >= 0.");
         }
 
+        if (query.SearchStdin)
+        {
+            return await SearchStandardInput(query);
+        }
+
         var clock = Stopwatch.StartNew();
         var tally = new SearchTally();
         var plan = MatchPlan.Create(query);
@@ -252,6 +266,29 @@ internal static class Searcher
 
         var note = ScanNote(query, indexSkipped: skipIndex && !query.ForceScan && IndexWouldApply(start, query));
         return await ScanAndFinish(start, plan, workers, query, note, tally, clock);
+    }
+
+    /// <summary>
+    /// One stream, no index, no scan note. Binary and oversize follow the file rules and are not errors.
+    /// </summary>
+    private static async Task<SearchOutcome> SearchStandardInput(SearchQuery query)
+    {
+        query.CancellationToken.ThrowIfCancellationRequested();
+        var clock = Stopwatch.StartNew();
+        var tally = new SearchTally();
+        var plan = MatchPlan.Create(query);
+        var stream = query.Events?.Batch != null ? new StreamCount(query.Events) : null;
+        var without = stream == null && plan.Report == ReportMode.FilesWithoutMatch ? new ConcurrentBag<string>() : null;
+        var matches = new List<SearchMatch>();
+        var file = new ConfirmFile(StandardInput.DisplayPath, StandardInput.DisplayPath);
+        var result = await TryCollectStreamAsync(file, plan, matches, without, tally, query);
+        if (stream != null)
+        {
+            stream.AcceptFile(StandardInput.DisplayPath, matches, result);
+            return FinishStream(usedIndex: false, note: null, workers: 1, usedPrefilter: false, stream, tally, clock);
+        }
+
+        return Finish(matches, usedIndex: false, note: null, workers: 1, usedPrefilter: false, without, tally, clock);
     }
 
     /// <summary>
@@ -607,6 +644,35 @@ internal static class Searcher
 
     private static bool IsIgnoredFile(string walkRoot, string fullPath, IgnorePolicy policy) =>
         TreeWalker.IsIgnoredFile(walkRoot, fullPath, policy);
+
+    private static async ValueTask<ConfirmResult> TryCollectStreamAsync(
+        ConfirmFile file,
+        MatchPlan plan,
+        List<SearchMatch> matches,
+        ConcurrentBag<string>? filesWithoutMatch,
+        SearchTally tally,
+        SearchQuery query)
+    {
+        BeforeConfirm?.Invoke(file.RelativePath);
+        var stop = ByteConfirm.ArmFresh(plan);
+        try
+        {
+            var input = query.StandardInput ?? StandardInput.Open();
+            using var read = await TextFiles.ReadStreamAsync(input, stop, query.CancellationToken, plan.SearchBinary);
+            ByteConfirm.Adopt(stop);
+            if (MatchLoaded(read, file, plan, matches, stats: null, filesWithoutMatch, tally, errorIfUnreadable: true, out var text, out var examined, out var matched))
+            {
+                return new ConfirmResult(examined, matched);
+            }
+
+            matched = CollectDecoded(text, file, plan, matches, filesWithoutMatch, tally);
+            return new ConfirmResult(true, matched);
+        }
+        finally
+        {
+            ByteConfirm.Disarm();
+        }
+    }
 
     private static async ValueTask<ConfirmResult> TryCollectAsync(
         ConfirmFile file,

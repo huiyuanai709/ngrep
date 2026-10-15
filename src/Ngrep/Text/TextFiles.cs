@@ -255,6 +255,118 @@ internal static class TextFiles
         }
     }
 
+    /// <summary>
+    /// Reads stdin (or another stream) with the same NUL probe, early stop, and 32 MiB cap as a file.
+    /// A stream has no length, so the cap is a byte past <paramref name="maxBytes"/> rather than a stat.
+    /// Nothing is mapped. The stream is left open; process stdin must stay open for the rest of the process.
+    /// </summary>
+    internal static ValueTask<PooledBytes> ReadStreamAsync(Stream stream, ReadStop? stop, CancellationToken cancellation) =>
+        ReadStreamAsync(stream, stop, cancellation, MaxFileBytes, searchBinary: false);
+
+    internal static ValueTask<PooledBytes> ReadStreamAsync(Stream stream, ReadStop? stop, CancellationToken cancellation, bool searchBinary) =>
+        ReadStreamAsync(stream, stop, cancellation, MaxFileBytes, searchBinary);
+
+    internal static async ValueTask<PooledBytes> ReadStreamAsync(Stream stream, ReadStop? stop, CancellationToken cancellation, long maxBytes, bool searchBinary = false)
+    {
+        if (maxBytes < 1 || maxBytes > int.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxBytes));
+        }
+
+        var cap = (int)maxBytes;
+        byte[]? buffer = null;
+        var owned = false;
+        try
+        {
+            var first = Math.Min(cap, Math.Max(64 * 1024, BinaryProbeLength));
+            buffer = ArrayPool<byte>.Shared.Rent(first);
+            var offset = 0;
+            var checkedBinary = false;
+            while (true)
+            {
+                cancellation.ThrowIfCancellationRequested();
+                var room = Math.Min(buffer.Length, cap) - offset;
+                if (room <= 0)
+                {
+                    if (offset >= cap)
+                    {
+                        // One byte past the cap is too large. An exact cap is still text.
+                        var extra = new byte[1];
+                        var more = await stream.ReadAsync(extra.AsMemory(), CancellationToken.None).ConfigureAwait(false);
+                        cancellation.ThrowIfCancellationRequested();
+                        if (more > 0)
+                        {
+                            return PooledBytes.TooLarge();
+                        }
+
+                        break;
+                    }
+
+                    var doubled = offset > cap / 2 ? cap : offset * 2;
+                    var target = stop == null
+                        ? Math.Min(cap, Math.Max(offset + 1, doubled))
+                        : Math.Min(cap, offset + (1 << 20));
+                    if (target <= offset)
+                    {
+                        target = Math.Min(cap, offset + 1);
+                    }
+
+                    var grown = ArrayPool<byte>.Shared.Rent(target);
+                    buffer.AsSpan(0, offset).CopyTo(grown);
+                    ArrayPool<byte>.Shared.Return(buffer);
+                    buffer = grown;
+                    continue;
+                }
+
+                // CancellationToken.None matches the file reader: the token is checked between chunks.
+                var read = await stream.ReadAsync(buffer.AsMemory(offset, room), CancellationToken.None).ConfigureAwait(false);
+                cancellation.ThrowIfCancellationRequested();
+                if (read == 0)
+                {
+                    break;
+                }
+
+                offset += read;
+                if (!checkedBinary && offset >= Math.Min(BinaryProbeLength, cap))
+                {
+                    checkedBinary = true;
+                    if (!searchBinary && IsBinary(buffer.AsSpan(0, offset)))
+                    {
+                        return PooledBytes.Binary();
+                    }
+                }
+
+                if (stop != null && checkedBinary && stop(buffer.AsSpan(0, offset), endOfFile: false))
+                {
+                    cancellation.ThrowIfCancellationRequested();
+                    owned = true;
+                    return PooledBytes.Ok(buffer, offset);
+                }
+            }
+
+            if (!checkedBinary && !searchBinary && offset > 0 && IsBinary(buffer.AsSpan(0, Math.Min(offset, BinaryProbeLength))))
+            {
+                return PooledBytes.Binary();
+            }
+
+            stop?.Invoke(buffer.AsSpan(0, offset), endOfFile: true);
+            cancellation.ThrowIfCancellationRequested();
+            owned = true;
+            return PooledBytes.Ok(buffer, offset);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException)
+        {
+            return PooledBytes.Unreadable();
+        }
+        finally
+        {
+            if (!owned && buffer != null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+    }
+
     private static bool TryMap(string path, int length, ReadStop? stop, bool searchBinary, out PooledBytes mapped)
     {
         MemoryMappedFile? file = null;
