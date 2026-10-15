@@ -1,0 +1,177 @@
+using System.Globalization;
+using Ngrep.Search;
+
+namespace Ngrep.Output;
+
+/// <summary>
+/// Text-mode prefixes. JSON, NDJSON, and rgjson do not use this.
+/// Column and line number are independent. <c>--vimgrep</c> turns both on before this runs.
+/// <c>-0</c> replaces the separator or newline that would have followed a path.
+/// </summary>
+internal static class TextLayout
+{
+    public static void WriteMatch(SearchMatch match, string body, SearchPresentation presentation, bool includePath, bool colorizeBody)
+    {
+        if (colorizeBody && presentation.Color)
+        {
+            body = presentation.OnlyMatching
+                ? TextColor.Match + body + TextColor.Reset
+                : Highlight(match.LineText, match.Column, match.Text);
+        }
+
+        WriteRecord(
+            includePath ? match.Path : null,
+            presentation.LineNumbers ? match.Line : null,
+            presentation.Column ? match.Column : null,
+            body,
+            presentation.Color,
+            presentation.NullPaths,
+            context: false);
+    }
+
+    public static void WriteContext(string path, int line, string text, SearchPresentation presentation, bool includePath)
+    {
+        WriteRecord(
+            includePath ? path : null,
+            presentation.LineNumbers ? line : null,
+            column: null,
+            text,
+            presentation.Color,
+            presentation.NullPaths,
+            context: true);
+    }
+
+    public static void WriteHeading(string path, SearchPresentation presentation)
+    {
+        WritePaint(path, presentation.Color ? TextColor.Path : null);
+        if (presentation.NullPaths)
+        {
+            Console.Write('\0');
+            return;
+        }
+
+        Console.WriteLine();
+    }
+
+    public static void WriteFilePath(string path, SearchPresentation presentation)
+    {
+        WritePaint(path, presentation.Color ? TextColor.Path : null);
+        if (presentation.NullPaths)
+        {
+            Console.Write('\0');
+            return;
+        }
+
+        Console.WriteLine();
+    }
+
+    public static void WriteCount(string path, int count, SearchPresentation presentation)
+    {
+        var text = count.ToString(CultureInfo.InvariantCulture);
+        WritePaint(path, presentation.Color ? TextColor.Path : null);
+        Console.Write(presentation.NullPaths ? '\0' : ':');
+        WritePaint(text, presentation.Color ? TextColor.Line : null);
+        Console.WriteLine();
+    }
+
+    private static void WriteRecord(
+        string? path,
+        int? line,
+        int? column,
+        string body,
+        bool color,
+        bool nullPath,
+        bool context)
+    {
+        var separator = context ? "-" : ":";
+        var pending = false;
+        var afterPath = false;
+
+        void Break()
+        {
+            if (!pending)
+            {
+                return;
+            }
+
+            Console.Write(afterPath && nullPath ? "\0" : separator);
+            pending = false;
+            afterPath = false;
+        }
+
+        if (path != null)
+        {
+            WritePaint(path, color ? TextColor.Path : null);
+            pending = true;
+            afterPath = true;
+        }
+
+        if (line != null)
+        {
+            Break();
+            WritePaint(line.Value.ToString(CultureInfo.InvariantCulture), color ? TextColor.Line : null);
+            pending = true;
+        }
+
+        if (column != null)
+        {
+            Break();
+            WritePaint(column.Value.ToString(CultureInfo.InvariantCulture), color ? TextColor.Column : null);
+            pending = true;
+        }
+
+        Break();
+        Console.Write(body);
+        Console.WriteLine();
+    }
+
+    private static void WritePaint(string text, string? color)
+    {
+        if (color == null)
+        {
+            Console.Write(text);
+            return;
+        }
+
+        Console.Write(color);
+        Console.Write(text);
+        Console.Write(TextColor.Reset);
+    }
+
+    private static string Highlight(string lineText, int column, string matchText)
+    {
+        var start = column - 1;
+        if (start < 0 || start > lineText.Length)
+        {
+            return lineText;
+        }
+
+        var length = matchText.Length;
+        var newline = matchText.IndexOf('\n');
+        if (newline >= 0)
+        {
+            length = newline;
+            if (length > 0 && matchText[length - 1] == '\r')
+            {
+                length--;
+            }
+        }
+
+        if (start + length > lineText.Length)
+        {
+            length = lineText.Length - start;
+        }
+
+        if (length <= 0 || !lineText.AsSpan(start, length).SequenceEqual(matchText.AsSpan(0, length)))
+        {
+            return lineText;
+        }
+
+        return string.Concat(
+            lineText[..start],
+            TextColor.Match,
+            lineText.Substring(start, length),
+            TextColor.Reset,
+            lineText[(start + length)..]);
+    }
+}

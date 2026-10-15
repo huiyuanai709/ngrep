@@ -43,6 +43,8 @@ internal static class SearchSyntax
         "--color",
         "-f",
         "--file",
+        "-r",
+        "--replace",
     };
 
     public static string[] Rewrite(string[] args)
@@ -422,7 +424,7 @@ internal static class SearchSyntax
         return expanded.ToArray();
     }
 
-    private const string BoolShorts = "iEFPqnsxvwlcoUuS";
+    private const string BoolShorts = "iEFPqnsxvwlcoUuSN0";
 
     private static readonly HashSet<string> KnownFlags = new(StringComparer.Ordinal)
     {
@@ -434,7 +436,9 @@ internal static class SearchSyntax
         "-e", "--regexp", "-f", "--file", "-w", "--word-regexp", "-x", "--line-regexp",
         "-v", "--invert-match", "--no-ignore", "--no-ignore-vcs", "-j", "--threads",
         "-l", "--files-with-matches", "--files-without-match", "-c", "--count",
-        "-q", "--quiet", "--silent", "-n", "--line-number", "-s", "--no-messages",
+        "-q", "--quiet", "--silent", "-n", "--line-number", "-N", "--no-line-number",
+        "--column", "--no-column", "--vimgrep", "-0", "--null", "-r", "--replace",
+        "-s", "--no-messages",
         "-o", "--only-matching", "--hidden", "--color", "-U", "--multiline",
         "--multiline-dotall", "--heading", "--no-heading", "--stats",
         "--files", "--binary", "-u", "--unrestricted",
@@ -487,7 +491,7 @@ internal static class SearchSyntax
         return false;
     }
 
-    private const string ValueShorts = "efgtTABCj";
+    private const string ValueShorts = "efgtTABCjr";
 
     private static bool TryExpandShortBundle(string arg, List<string> destination)
     {

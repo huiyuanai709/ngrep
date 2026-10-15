@@ -149,7 +149,7 @@ internal static partial class MachineOutput
             switch (_format)
             {
                 case OutputFormat.Text:
-                    Console.WriteLine(_presentation.Color ? Paint(path, TextColor.Path) : path);
+                    TextLayout.WriteFilePath(path, _presentation);
                     break;
                 case OutputFormat.Ndjson:
                     Console.WriteLine(PathJson(path));
@@ -173,7 +173,7 @@ internal static partial class MachineOutput
             switch (_format)
             {
                 case OutputFormat.Text:
-                    Console.WriteLine(_presentation.Color ? Paint(path, TextColor.Path) : path);
+                    TextLayout.WriteFilePath(path, _presentation);
                     break;
                 case OutputFormat.Ndjson:
                     Console.WriteLine(PathJson(path));
@@ -201,18 +201,7 @@ internal static partial class MachineOutput
             switch (_format)
             {
                 case OutputFormat.Text:
-                    if (!_presentation.Color)
-                    {
-                        Console.WriteLine($"{path}:{lines.Count}");
-                    }
-                    else
-                    {
-                        Console.WriteLine(string.Concat(
-                            Paint(path, TextColor.Path),
-                            ":",
-                            Paint(lines.Count.ToString(System.Globalization.CultureInfo.InvariantCulture), TextColor.Line)));
-                    }
-
+                    TextLayout.WriteCount(path, lines.Count, _presentation);
                     break;
                 case OutputFormat.Ndjson:
                     Console.WriteLine(CountJson(path, lines.Count));
@@ -263,12 +252,13 @@ internal static partial class MachineOutput
 
         private void WriteTextFile(IReadOnlyList<SearchMatch> matches)
         {
+            var lines = LineIndex(matches, _presentation, _presentation.OnlyMatching);
             if (_presentation.OnlyMatching || matches.All(static match => match.Before == null && match.After == null))
             {
                 foreach (var match in matches)
                 {
                     EnsureHeading(match.Path);
-                    WriteMatchLine(match, _presentation.OnlyMatching, _presentation.Color, includePath: !_useHeading);
+                    WriteMatchLine(match, MatchBody(match, lines, _presentation, _presentation.OnlyMatching), _presentation, includePath: !_useHeading, colorizeBody: _presentation.Replacer == null);
                 }
 
                 return;
@@ -288,7 +278,7 @@ internal static partial class MachineOutput
             {
                 if (match.Before == null && match.After == null)
                 {
-                    WriteMatchLine(match, onlyMatching: false, _presentation.Color, includePath: !_useHeading);
+                    WriteMatchLine(match, MatchBody(match, lines, _presentation, onlyMatching: false), _presentation, includePath: !_useHeading, colorizeBody: _presentation.Replacer == null);
                     continue;
                 }
 
@@ -306,12 +296,12 @@ internal static partial class MachineOutput
                         continue;
                     }
 
-                    WriteContextLine(match.Path, line.Line, line.Text, _presentation.Color, includePath: !_useHeading);
+                    WriteContextLine(match.Path, line.Line, line.Text, _presentation, includePath: !_useHeading);
                     lastLine = line.Line;
                     printed = true;
                 }
 
-                WriteMatchLine(match, onlyMatching: false, _presentation.Color, includePath: !_useHeading);
+                WriteMatchLine(match, MatchBody(match, lines, _presentation, onlyMatching: false), _presentation, includePath: !_useHeading, colorizeBody: _presentation.Replacer == null);
                 if (match.Line > lastLine)
                 {
                     lastLine = match.Line;
@@ -325,7 +315,7 @@ internal static partial class MachineOutput
                         continue;
                     }
 
-                    WriteContextLine(match.Path, line.Line, line.Text, _presentation.Color, includePath: !_useHeading);
+                    WriteContextLine(match.Path, line.Line, line.Text, _presentation, includePath: !_useHeading);
                     lastLine = line.Line;
                 }
             }
@@ -343,7 +333,7 @@ internal static partial class MachineOutput
                 Console.WriteLine();
             }
 
-            Console.WriteLine(_presentation.Color ? Paint(path, TextColor.Path) : path);
+            TextLayout.WriteHeading(path, _presentation);
             _headingPath = path;
             _headingStarted = true;
         }

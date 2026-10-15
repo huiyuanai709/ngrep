@@ -8,7 +8,15 @@ namespace Ngrep.Output;
 
 internal readonly record struct WatchEvent(string Event, IndexResult Result);
 
-internal readonly record struct SearchPresentation(ReportMode Report, bool OnlyMatching, bool Color, bool Heading = false);
+internal readonly record struct SearchPresentation(
+    ReportMode Report,
+    bool OnlyMatching,
+    bool Color,
+    bool Heading = false,
+    bool LineNumbers = true,
+    bool Column = true,
+    bool NullPaths = false,
+    LineReplacer? Replacer = null);
 
 internal static partial class MachineOutput
 {
@@ -30,20 +38,20 @@ internal static partial class MachineOutput
             case ReportMode.Quiet:
                 return;
             case ReportMode.Count:
-                WriteCounts(matches, format, color, elapsedMilliseconds);
+                WriteCounts(matches, format, presentation, color, elapsedMilliseconds);
                 return;
             case ReportMode.FilesWithMatches:
-                WritePaths(DistinctPaths(matches), format, color, asMatches: true, matches, elapsedMilliseconds);
+                WritePaths(DistinctPaths(matches), format, presentation, color, asMatches: true, matches, elapsedMilliseconds);
                 return;
             case ReportMode.FilesWithoutMatch:
-                WritePaths(filesWithoutMatch ?? [], format, color, asMatches: false, matches: null, elapsedMilliseconds);
+                WritePaths(filesWithoutMatch ?? [], format, presentation, color, asMatches: false, matches: null, elapsedMilliseconds);
                 return;
         }
 
         switch (format)
         {
             case OutputFormat.Text:
-                WriteText(matches, presentation.OnlyMatching, color, presentation.Heading);
+                WriteText(matches, presentation);
                 break;
             case OutputFormat.Ndjson:
                 foreach (var match in matches)
@@ -197,8 +205,11 @@ internal static partial class MachineOutput
         }
     }
 
-    private static void WriteText(IReadOnlyList<SearchMatch> matches, bool onlyMatching, bool color, bool heading)
+    private static void WriteText(IReadOnlyList<SearchMatch> matches, SearchPresentation presentation)
     {
+        var heading = presentation.Heading;
+        var onlyMatching = presentation.OnlyMatching;
+        var lineIndex = LineIndex(matches, presentation, onlyMatching);
         string? headingPath = null;
         var headingStarted = false;
         void EnsureHeading(string path)
@@ -213,7 +224,7 @@ internal static partial class MachineOutput
                 Console.WriteLine();
             }
 
-            Console.WriteLine(color ? Paint(path, TextColor.Path) : path);
+            TextLayout.WriteHeading(path, presentation);
             headingPath = path;
             headingStarted = true;
         }
@@ -223,7 +234,7 @@ internal static partial class MachineOutput
             foreach (var match in matches)
             {
                 EnsureHeading(match.Path);
-                WriteMatchLine(match, onlyMatching: true, color, includePath: !heading);
+                WriteMatchLine(match, MatchBody(match, lineIndex, presentation, onlyMatching: true), presentation, includePath: !heading, colorizeBody: presentation.Replacer == null);
             }
 
             return;
@@ -255,7 +266,7 @@ internal static partial class MachineOutput
             if (match.Before == null && match.After == null)
             {
                 EnsureHeading(match.Path);
-                WriteMatchLine(match, onlyMatching: false, color, includePath: !heading);
+                WriteMatchLine(match, MatchBody(match, lineIndex, presentation, onlyMatching: false), presentation, includePath: !heading, colorizeBody: presentation.Replacer == null);
                 continue;
             }
 
@@ -282,12 +293,12 @@ internal static partial class MachineOutput
                     continue;
                 }
 
-                WriteContextLine(match.Path, line.Line, line.Text, color, includePath: !heading);
+                WriteContextLine(match.Path, line.Line, line.Text, presentation, includePath: !heading);
                 lastLine = line.Line;
                 printed = true;
             }
 
-            WriteMatchLine(match, onlyMatching: false, color, includePath: !heading);
+            WriteMatchLine(match, MatchBody(match, lineIndex, presentation, onlyMatching: false), presentation, includePath: !heading, colorizeBody: presentation.Replacer == null);
             if (match.Line > lastLine)
             {
                 lastLine = match.Line;
@@ -301,92 +312,66 @@ internal static partial class MachineOutput
                     continue;
                 }
 
-                WriteContextLine(match.Path, line.Line, line.Text, color, includePath: !heading);
+                WriteContextLine(match.Path, line.Line, line.Text, presentation, includePath: !heading);
                 lastLine = line.Line;
             }
         }
     }
 
-    private static void WriteMatchLine(SearchMatch match, bool onlyMatching, bool color, bool includePath)
+    private static void WriteMatchLine(SearchMatch match, string body, SearchPresentation presentation, bool includePath, bool colorizeBody) =>
+        TextLayout.WriteMatch(match, body, presentation, includePath, colorizeBody);
+
+    private static void WriteContextLine(string path, int line, string text, SearchPresentation presentation, bool includePath) =>
+        TextLayout.WriteContext(path, line, text, presentation, includePath);
+
+    private static string MatchBody(
+        SearchMatch match,
+        Dictionary<(string Path, int Line), List<SearchMatch>>? lines,
+        SearchPresentation presentation,
+        bool onlyMatching)
     {
-        var body = onlyMatching ? match.Text : match.LineText;
-        var line = match.Line.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        var column = match.Column.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        if (!color)
+        var replacer = presentation.Replacer;
+        if (replacer == null)
         {
-            Console.WriteLine(includePath ? $"{match.Path}:{line}:{column}:{body}" : $"{line}:{column}:{body}");
-            return;
+            return onlyMatching ? match.Text : match.LineText;
         }
 
         if (onlyMatching)
         {
-            body = TextColor.Match + body + TextColor.Reset;
-        }
-        else
-        {
-            body = Highlight(match.LineText, match.Column, match.Text);
+            var replaced = replacer.ReplaceOne(match);
+            return presentation.Color ? TextColor.Match + replaced + TextColor.Reset : replaced;
         }
 
-        var numbers = string.Concat(
-            Paint(line, TextColor.Line),
-            ":",
-            Paint(column, TextColor.Column),
-            ":",
-            body);
-        Console.WriteLine(includePath ? string.Concat(Paint(match.Path, TextColor.Path), ":", numbers) : numbers);
+        List<SearchMatch>? onLine = null;
+        lines?.TryGetValue((match.Path, match.Line), out onLine);
+        return replacer.ReplaceLine(match.LineText, onLine ?? [match], presentation.Color);
     }
 
-    private static void WriteContextLine(string path, int line, string text, bool color, bool includePath)
+    private static Dictionary<(string Path, int Line), List<SearchMatch>>? LineIndex(
+        IReadOnlyList<SearchMatch> matches,
+        SearchPresentation presentation,
+        bool onlyMatching)
     {
-        var lineText = line.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        if (!color)
+        if (presentation.Replacer == null || onlyMatching)
         {
-            Console.WriteLine(includePath ? $"{path}-{lineText}-{text}" : $"{lineText}-{text}");
-            return;
+            return null;
         }
 
-        var painted = string.Concat(Paint(lineText, TextColor.Line), "-", text);
-        Console.WriteLine(includePath ? string.Concat(Paint(path, TextColor.Path), "-", painted) : painted);
-    }
-
-    private static string Highlight(string lineText, int column, string matchText)
-    {
-        var start = column - 1;
-        if (start < 0 || start > lineText.Length)
+        var map = new Dictionary<(string Path, int Line), List<SearchMatch>>();
+        foreach (var match in matches)
         {
-            return lineText;
-        }
-
-        var length = matchText.Length;
-        var newline = matchText.IndexOf('\n');
-        if (newline >= 0)
-        {
-            length = newline;
-            if (length > 0 && matchText[length - 1] == '\r')
+            var key = (match.Path, match.Line);
+            if (!map.TryGetValue(key, out var list))
             {
-                length--;
+                list = [];
+                map[key] = list;
             }
+
+            list.Add(match);
         }
 
-        if (start + length > lineText.Length)
-        {
-            length = lineText.Length - start;
-        }
-
-        if (length <= 0 || !lineText.AsSpan(start, length).SequenceEqual(matchText.AsSpan(0, length)))
-        {
-            return lineText;
-        }
-
-        return string.Concat(
-            lineText[..start],
-            TextColor.Match,
-            lineText.Substring(start, length),
-            TextColor.Reset,
-            lineText[(start + length)..]);
+        return map;
     }
-
-    private static string Paint(string text, string code) => code + text + TextColor.Reset;
 
     private static IEnumerable<string> DistinctPaths(IReadOnlyList<SearchMatch> matches)
     {
@@ -406,6 +391,7 @@ internal static partial class MachineOutput
     private static void WritePaths(
         IEnumerable<string> paths,
         OutputFormat format,
+        SearchPresentation presentation,
         bool color,
         bool asMatches,
         IReadOnlyList<SearchMatch>? matches,
@@ -417,7 +403,7 @@ internal static partial class MachineOutput
             case OutputFormat.Text:
                 foreach (var path in list)
                 {
-                    Console.WriteLine(color ? Paint(path, TextColor.Path) : path);
+                    TextLayout.WriteFilePath(path, presentation with { Color = color });
                 }
 
                 break;
@@ -451,7 +437,7 @@ internal static partial class MachineOutput
         }
     }
 
-    private static void WriteCounts(IReadOnlyList<SearchMatch> matches, OutputFormat format, bool color, long elapsedMilliseconds)
+    private static void WriteCounts(IReadOnlyList<SearchMatch> matches, OutputFormat format, SearchPresentation presentation, bool color, long elapsedMilliseconds)
     {
         var groups = CountGroups(matches);
         switch (format)
@@ -459,16 +445,7 @@ internal static partial class MachineOutput
             case OutputFormat.Text:
                 foreach (var group in groups)
                 {
-                    if (!color)
-                    {
-                        Console.WriteLine($"{group.Path}:{group.Lines}");
-                        continue;
-                    }
-
-                    Console.WriteLine(string.Concat(
-                        Paint(group.Path, TextColor.Path),
-                        ":",
-                        Paint(group.Lines.ToString(System.Globalization.CultureInfo.InvariantCulture), TextColor.Line)));
+                    TextLayout.WriteCount(group.Path, group.Lines, presentation with { Color = color });
                 }
 
                 break;
