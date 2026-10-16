@@ -83,6 +83,15 @@ public class SmartCaseConfigTests
         Assert.Equal(
             new[] { "search", "--threads", "4", "foo" },
             SearchSyntax.Rewrite(["--threads", "1", "--threads", "4", "foo"]));
+        Assert.Equal(
+            new[] { "search", "-e=--no-config", "src" },
+            SearchSyntax.Rewrite(["-e", "--no-config", "src"]));
+        Assert.Equal(
+            new[] { "search", "--no-config", "-e", "foo" },
+            SearchSyntax.Rewrite(["--no-config", "-e", "foo"]));
+        Assert.Equal(
+            new[] { "search", "-n", "-E", "-e=--no-config", "src" },
+            SearchSyntax.Rewrite(["-nEe", "--no-config", "src"]));
         Assert.True(SearchSyntax.SkipsConfig(["--help"]));
         Assert.True(SearchSyntax.SkipsConfig(["search", "--help"]));
         Assert.True(SearchSyntax.SkipsConfig(["index", "src"]));
@@ -91,6 +100,21 @@ public class SmartCaseConfigTests
         Assert.False(SearchSyntax.SkipsConfig(["foo"]));
         Assert.False(SearchSyntax.SkipsConfig(["search", "foo"]));
         Assert.False(SearchSyntax.SkipsConfig(["--", "index"]));
+        Assert.True(SearchSyntax.SkipsConfig(["--no-config"]));
+        Assert.True(SearchSyntax.SkipsConfig(["foo", "--no-config"]));
+        Assert.True(SearchSyntax.SkipsConfig(["search", "--no-config", "foo"]));
+        Assert.True(SearchSyntax.SkipsConfig(["--no-config", "search", "foo"]));
+        Assert.True(SearchSyntax.SkipsConfig(["-e", "foo", "--no-config"]));
+        Assert.True(SearchSyntax.SkipsConfig(["--format=json", "--no-config", "foo"]));
+        Assert.True(SearchSyntax.IsKnownFlag("--no-config"));
+        Assert.False(SearchSyntax.SkipsConfig(["--", "--no-config"]));
+        Assert.False(SearchSyntax.SkipsConfig(["foo", "--", "--no-config"]));
+        Assert.False(SearchSyntax.SkipsConfig(["-e", "--no-config"]));
+        Assert.False(SearchSyntax.SkipsConfig(["-nEe", "--no-config"]));
+        Assert.False(SearchSyntax.SkipsConfig(["--glob", "--no-config", "foo"]));
+        Assert.False(SearchSyntax.SkipsConfig(["-j", "--no-config", "foo"]));
+        Assert.False(SearchSyntax.SkipsConfig(["--no-config=true", "foo"]));
+        Assert.False(SearchSyntax.SkipsConfig(["-g=--no-config", "foo"]));
     }
 
     [Fact]
@@ -209,6 +233,67 @@ public class SmartCaseConfigTests
         using (var _ = Env("NGREP_CONFIG_PATH", ""))
         {
             Assert.Equal("a.txt:1:1:foo", Hit("-x", "foo", tree.Root));
+        }
+    }
+
+    [Fact]
+    public void No_config_suppresses_the_config_file()
+    {
+        using var tree = Temp();
+        File.WriteAllText(tree.File("a.txt"), "foo\nFoo\n--no-config\n--No-config\n");
+        File.WriteAllText(tree.File("a.cs"), "needle\n");
+        File.WriteAllText(tree.File("a.log"), "needle\n");
+        var config = tree.File("ngrep.conf");
+        File.WriteAllText(config, "--smart-case\n");
+
+        using (var _ = Env("NGREP_CONFIG_PATH", config))
+        {
+            Assert.Equal("a.txt:1:1:foo", Hit("-x", "--no-config", "foo", tree.Root));
+            Assert.Equal("a.txt:1:1:foo", Hit("-x", "foo", tree.Root, "--no-config"));
+            Assert.Equal("a.txt:1:1:foo", Hit("search", "--no-config", "-x", "foo", tree.Root));
+            Assert.Equal("a.txt:1:1:foo", Hit("--no-config", "search", "-x", "foo", tree.Root));
+            Assert.Equal("a.txt:1:1:foo", Hit("--no-config", "--no-config", "-x", "foo", tree.Root));
+
+            var folded = Run("-x", "-F", "-j", "1", "--", "--no-config", tree.Root);
+            Expect(ExitCodes.Success, folded);
+            Assert.Equal("a.txt:3:1:--no-config\na.txt:4:1:--No-config", folded.Stdout.Trim());
+            var exact = Run("-x", "-F", "--no-config", "-j", "1", "--", "--no-config", tree.Root);
+            Expect(ExitCodes.Success, exact);
+            Assert.Equal("a.txt:3:1:--no-config", exact.Stdout.Trim());
+            Assert.Equal(
+                "a.txt:3:1:--no-config\na.txt:4:1:--No-config",
+                Hit("-x", "-F", "-e", "--no-config", tree.Root));
+        }
+
+        File.WriteAllText(config, "--glob\n*.cs\n");
+        using (var _ = Env("NGREP_CONFIG_PATH", config))
+        {
+            var filtered = Run("--files", tree.Root, "-j", "1");
+            Expect(ExitCodes.Success, filtered);
+            Assert.Contains("a.cs", filtered.Stdout, StringComparison.Ordinal);
+            Assert.DoesNotContain("a.log", filtered.Stdout, StringComparison.Ordinal);
+
+            var files = Run("--files", "--no-config", tree.Root, "-j", "1");
+            Expect(ExitCodes.Success, files);
+            Assert.Contains("a.txt", files.Stdout, StringComparison.Ordinal);
+            Assert.Contains("a.log", files.Stdout, StringComparison.Ordinal);
+            Assert.Contains("a.cs", files.Stdout, StringComparison.Ordinal);
+        }
+
+        File.WriteAllText(config, "--smart-case\n--no-config\n");
+        using (var _ = Env("NGREP_CONFIG_PATH", config))
+        {
+            Assert.Equal("a.txt:1:1:foo\na.txt:2:1:Foo", Hit("-x", "foo", tree.Root));
+        }
+
+        var missing = Path.Combine(tree.Root, "missing.conf");
+        using (var _ = Env("NGREP_CONFIG_PATH", missing))
+        {
+            Assert.Equal("a.txt:1:1:foo", Hit("-x", "--no-config", "foo", tree.Root));
+            var help = Run("--no-config", "--help");
+            Expect(ExitCodes.Success, help);
+            Assert.Contains("--no-config", help.Stdout, StringComparison.Ordinal);
+            Assert.DoesNotContain("cannot read", help.Stderr, StringComparison.Ordinal);
         }
     }
 

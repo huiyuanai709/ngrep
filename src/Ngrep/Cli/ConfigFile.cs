@@ -8,6 +8,8 @@ internal readonly record struct LoadedConfig(string Path, string[] Arguments);
 /// <c>NGREP_CONFIG_PATH</c> is one argument per line, matching ripgrep's config file.
 /// Blank lines and lines whose first non-whitespace character is <c>#</c> are ignored.
 /// <c>RIPGREP_CONFIG_PATH</c> is not read.
+/// <c>--no-config</c> on the command line skips this file entirely; the flag is
+/// recognized before the file is opened.
 /// </summary>
 internal static class ConfigFile
 {

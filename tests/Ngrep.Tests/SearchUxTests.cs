@@ -334,6 +334,7 @@ public class SearchUxTests
         Assert.Contains("index", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("search", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("watch", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--no-config", capture.Stdout, StringComparison.Ordinal);
 
         capture.Clear();
         Assert.Equal(ExitCodes.Success, NgrepCli.Run(["search", "--help"]).GetAwaiter().GetResult());
@@ -385,7 +386,9 @@ public class SearchUxTests
         Assert.Contains("--maxdepth", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--smart-case", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--case-sensitive", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--no-config", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("NGREP_CONFIG_PATH", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("Never read configuration files", capture.Stdout, StringComparison.Ordinal);
         Assert.DoesNotContain("--async", capture.Stdout, StringComparison.Ordinal);
     }
 
