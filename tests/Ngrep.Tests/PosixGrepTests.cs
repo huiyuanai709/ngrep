@@ -272,10 +272,10 @@ public class PosixGrepTests
         Assert.Equal("a.txt:1:1:aaa\na.txt:4:1:a\na.txt:5:1:aaa", plus.Stdout.Trim());
         Assert.Equal(plus.Stdout, Run("-x", "a+", tree.Root, "-j", "1").Stdout);
 
-        var either = Run("-E", "-x", "a|aaa", Path.Combine(tree.Root, "a.txt"), "-j", "1");
+        var either = Run("-E", "-x", "-H", "a|aaa", Path.Combine(tree.Root, "a.txt"), "-j", "1");
         Assert.Equal("a.txt:1:1:aaa\na.txt:4:1:a\na.txt:5:1:aaa", either.Stdout.Trim());
 
-        var star = Run("-E", "-x", "a*", Path.Combine(tree.Root, "a.txt"), "-j", "1");
+        var star = Run("-E", "-x", "-H", "a*", Path.Combine(tree.Root, "a.txt"), "-j", "1");
         Assert.Equal("a.txt:1:1:aaa\na.txt:3:1:\na.txt:4:1:a\na.txt:5:1:aaa", star.Stdout.Trim());
 
         var literalDot = Run("-F", "-x", "a.b", tree.Root, "-j", "1");
@@ -287,7 +287,7 @@ public class PosixGrepTests
         var regexDot = Run("-xE", "a.b", tree.Root, "-j", "1");
         Assert.Equal("dots.txt:1:1:a.b\ndots.txt:2:1:axb", regexDot.Stdout.Trim());
 
-        var crlf = Run("-x", "foo", Path.Combine(tree.Root, "crlf.txt"), "-j", "1");
+        var crlf = Run("-x", "-H", "foo", Path.Combine(tree.Root, "crlf.txt"), "-j", "1");
         Assert.Equal("crlf.txt:1:1:foo", crlf.Stdout.Trim());
 
         File.WriteAllText(tree.File("span.txt"), "foo\nbar\n");

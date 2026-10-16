@@ -432,7 +432,7 @@ internal static class SearchSyntax
         return expanded.ToArray();
     }
 
-    private const string BoolShorts = "iEFPqnsxvwlcoUuSN0La";
+    private const string BoolShorts = "iEFPqnsxvwlcoUuSN0LaHI";
 
     private static readonly HashSet<string> KnownFlags = new(StringComparer.Ordinal)
     {
@@ -449,7 +449,8 @@ internal static class SearchSyntax
         "--column", "--no-column", "--vimgrep", "-0", "--null", "-r", "--replace",
         "-s", "--no-messages",
         "-o", "--only-matching", "--hidden", "--color", "-U", "--multiline",
-        "--multiline-dotall", "--heading", "--no-heading", "--stats",
+        "--multiline-dotall", "--heading", "--no-heading", "--with-filename", "-H",
+        "--no-filename", "-I", "--stats",
         "--files", "--binary", "-a", "--text", "-u", "--unrestricted",
         "--no-config",
     };
@@ -891,6 +892,7 @@ internal static class SearchSyntax
             "--multiline-dotall" => "multiline-dotall",
             "--heading" => "heading",
             "--no-heading" => "no-heading",
+            "-H" or "--with-filename" or "-I" or "--no-filename" => "filename",
             "--stats" => "stats",
             "--no-config" => "no-config",
             _ => null,

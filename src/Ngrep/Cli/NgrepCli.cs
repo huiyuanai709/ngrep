@@ -274,7 +274,7 @@ internal static class NgrepCli
         };
         var vimgrep = new Option<bool>("--vimgrep")
         {
-            Description = "Print each text match as path:line:column:text. Forces line numbers and columns, and disables headings. Overrides -N, --no-column, and --heading.",
+            Description = "Print each text match as path:line:column:text. Forces line numbers, columns, and the path, and disables headings. Overrides -N, --no-column, and --heading. -I still drops the path.",
         };
         var nullPaths = new Option<bool>("--null", "-0")
         {
@@ -316,11 +316,19 @@ internal static class NgrepCli
         };
         var heading = new Option<bool>("--heading")
         {
-            Description = "Print a path heading before each file's text matches, and omit the path from match lines. Forces headings for one file and for a pipe.",
+            Description = "Print a path heading before each file's text matches, and omit the path from match lines. Applies when the path is shown. A single file or stdin also needs -H. --no-heading wins when both are set.",
         };
         var noHeading = new Option<bool>("--no-heading")
         {
-            Description = "Keep path:line:column:text on every text match line. Overrides --heading. Default when stdout is not a terminal, TERM=dumb, or only one file was searched.",
+            Description = "Prefix each text match with the path instead of a heading. Overrides --heading. Default when stdout is not a terminal or TERM=dumb. Does not add a path for one file, stdin, or -I.",
+        };
+        var withFilename = new Option<bool>("--with-filename", "-H")
+        {
+            Description = "Print the file path with each text match. Default when more than one path is searched or the path is a directory. With --heading the path is a heading; otherwise it prefixes each line. --vimgrep implies this unless -I is set. The last of -H and -I wins. -c uses the same rule. json, ndjson, and rgjson ignore this flag.",
+        };
+        var noFilename = new Option<bool>("--no-filename", "-I")
+        {
+            Description = "Never print the file path with text matches, context, or -c. Default when searching one file or stdin. Lines are line:column:text. Overrides -H and the path --vimgrep would add. -l, --files-without-match, and --files still print paths. json, ndjson, and rgjson ignore this flag.",
         };
         var stats = new Option<bool>("--stats")
         {
@@ -385,6 +393,8 @@ internal static class NgrepCli
         searchCommand.Options.Add(multilineDotAll);
         searchCommand.Options.Add(heading);
         searchCommand.Options.Add(noHeading);
+        searchCommand.Options.Add(withFilename);
+        searchCommand.Options.Add(noFilename);
         searchCommand.Options.Add(stats);
         searchCommand.Options.Add(maxDepth);
         searchCommand.SetAction(async (result, cancellationToken) =>
@@ -459,6 +469,8 @@ internal static class NgrepCli
                     multilineDotAll,
                     heading,
                     noHeading,
+                    withFilename,
+                    noFilename,
                     stats,
                     maxDepth,
                     maxCount,
@@ -559,6 +571,8 @@ internal static class NgrepCli
         Option<bool> multilineDotAll,
         Option<bool> heading,
         Option<bool> noHeading,
+        Option<bool> withFilename,
+        Option<bool> noFilename,
         Option<bool> stats,
         Option<int> maxDepth,
         Option<int> maxCount,
@@ -625,6 +639,20 @@ internal static class NgrepCli
             suppressHeading = true;
         }
 
+        // One file or stdin omits the path unless -H or --vimgrep. A directory or
+        // several paths include it unless -I. The last of -H and -I wins, including
+        // over the path --vimgrep would add. Headings need a path to print.
+        var showFilename = ResolveSwitch(
+            result,
+            fallback: result.GetValue(vimgrep) || !IsOneFile(bound, searchStdin),
+            withFilename,
+            noFilename);
+        if (!showFilename)
+        {
+            forceHeading = false;
+            suppressHeading = true;
+        }
+
         LineReplacer? replacer = null;
         if (parsedFormat == OutputFormat.Text && IsSet(result, replace) && !result.GetValue(invert))
         {
@@ -647,7 +675,8 @@ internal static class NgrepCli
             lineNumbers,
             showColumn,
             result.GetValue(nullPaths),
-            replacer);
+            replacer,
+            showFilename);
 
         var autoHeading = parsedFormat == OutputFormat.Text
             && report == ReportMode.Matches
@@ -1013,6 +1042,32 @@ internal static class NgrepCli
     /// Last explicit flag wins. <paramref name="enable"/> and <paramref name="disable"/> are a pair
     /// such as <c>-n</c> / <c>-N</c>. When neither appears, <paramref name="fallback"/> is used.
     /// </summary>
+    /// <summary>
+    /// True when text output should omit the path by default: stdin, or exactly one
+    /// path that is not a directory. A directory is not one file, even when it holds
+    /// a single file. A missing path is not a directory.
+    /// </summary>
+    private static bool IsOneFile(BoundSearch bound, bool searchStdin)
+    {
+        if (searchStdin)
+        {
+            return true;
+        }
+
+        if (!bound.PathExplicit || bound.Paths.Length != 1)
+        {
+            return false;
+        }
+
+        var path = bound.Paths[0];
+        if (path == "-")
+        {
+            return true;
+        }
+
+        return !Directory.Exists(path);
+    }
+
     private static bool ResolveSwitch(
         System.CommandLine.ParseResult result,
         bool fallback,

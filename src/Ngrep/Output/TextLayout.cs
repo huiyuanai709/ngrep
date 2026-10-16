@@ -6,7 +6,8 @@ namespace Ngrep.Output;
 /// <summary>
 /// Text-mode prefixes. JSON, NDJSON, and rgjson do not use this.
 /// Column and line number are independent. <c>--vimgrep</c> turns both on before this runs.
-/// <c>-0</c> replaces the separator or newline that would have followed a path.
+/// <c>-H</c> / <c>-I</c> decide whether a path is printed at all. <c>-0</c> replaces the separator
+/// or newline that would have followed a path, and is absent when the path is omitted.
 /// </summary>
 internal static class TextLayout
 {
@@ -68,6 +69,13 @@ internal static class TextLayout
     public static void WriteCount(string path, int count, SearchPresentation presentation)
     {
         var text = count.ToString(CultureInfo.InvariantCulture);
+        if (!presentation.WithFilename)
+        {
+            WritePaint(text, presentation.Color ? TextColor.Line : null);
+            Console.WriteLine();
+            return;
+        }
+
         WritePaint(path, presentation.Color ? TextColor.Path : null);
         Console.Write(presentation.NullPaths ? '\0' : ':');
         WritePaint(text, presentation.Color ? TextColor.Line : null);

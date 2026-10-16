@@ -366,6 +366,8 @@ public class SearchUxTests
         Assert.Contains("--file", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--heading", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--no-heading", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--with-filename", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--no-filename", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--stats", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--extended-regexp", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--fixed-strings", capture.Stdout, StringComparison.Ordinal);

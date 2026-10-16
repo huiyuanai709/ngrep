@@ -104,7 +104,7 @@ public class ParityTests
 
         capture.Clear();
         Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", Path.Combine(tree.Root, "mixed.txt"), "-c", "-j", "1"]).GetAwaiter().GetResult());
-        Assert.Equal("mixed.txt:1", capture.Stdout.Trim());
+        Assert.Equal("1", capture.Stdout.Trim());
     }
 
     [Fact]
@@ -216,7 +216,7 @@ public class ParityTests
 
         capture.Clear();
         var named = Path.Combine(tree.Root, ".secret");
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", named, "-j", "1"]).GetAwaiter().GetResult());
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-H", "netgrep", named, "-j", "1"]).GetAwaiter().GetResult());
         Assert.Contains(".secret:1:", capture.Stdout, StringComparison.Ordinal);
 
         capture.Clear();
@@ -347,7 +347,7 @@ public class ParityTests
         Assert.DoesNotContain("alpha", anchored, StringComparison.Ordinal);
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["--regex", "-U", "-v", "foo\nbar", Path.Combine(tree.Root, "span.txt"), "-j", "1"]).GetAwaiter().GetResult());
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-H", "--regex", "-U", "-v", "foo\nbar", Path.Combine(tree.Root, "span.txt"), "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("span.txt:3:1:nope", capture.Stdout.Trim());
 
         capture.Clear();
@@ -517,7 +517,7 @@ public class ParityTests
         Assert.Equal("a.txt:1:1:netgrep\nb.txt:1:1:netgrep\n", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
 
         capture.Clear();
-        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", Path.Combine(tree.Root, "a.txt"), "--heading", "-A", "1", "-j", "1"]).GetAwaiter().GetResult());
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run(["-H", "netgrep", Path.Combine(tree.Root, "a.txt"), "--heading", "-A", "1", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal("a.txt\n1:1:netgrep\n2-next\n", capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
 
         capture.Clear();

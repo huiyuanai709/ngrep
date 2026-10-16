@@ -46,7 +46,8 @@ ngrep --format ndjson -C 2 TODO .
 - `-d N` / `--max-depth N`: cap walk depth. 0 is the start path. 1 is its immediate children. `--maxdepth` is the same flag.
 - `-g`: glob filter. A leading `!` excludes. Repeatable.
 - `-t`: built-in file type. Repeatable.
-- `-l`: one path per file with a hit. `-c`: `path:count` of matching lines.
+- `-l`: one path per file with a hit. `-c`: `path:count` of matching lines when the path is shown, or `count` for one file, stdin, or `-I`.
+- `-H` / `--with-filename` prints the path. `-I` / `--no-filename` omits it. The last one wins. One file or stdin omits the path unless `-H` or `--vimgrep`. A directory or several paths include it unless `-I`.
 - `-m N` / `--max-count N`: at most N matching lines per file, then stop that file. Other files continue. `0` searches nothing.
 - `-a` / `--text`: search a file with a NUL in the first 8 KiB and print matching lines, including stdin. `--binary` does the same search and also prints the line. Without either flag those files are skipped.
 - `--format ndjson`: one JSON object per line. Default to this when parsing hits.
