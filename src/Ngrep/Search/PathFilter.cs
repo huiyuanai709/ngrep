@@ -17,7 +17,7 @@ internal sealed class PathFilter
         _excludeTypes = excludeTypes;
     }
 
-    public static PathFilter Create(IReadOnlyList<string> globs, IReadOnlyList<string> types, IReadOnlyList<string> typeNots, IReadOnlyList<string> typeAdds)
+    public static PathFilter Create(IReadOnlyList<GlobSpec> globs, IReadOnlyList<string> types, IReadOnlyList<string> typeNots, IReadOnlyList<string> typeAdds)
     {
         if (globs.Count == 0 && types.Count == 0 && typeNots.Count == 0 && typeAdds.Count == 0)
         {

@@ -61,6 +61,7 @@ internal sealed class MatchPlan
     /// <summary>
     /// True when every ignore source is on, so an index built with those rules still matches the walk.
     /// <c>--no-ignore</c> and <c>--no-ignore-vcs</c> are false and force a content scan.
+    /// <c>--ignore-file</c> does not: those rules only remove files the index already has, and search filters them.
     /// </summary>
     public bool ApplyGitIgnore => Ignore.Vcs && Ignore.Custom;
 
@@ -198,9 +199,9 @@ internal sealed class MatchPlan
             MaxCount = query.MaxCount,
             Filter = PathFilter.Create(query.Globs, query.Types, query.TypeNots, query.TypeAdds),
             Literals = literalsQuery,
-            Ignore = query.NoIgnore
+            Ignore = (query.NoIgnore
                 ? IgnorePolicy.None
-                : query.NoIgnoreVcs ? IgnorePolicy.CustomOnly : IgnorePolicy.All,
+                : query.NoIgnoreVcs ? IgnorePolicy.CustomOnly : IgnorePolicy.All).WithExtra(query.IgnoreFiles),
             Report = query.Report,
             Multiline = crosses,
             MultilineDotAll = query.MultilineDotAll,

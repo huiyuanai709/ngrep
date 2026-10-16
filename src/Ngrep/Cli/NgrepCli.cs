@@ -152,7 +152,17 @@ internal static class NgrepCli
         };
         var glob = new Option<string[]>("-g", "--glob")
         {
-            Description = "Include or exclude files. Repeatable. A leading ! excludes (like ripgrep). The last matching glob wins. Globs filter after ignore files and do not re-include ignored files.",
+            Description = "Include or exclude files. Repeatable. A leading ! excludes (like ripgrep). The last matching glob wins, including a later --iglob. Globs filter after ignore files and do not re-include ignored files.",
+            Arity = ArgumentArity.ZeroOrMore,
+        };
+        var iglob = new Option<string[]>("--iglob")
+        {
+            Description = "Case-insensitive --glob (ordinal). Repeatable. A leading ! excludes. Mixed with -g, the last matching glob wins. Does not re-include ignored or hidden files.",
+            Arity = ArgumentArity.ZeroOrMore,
+        };
+        var ignoreFile = new Option<string[]>("--ignore-file")
+        {
+            Description = "Extra gitignore-format file. Repeatable. Patterns match paths relative to the current directory. Lowest precedence: .rgignore, .ignore, .gitignore, info/exclude, and the global excludes file all override it. Later --ignore-file flags override earlier ones. --no-ignore, --no-ignore-vcs, and -u do not disable it. A missing file exits 2.",
             Arity = ArgumentArity.ZeroOrMore,
         };
         var type = new Option<string[]>("-t", "--type")
@@ -214,11 +224,11 @@ internal static class NgrepCli
         };
         var noIgnore = new Option<bool>("--no-ignore")
         {
-            Description = "Do not respect ignore files (.gitignore, .ignore, .rgignore, git info/exclude, or the global excludes file). Globs still filter. .git and .ngrep stay skipped. Scans, because the index omits ignored files.",
+            Description = "Do not respect ignore files (.gitignore, .ignore, .rgignore, git info/exclude, or the global excludes file). --ignore-file still applies. Globs still filter. .git and .ngrep stay skipped. Scans, because the index omits ignored files.",
         };
         var noIgnoreVcs = new Option<bool>("--no-ignore-vcs")
         {
-            Description = "Do not respect version-control ignore rules (.gitignore, git info/exclude, and the global excludes file). .ignore and .rgignore still apply. Scans instead of using the index.",
+            Description = "Do not respect version-control ignore rules (.gitignore, git info/exclude, and the global excludes file). .ignore, .rgignore, and --ignore-file still apply. Scans instead of using the index.",
         };
         var unrestricted = new Option<bool>("--unrestricted", "-u")
         {
@@ -353,6 +363,8 @@ internal static class NgrepCli
         searchCommand.Options.Add(fixedStrings);
         searchCommand.Options.Add(scan);
         searchCommand.Options.Add(glob);
+        searchCommand.Options.Add(iglob);
+        searchCommand.Options.Add(ignoreFile);
         searchCommand.Options.Add(type);
         searchCommand.Options.Add(typeNot);
         searchCommand.Options.Add(typeList);
@@ -432,6 +444,8 @@ internal static class NgrepCli
                     pcre,
                     scan,
                     glob,
+                    iglob,
+                    ignoreFile,
                     type,
                     typeNot,
                     typeList,
@@ -534,6 +548,8 @@ internal static class NgrepCli
         Option<bool> pcre,
         Option<bool> scan,
         Option<string[]> glob,
+        Option<string[]> iglob,
+        Option<string[]> ignoreFile,
         Option<string[]> type,
         Option<string[]> typeNot,
         Option<bool> typeList,
@@ -592,7 +608,7 @@ internal static class NgrepCli
 
         if (result.GetValue(listFiles))
         {
-            return ListFiles(result, glob, type, typeNot, adds, noIgnore, noIgnoreVcs, hidden, quiet, noMessages, filesWith, filesWithout, count, nullPaths, cancellationToken);
+            return ListFiles(result, glob, iglob, ignoreFile, type, typeNot, adds, noIgnore, noIgnoreVcs, hidden, quiet, noMessages, filesWith, filesWithout, count, nullPaths, cancellationToken);
         }
 
         var bound = SearchSyntax.Bind(result, typeList: false);
@@ -756,7 +772,8 @@ internal static class NgrepCli
                     BeforeContext = beforeCount,
                     AfterContext = afterCount,
                     MaxCount = maxCountValue,
-                    Globs = Values(result, glob),
+                    Globs = BindGlobs(result, glob, iglob),
+                    IgnoreFiles = Values(result, ignoreFile),
                     Types = Values(result, type),
                     TypeNots = Values(result, typeNot),
                     TypeAdds = adds,
@@ -877,6 +894,8 @@ internal static class NgrepCli
     private static int ListFiles(
         System.CommandLine.ParseResult result,
         Option<string[]> glob,
+        Option<string[]> iglob,
+        Option<string[]> ignoreFile,
         Option<string[]> type,
         Option<string[]> typeNot,
         string[] typeAdds,
@@ -897,13 +916,14 @@ internal static class NgrepCli
         }
 
         var bound = SearchSyntax.Bind(result, typeList: false, listFiles: true);
-        var filter = PathFilter.Create(Values(result, glob), Values(result, type), Values(result, typeNot), typeAdds);
+        var filter = PathFilter.Create(BindGlobs(result, glob, iglob), Values(result, type), Values(result, typeNot), typeAdds);
         List<string> paths;
         try
         {
-            var policy = result.GetValue(noIgnore)
+            var policy = (result.GetValue(noIgnore)
                 ? IgnorePolicy.None
-                : result.GetValue(noIgnoreVcs) ? IgnorePolicy.CustomOnly : IgnorePolicy.All;
+                : result.GetValue(noIgnoreVcs) ? IgnorePolicy.CustomOnly : IgnorePolicy.All)
+                .WithExtra(Values(result, ignoreFile));
             paths = FileList.Collect(
                 bound.Paths[0],
                 policy,
@@ -992,6 +1012,63 @@ internal static class NgrepCli
         }
 
         return ReportMode.Matches;
+    }
+
+    /// <summary>
+    /// <c>-g</c> and <c>--iglob</c> in command-line order. Option results alone would sort one flag before the other.
+    /// </summary>
+    private static GlobSpec[] BindGlobs(
+        System.CommandLine.ParseResult result,
+        Option<string[]> glob,
+        Option<string[]> iglob)
+    {
+        var specs = new List<GlobSpec>();
+        bool? pendingIgnoreCase = null;
+        foreach (var token in result.Tokens)
+        {
+            if (token.Type == TokenType.Option)
+            {
+                var raw = token.Value;
+                var eq = raw.IndexOf('=');
+                var name = eq >= 0 ? raw[..eq] : raw;
+                if (name.Length > 2 && name[0] == '-' && name[1] != '-' && Names(glob, name[..2]))
+                {
+                    name = name[..2];
+                }
+
+                bool? ignoreCase = Names(iglob, name) ? true : Names(glob, name) ? false : null;
+                if (ignoreCase == null)
+                {
+                    pendingIgnoreCase = null;
+                    continue;
+                }
+
+                if (eq >= 0)
+                {
+                    specs.Add(new GlobSpec(raw[(eq + 1)..], ignoreCase.Value));
+                    pendingIgnoreCase = null;
+                    continue;
+                }
+
+                if (name == "-g" && raw.Length > 2)
+                {
+                    specs.Add(new GlobSpec(raw[2..], false));
+                    pendingIgnoreCase = null;
+                    continue;
+                }
+
+                pendingIgnoreCase = ignoreCase;
+                continue;
+            }
+
+            if (token.Type == TokenType.Argument && pendingIgnoreCase != null)
+            {
+                specs.Add(new GlobSpec(token.Value, pendingIgnoreCase.Value));
+                pendingIgnoreCase = null;
+            }
+        }
+
+        return specs.Count == 0 ? [] : specs.ToArray();
     }
 
     private static string[] Values(System.CommandLine.ParseResult result, Option<string[]> option) =>

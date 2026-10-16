@@ -196,6 +196,8 @@ internal static class TreeWalker
         var ignores = policy.Vcs || policy.Custom
             ? LoadAncestors(scopeRoot, walkRoot, policy)
             : IgnoreStack.Empty;
+        ignores = ignores.WithWorkingDirectory(scopeRoot, Directory.GetCurrentDirectory());
+        ignores = AddExplicitFiles(ignores, policy);
         return new WalkDir
         {
             Full = walkRoot,
@@ -204,6 +206,110 @@ internal static class TreeWalker
             Ignores = ignores,
             Depth = 0,
         };
+    }
+
+    /// <summary>
+    /// Every ignore frame a walk of <paramref name="walkRoot"/> would apply, parents before children.
+    /// Sibling rules are on the same stack and do not match each other's paths.
+    /// Used to drop index hits that <c>--ignore-file</c> excludes without reading file contents.
+    /// </summary>
+    public static IgnoreStack LoadStack(string walkRoot, IgnorePolicy policy, bool includeHidden)
+    {
+        var root = CreateRoot(walkRoot, policy);
+        var options = CreateOptions(root.Full, indexDirectory: null, policy, includeHidden);
+        var merged = root.Ignores;
+        var pending = new Stack<WalkDir>();
+        pending.Push(root);
+        var stats = new WalkStats();
+        while (pending.Count > 0)
+        {
+            var dir = pending.Pop();
+            var sink = new ListSink();
+            if (!DirectoryEntries.TryList(dir.Full, ref sink, default))
+            {
+                continue;
+            }
+
+            var entries = sink.Entries;
+            if (entries == null || entries.Count == 0)
+            {
+                continue;
+            }
+
+            entries.Sort(static (left, right) => string.CompareOrdinal(left.Name, right.Name));
+            if (policy.Vcs || policy.Custom)
+            {
+                merged = AddListedIgnoreFiles(merged, dir, entries, policy, stats);
+            }
+
+            for (var i = entries.Count - 1; i >= 0; i--)
+            {
+                var entry = entries[i];
+                if (entry.Kind != DirentKind.Directory)
+                {
+                    continue;
+                }
+
+                var name = entry.Name;
+                var childWalk = JoinRelative(dir.WalkRelative, name);
+                if (name is ".git" or ".ngrep" || IsIndexPath(childWalk, options.IndexRelative))
+                {
+                    continue;
+                }
+
+                if (!includeHidden && IsHiddenEntry(name, entry.Hidden))
+                {
+                    continue;
+                }
+
+                var scopeRelative = JoinRelative(dir.ScopeRelative, name);
+                if (merged.IsIgnored(scopeRelative, true, checkParents: false))
+                {
+                    continue;
+                }
+
+                pending.Push(new WalkDir
+                {
+                    Full = Path.Join(dir.Full, name),
+                    WalkRelative = childWalk,
+                    ScopeRelative = scopeRelative,
+                    Ignores = merged,
+                });
+            }
+        }
+
+        return merged;
+    }
+
+    /// <summary>Path of <paramref name="walkRelative"/> relative to the git root that owns <paramref name="walkRoot"/>.</summary>
+    public static string ScopePath(string walkRoot, string walkRelative)
+    {
+        walkRoot = Path.GetFullPath(walkRoot);
+        var scope = FindGitRoot(walkRoot) ?? walkRoot;
+        return JoinRelative(Relative(scope, walkRoot), walkRelative);
+    }
+
+    private static IgnoreStack AddExplicitFiles(IgnoreStack stack, IgnorePolicy policy)
+    {
+        foreach (var file in policy.Files)
+        {
+            var full = Path.GetFullPath(file);
+            if (!File.Exists(full))
+            {
+                throw new ArgumentException($"Ignore file not found: {full}");
+            }
+
+            try
+            {
+                stack = stack.Add(IgnoreSource.IgnoreFile, "", File.ReadAllText(full));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.DecoderFallbackException)
+            {
+                throw new ArgumentException($"Ignore file not readable: {full}");
+            }
+        }
+
+        return stack;
     }
 
     public static void Collect(WalkDir dir, WalkOptions options, WalkStats stats, List<WalkedFile> files, List<WalkDir> children, CancellationToken cancellation = default)

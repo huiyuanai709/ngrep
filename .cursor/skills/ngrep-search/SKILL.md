@@ -44,7 +44,7 @@ ngrep --format ndjson -C 2 TODO .
 
 - `-i`: ignore case. `-S` / `--smart-case`: ignore case when the pattern has no uppercase letter. The last of `-i`, `-S`, and `--case-sensitive` wins. `NGREP_CONFIG_PATH` prepends search arguments, one per line. `--no-config` skips that file. `RIPGREP_CONFIG_PATH` is not read.
 - `-d N` / `--max-depth N`: cap walk depth. 0 is the start path. 1 is its immediate children. `--maxdepth` is the same flag.
-- `-g`: glob filter. A leading `!` excludes. Repeatable.
+- `-g` / `--glob`: glob filter. A leading `!` excludes. Repeatable. `--iglob` is the same filter, case-insensitive. Mixed with `-g`, the last matching glob wins.
 - `-t`: built-in file type. Repeatable.
 - `-l`: one path per file with a hit. `-c`: `path:count` of matching lines when the path is shown, or `count` for one file, stdin, or `-I`.
 - `-H` / `--with-filename` prints the path. `-I` / `--no-filename` omits it. The last one wins. One file or stdin omits the path unless `-H` or `--vimgrep`. A directory or several paths include it unless `-I`.
@@ -64,9 +64,9 @@ With `--format json` or `ndjson`, each match also has `before` and `after` array
 
 ## Ignore files
 
-ngrep reads nested `.gitignore`, `.ignore`, and `.rgignore`, plus git `info/exclude` and the global excludes file (`core.excludesFile`, or `~/.config/git/ignore` when that key is unset). The first source that matches wins: `.rgignore`, then `.ignore`, then `.gitignore`, then `info/exclude`, then the global file.
+ngrep reads nested `.gitignore`, `.ignore`, and `.rgignore`, plus git `info/exclude` and the global excludes file (`core.excludesFile`, or `~/.config/git/ignore` when that key is unset). The first source that matches wins: `.rgignore`, then `.ignore`, then `.gitignore`, then `info/exclude`, then the global file, then `--ignore-file`.
 
-`--no-ignore-vcs` skips the git sources and still honors `.ignore` and `.rgignore`. `--no-ignore` skips every ignore file. `.git`, `.ngrep`, and symlinks stay skipped either way.
+`--ignore-file PATH` adds an extra gitignore-format file (repeatable, for a personal or CI list). Patterns are relative to the current directory. Later files beat earlier ones. `--no-ignore-vcs` skips the git sources and still honors `.ignore`, `.rgignore`, and `--ignore-file`. `--no-ignore` skips every automatic ignore file and still honors `--ignore-file`. `.git`, `.ngrep`, and symlinks stay skipped either way.
 
 ## Exit codes
 

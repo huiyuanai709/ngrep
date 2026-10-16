@@ -12,15 +12,21 @@ internal sealed class Glob
     private readonly Atom[] _atoms;
     private readonly Shape _shape;
     private readonly string _literal;
+    private readonly StringComparison _comparison;
+    private readonly bool _ignoreCase;
 
-    private Glob(Atom[] atoms, Shape shape, string literal)
+    private Glob(Atom[] atoms, Shape shape, string literal, bool ignoreCase)
     {
         _atoms = atoms;
         _shape = shape;
         _literal = literal;
+        _ignoreCase = ignoreCase;
+        _comparison = ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
     }
 
-    public static Glob? TryCreate(string pattern, bool anchored)
+    public static Glob? TryCreate(string pattern, bool anchored) => TryCreate(pattern, anchored, ignoreCase: false);
+
+    public static Glob? TryCreate(string pattern, bool anchored, bool ignoreCase)
     {
         if (!TryCompile(pattern, anchored, out var atoms))
         {
@@ -28,7 +34,7 @@ internal sealed class Glob
         }
 
         var (shape, literal) = Classify(atoms, anchored);
-        return new Glob(atoms, shape, literal);
+        return new Glob(atoms, shape, literal, ignoreCase);
     }
 
     public bool TryMatch(ReadOnlySpan<char> text, out bool matched)
@@ -39,19 +45,19 @@ internal sealed class Glob
                 matched = true;
                 return true;
             case Shape.ExactPath:
-                matched = text.Equals(_literal, StringComparison.Ordinal);
+                matched = text.Equals(_literal, _comparison);
                 return true;
             case Shape.ExactSegment:
-                matched = LastSegmentEquals(text, _literal);
+                matched = LastSegmentEquals(text, _literal, _comparison);
                 return true;
             case Shape.SuffixSegment:
-                matched = LastSegmentEndsWith(text, _literal);
+                matched = LastSegmentEndsWith(text, _literal, _comparison);
                 return true;
             case Shape.PrefixSegment:
-                matched = LastSegmentStartsWith(text, _literal);
+                matched = LastSegmentStartsWith(text, _literal, _comparison);
                 return true;
             case Shape.ContainsSegment:
-                matched = LastSegmentContains(text, _literal);
+                matched = LastSegmentContains(text, _literal, _comparison);
                 return true;
         }
 
@@ -60,32 +66,32 @@ internal sealed class Glob
         return steps <= StepLimit;
     }
 
-    private static bool LastSegmentEquals(ReadOnlySpan<char> text, string literal)
+    private static bool LastSegmentEquals(ReadOnlySpan<char> text, string literal, StringComparison comparison)
     {
         var slash = text.LastIndexOf('/');
         var segment = slash < 0 ? text : text[(slash + 1)..];
-        return segment.Equals(literal, StringComparison.Ordinal);
+        return segment.Equals(literal, comparison);
     }
 
-    private static bool LastSegmentEndsWith(ReadOnlySpan<char> text, string literal)
+    private static bool LastSegmentEndsWith(ReadOnlySpan<char> text, string literal, StringComparison comparison)
     {
         var slash = text.LastIndexOf('/');
         var segment = slash < 0 ? text : text[(slash + 1)..];
-        return segment.EndsWith(literal, StringComparison.Ordinal);
+        return segment.EndsWith(literal, comparison);
     }
 
-    private static bool LastSegmentStartsWith(ReadOnlySpan<char> text, string literal)
+    private static bool LastSegmentStartsWith(ReadOnlySpan<char> text, string literal, StringComparison comparison)
     {
         var slash = text.LastIndexOf('/');
         var segment = slash < 0 ? text : text[(slash + 1)..];
-        return segment.StartsWith(literal, StringComparison.Ordinal);
+        return segment.StartsWith(literal, comparison);
     }
 
-    private static bool LastSegmentContains(ReadOnlySpan<char> text, string literal)
+    private static bool LastSegmentContains(ReadOnlySpan<char> text, string literal, StringComparison comparison)
     {
         var slash = text.LastIndexOf('/');
         var segment = slash < 0 ? text : text[(slash + 1)..];
-        return segment.IndexOf(literal, StringComparison.Ordinal) >= 0;
+        return segment.IndexOf(literal, comparison) >= 0;
     }
 
     private bool Match(ReadOnlySpan<char> text, int ti, int ai, ref int steps)
@@ -101,7 +107,7 @@ internal sealed class Glob
             switch (atom.Kind)
             {
                 case AtomKind.Literal:
-                    if (!text[ti..].StartsWith(atom.Text))
+                    if (!text[ti..].StartsWith(atom.Text.AsSpan(), _comparison))
                     {
                         return false;
                     }
@@ -119,7 +125,7 @@ internal sealed class Glob
                     ai++;
                     break;
                 case AtomKind.Class:
-                    if ((uint)ti >= (uint)text.Length || !atom.Class!.Contains(text[ti]))
+                    if ((uint)ti >= (uint)text.Length || !atom.Class!.Contains(text[ti], _ignoreCase))
                     {
                         return false;
                     }
@@ -435,19 +441,30 @@ internal sealed class Glob
             return true;
         }
 
-        public bool Contains(char value)
+        public bool Contains(char value, bool ignoreCase)
         {
-            var hit = false;
+            var hit = InRange(value);
+            if (!hit && ignoreCase)
+            {
+                var lower = char.ToLowerInvariant(value);
+                var upper = char.ToUpperInvariant(value);
+                hit = (lower != value && InRange(lower)) || (upper != value && InRange(upper));
+            }
+
+            return _negated ? !hit : hit;
+        }
+
+        private bool InRange(char value)
+        {
             foreach (var (from, to) in _ranges)
             {
                 if (value >= from && value <= to)
                 {
-                    hit = true;
-                    break;
+                    return true;
                 }
             }
 
-            return _negated ? !hit : hit;
+            return false;
         }
     }
 }

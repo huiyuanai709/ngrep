@@ -339,6 +339,8 @@ public class SearchUxTests
         capture.Clear();
         Assert.Equal(ExitCodes.Success, NgrepCli.Run(["search", "--help"]).GetAwaiter().GetResult());
         Assert.Contains("--glob", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--iglob", capture.Stdout, StringComparison.Ordinal);
+        Assert.Contains("--ignore-file", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--type-list", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--after-context", capture.Stdout, StringComparison.Ordinal);
         Assert.Contains("--max-count", capture.Stdout, StringComparison.Ordinal);
