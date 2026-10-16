@@ -7,7 +7,11 @@ namespace Ngrep.Search;
 /// a path starts excluded and must be selected by a later include. The last matching glob wins.
 /// Globs use the same syntax as .gitignore (<c>*</c>, <c>?</c>, <c>**</c>, character classes).
 /// They do not re-include files the gitignore walker already skipped.
+/// <see cref="GlobSpec.IgnoreCase"/> is <c>--iglob</c>. <c>-g</c> stays case-sensitive.
+/// Mixed flags keep command-line order, and the last matching glob still wins.
 /// </summary>
+internal readonly record struct GlobSpec(string Pattern, bool IgnoreCase);
+
 internal sealed class GlobFilter
 {
     private readonly Entry[] _entries;
@@ -30,11 +34,27 @@ internal sealed class GlobFilter
             return Empty;
         }
 
+        var specs = new GlobSpec[globs.Count];
+        for (var i = 0; i < globs.Count; i++)
+        {
+            specs[i] = new GlobSpec(globs[i], false);
+        }
+
+        return Parse(specs);
+    }
+
+    public static GlobFilter Parse(IReadOnlyList<GlobSpec> globs)
+    {
+        if (globs.Count == 0)
+        {
+            return Empty;
+        }
+
         var entries = new Entry[globs.Count];
         var anyInclude = false;
         for (var i = 0; i < globs.Count; i++)
         {
-            var raw = globs[i];
+            var raw = globs[i].Pattern;
             if (string.IsNullOrWhiteSpace(raw))
             {
                 throw new ArgumentException("Glob is empty.");
@@ -47,7 +67,7 @@ internal sealed class GlobFilter
                 throw new ArgumentException($"Glob '{raw}' has no pattern.");
             }
 
-            var rule = IgnoreRule.TryParse(body)
+            var rule = IgnoreRule.TryParse(body, globs[i].IgnoreCase)
                 ?? throw new ArgumentException($"Invalid glob '{raw}'.");
             if (!exclude)
             {

@@ -122,7 +122,10 @@ internal sealed class SearchQuery
     /// </summary>
     public int? MaxCount { get; init; }
 
-    public IReadOnlyList<string> Globs { get; init; } = [];
+    public IReadOnlyList<GlobSpec> Globs { get; init; } = [];
+
+    /// <summary><c>--ignore-file</c> paths, in command-line order. Earlier files lose to later ones.</summary>
+    public IReadOnlyList<string> IgnoreFiles { get; init; } = [];
 
     public IReadOnlyList<string> Types { get; init; } = [];
 
@@ -453,6 +456,9 @@ internal static class Searcher
             return DisplayPath(query.DisplayRoot, PathUnderStart(documentPath, prefix), rootIsFile: false);
         }
 
+        // --ignore-file only removes paths. The index was built with the higher sources,
+        // so a whitelist there still keeps the file and a lower rule cannot put a skipped file back.
+        var extra = plan.Ignore.HasExtra ? TreeWalker.LoadStack(root, plan.Ignore, plan.IncludeHidden) : null;
         foreach (var document in index.Documents)
         {
             if (prefix.Length > 0 && !Under(document.Path, prefix, prefixIsFile))
@@ -471,6 +477,10 @@ internal static class Searcher
             }
 
             covered++;
+            if (extra != null && extra.IsIgnored(TreeWalker.ScopePath(root, document.Path), false))
+            {
+                continue;
+            }
 
             // The snapshot covers this path. Deeper documents stay unopened; they still
             // count as covered so a depth cap does not fall back to a content scan.
