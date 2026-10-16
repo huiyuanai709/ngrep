@@ -108,10 +108,15 @@ public class TextFlagTests
             capture.Clear();
             var text = NgrepCli.Run(["-a", "NEEDLE", "-", "--stats", "-j", "1"]).GetAwaiter().GetResult();
             Assert.Equal(ExitCodes.Success, text);
-            Assert.Contains("(standard input)", capture.Stdout, StringComparison.Ordinal);
-            Assert.Contains("NEEDLE", capture.Stdout, StringComparison.Ordinal);
+            // One stdin stream omits the path unless -H.
+            Assert.Equal("1:4:xx\0NEEDLE", capture.Stdout.Trim());
             Assert.Contains("files searched: 1", capture.Stderr, StringComparison.Ordinal);
             Assert.DoesNotContain("scanned content", capture.Stderr, StringComparison.Ordinal);
+
+            capture.Clear();
+            var forced = NgrepCli.Run(["-aH", "NEEDLE", "-", "-j", "1"]).GetAwaiter().GetResult();
+            Assert.Equal(ExitCodes.Success, forced);
+            Assert.Equal("(standard input):1:4:xx\0NEEDLE", capture.Stdout.Trim());
 
             capture.Clear();
             var named = NgrepCli.Run(["--text", "NEEDLE", "-", "--format", "ndjson", "-j", "1"]).GetAwaiter().GetResult();
@@ -136,7 +141,7 @@ public class TextFlagTests
             {
                 var piped = NgrepCli.Run(["-a", "NEEDLE", "-j", "1"]).GetAwaiter().GetResult();
                 Assert.Equal(ExitCodes.Success, piped);
-                Assert.Contains("(standard input)", capture.Stdout, StringComparison.Ordinal);
+                Assert.Equal("1:4:xx\0NEEDLE", capture.Stdout.Trim());
                 Assert.DoesNotContain("disk.txt", capture.Stdout, StringComparison.Ordinal);
             }
         }
