@@ -274,6 +274,147 @@ internal static class TextFiles
     }
 
     /// <summary>
+    /// Synchronous twin of <see cref="ReadAsync(string, ReadStop?, CancellationToken, int, bool)"/>,
+    /// used by search workers. They already own a pool thread, so a blocking read costs one
+    /// syscall instead of a dispatch and a continuation, which is most of the per-file
+    /// overhead on a tree of small files. The indexer and stdin keep the async form.
+    /// </summary>
+    public static PooledBytes Read(string path, ReadStop? stop, bool searchBinary, CancellationToken cancellation, int initialBuffer = 128 * 1024)
+    {
+        SafeFileHandle? handle = null;
+        try
+        {
+            // No FileOptions.Asynchronous: the dispose race that DisposeReadHandle guards
+            // against only applies to an IOCP-bound handle.
+            handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.SequentialScan);
+            return ReadFrom(handle, path, stop, searchBinary, cancellation, initialBuffer);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return PooledBytes.Unreadable();
+        }
+        finally
+        {
+            handle?.Dispose();
+        }
+    }
+
+    private static PooledBytes ReadFrom(SafeFileHandle handle, string path, ReadStop? stop, bool searchBinary, CancellationToken cancellation, int initialBuffer)
+    {
+        var first = Math.Max(initialBuffer, BinaryProbeLength);
+        byte[]? buffer = null;
+        var owned = false;
+        try
+        {
+            buffer = ArrayPool<byte>.Shared.Rent(first);
+            var offset = 0;
+            var checkedBinary = false;
+            var knownLength = -1L;
+            while (true)
+            {
+                cancellation.ThrowIfCancellationRequested();
+                if (offset == buffer.Length)
+                {
+                    var lengthLong = knownLength >= 0 ? knownLength : RandomAccess.GetLength(handle);
+                    if (lengthLong < 0)
+                    {
+                        return PooledBytes.Unreadable();
+                    }
+
+                    knownLength = lengthLong;
+                    if (lengthLong > MaxFileBytes)
+                    {
+                        return PooledBytes.TooLarge();
+                    }
+
+                    if (lengthLong <= offset)
+                    {
+                        break;
+                    }
+
+                    if (lengthLong >= MmapThreshold
+                        && lengthLong <= int.MaxValue
+                        && TryMap(path, (int)lengthLong, stop, searchBinary, out var mapped))
+                    {
+                        return mapped;
+                    }
+
+                    var target = stop == null
+                        ? (int)lengthLong
+                        : (int)Math.Min(lengthLong, offset + (1L << 20));
+                    var grown = ArrayPool<byte>.Shared.Rent(target);
+                    buffer.AsSpan(0, offset).CopyTo(grown);
+                    ArrayPool<byte>.Shared.Return(buffer);
+                    buffer = grown;
+                }
+
+                var want = buffer.Length - offset;
+                if (knownLength >= 0)
+                {
+                    want = (int)Math.Min(want, knownLength - offset);
+                }
+
+                if (want <= 0)
+                {
+                    break;
+                }
+
+                var read = RandomAccess.Read(handle, buffer.AsSpan(offset, want), offset);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                offset += read;
+                var endOfFile = read < buffer.Length - (offset - read) || (knownLength >= 0 && offset >= knownLength);
+                if (offset < buffer.Length)
+                {
+                    endOfFile = true;
+                }
+
+                if (!checkedBinary && (offset >= BinaryProbeLength || endOfFile))
+                {
+                    checkedBinary = true;
+                    if (!searchBinary && IsBinary(buffer.AsSpan(0, offset)))
+                    {
+                        return PooledBytes.Binary();
+                    }
+                }
+
+                if (stop != null && checkedBinary && stop(buffer.AsSpan(0, offset), endOfFile))
+                {
+                    owned = true;
+                    return PooledBytes.Ok(buffer, offset);
+                }
+
+                if (endOfFile)
+                {
+                    break;
+                }
+            }
+
+            if (!checkedBinary && !searchBinary && IsBinary(buffer.AsSpan(0, Math.Min(offset, BinaryProbeLength))))
+            {
+                return PooledBytes.Binary();
+            }
+
+            owned = true;
+            return PooledBytes.Ok(buffer, offset);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return PooledBytes.Unreadable();
+        }
+        finally
+        {
+            if (!owned && buffer != null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+    }
+
+    /// <summary>
     /// Reads stdin (or another stream) with the same NUL probe, early stop, and 32 MiB cap as a file.
     /// A stream has no length, so the cap is a byte past <paramref name="maxBytes"/> rather than a stat.
     /// Nothing is mapped. The stream is left open; process stdin must stay open for the rest of the process.

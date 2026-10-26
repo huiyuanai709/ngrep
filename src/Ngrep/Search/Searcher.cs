@@ -750,7 +750,7 @@ internal static class Searcher
         }
     }
 
-    private static async ValueTask<ConfirmResult> TryCollectAsync(
+    private static ValueTask<ConfirmResult> TryCollectAsync(
         ConfirmFile file,
         MatchPlan plan,
         List<SearchMatch> matches,
@@ -763,22 +763,22 @@ internal static class Searcher
     {
         if (checkExists && !File.Exists(file.FullPath))
         {
-            return ConfirmResult.Skip;
+            return new ValueTask<ConfirmResult>(ConfirmResult.Skip);
         }
 
         BeforeConfirm?.Invoke(file.RelativePath);
         var stop = ByteConfirm.ArmFresh(plan);
         try
         {
-            using var read = await TextFiles.ReadAsync(file.FullPath, stop, cancellation, plan.SearchBinary);
+            using var read = TextFiles.Read(file.FullPath, stop, plan.SearchBinary, cancellation);
             ByteConfirm.Adopt(stop);
             if (MatchLoaded(read, file, plan, matches, stats, filesWithoutMatch, tally, errorIfUnreadable, out var text, out var examined, out var matched))
             {
-                return Done(plan, matches, examined, matched);
+                return new ValueTask<ConfirmResult>(Done(plan, matches, examined, matched));
             }
 
             matched = CollectDecoded(text, file, plan, matches, filesWithoutMatch, tally);
-            return Done(plan, matches, examined: true, matched);
+            return new ValueTask<ConfirmResult>(Done(plan, matches, examined: true, matched));
         }
         finally
         {
