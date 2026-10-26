@@ -98,6 +98,9 @@ try
     var buildClock = Stopwatch.StartNew();
     var built = Indexer.Build(root);
     buildClock.Stop();
+    var rebuildClock = Stopwatch.StartNew();
+    Indexer.Build(root);
+    rebuildClock.Stop();
     var indexedHit = await TimeIndexed(root, "NEEDLE");
     var indexedSelective = await TimeIndexed(root, "NEEDLE9");
     var indexedMiss = await TimeIndexed(root, "unlikely-token-zz");
@@ -114,6 +117,7 @@ try
     Print("tiny_ignore_miss_1w", tinyMiss1);
     Console.WriteLine($"tiny_read_only_1w_ms={tinyRead1:F1}");
     Console.WriteLine($"index_build_ms={buildClock.Elapsed.TotalMilliseconds:F1} documents={built.Documents}");
+    Console.WriteLine($"index_rebuild_ms={rebuildClock.Elapsed.TotalMilliseconds:F1}");
     Percent("indexed_hit", indexedHit);
     Percent("indexed_selective", indexedSelective);
     Percent("indexed_miss", indexedMiss);
@@ -470,6 +474,7 @@ static string TimeIndexParts(string indexDirectory)
     var docsOne = double.MaxValue;
     var docsNone = double.MaxValue;
     var postings = double.MaxValue;
+    var fullLoad = double.MaxValue;
     for (var run = 0; run < 5; run++)
     {
         var clock = Stopwatch.StartNew();
@@ -483,10 +488,14 @@ static string TimeIndexParts(string indexDirectory)
         clock.Restart();
         IndexStore.TryLoadForSearch(indexDirectory, grams);
         postings = Math.Min(postings, clock.Elapsed.TotalMilliseconds);
+
+        clock.Restart();
+        IndexStore.TryLoad(indexDirectory);
+        fullLoad = Math.Min(fullLoad, clock.Elapsed.TotalMilliseconds);
     }
 
     var size = new FileInfo(documents).Length;
-    return $"docs_1id_ms={docsOne:F2} docs_none_ms={docsNone:F2} postings_ms={postings:F2} docs_bytes={size}";
+    return $"docs_1id_ms={docsOne:F2} docs_none_ms={docsNone:F2} postings_ms={postings:F2} full_load_ms={fullLoad:F2} docs_bytes={size}";
 }
 
 // The index path: trigram postings pick the candidates, so only those files are opened.
