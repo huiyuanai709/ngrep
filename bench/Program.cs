@@ -99,8 +99,9 @@ try
     var built = Indexer.Build(root);
     buildClock.Stop();
     var rebuildClock = Stopwatch.StartNew();
-    Indexer.Build(root);
+    var rebuilt = Indexer.Build(root);
     rebuildClock.Stop();
+    var rebuildParts = TimeRebuildParts(root, built.IndexPath);
     var indexedHit = await TimeIndexed(root, "NEEDLE");
     var indexedSelective = await TimeIndexed(root, "NEEDLE9");
     var indexedMiss = await TimeIndexed(root, "unlikely-token-zz");
@@ -118,6 +119,7 @@ try
     Console.WriteLine($"tiny_read_only_1w_ms={tinyRead1:F1}");
     Console.WriteLine($"index_build_ms={buildClock.Elapsed.TotalMilliseconds:F1} documents={built.Documents}");
     Console.WriteLine($"index_rebuild_ms={rebuildClock.Elapsed.TotalMilliseconds:F1}");
+    Console.WriteLine($"index_rebuild_parts {rebuildParts}");
     Percent("indexed_hit", indexedHit);
     Percent("indexed_selective", indexedSelective);
     Percent("indexed_miss", indexedMiss);
@@ -462,6 +464,56 @@ static async Task<(double Ms, int Files, int Matches)> TimeTiny(string root, str
     var outcome = await Searcher.Search(query);
     clock.Stop();
     return (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.Matches.Count);
+}
+
+// An unchanged rebuild: walk with a stat per file, load the old index, write it back.
+static string TimeRebuildParts(string root, string indexDirectory)
+{
+    var walk = double.MaxValue;
+    var write = double.MaxValue;
+    var load = double.MaxValue;
+    var load2 = double.MaxValue;
+    var output = Path.Combine(Path.GetTempPath(), "ngrep-bench-write", "index");
+    try
+    {
+        for (var run = 0; run < 3; run++)
+        {
+            var stats = new WalkStats();
+            var clock = Stopwatch.StartNew();
+            var n = 0;
+            foreach (var file in TreeWalker.Enumerate(root, indexDirectory, stats, IgnorePolicy.All, includeHidden: true))
+            {
+                var info = new FileInfo(file.FullPath);
+                _ = info.Length;
+                _ = info.LastWriteTimeUtc;
+                n++;
+            }
+
+            walk = Math.Min(walk, clock.Elapsed.TotalMilliseconds);
+
+            clock.Restart();
+            var data = IndexStore.TryLoad(indexDirectory);
+            load = Math.Min(load, clock.Elapsed.TotalMilliseconds);
+            if (data == null)
+            {
+                return "missing";
+            }
+
+            clock.Restart();
+            IndexStore.Write(output, data.Manifest, data.Documents, data.Postings);
+            write = Math.Min(write, clock.Elapsed.TotalMilliseconds);
+            _ = n;
+        }
+    }
+    finally
+    {
+        if (Directory.Exists(Path.GetDirectoryName(output)!))
+        {
+            Directory.Delete(Path.GetDirectoryName(output)!, recursive: true);
+        }
+    }
+
+    return $"walk_stat_ms={walk:F1} load_ms={load:F1} write_ms={write:F1}";
 }
 
 // Where a query spends it wins: the document table and the posting lists, measured apart.
