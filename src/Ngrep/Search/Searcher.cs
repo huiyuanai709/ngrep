@@ -139,6 +139,15 @@ internal sealed class SearchQuery
     public CancellationToken CancellationToken { get; init; }
 
     /// <summary>
+    /// False when the selected report never prints a line, so a match can skip the line
+    /// text. Set by the CLI from the report and the output format.
+    /// </summary>
+    public bool NeedLineText { get; init; } = true;
+
+    /// <summary>False when nothing reads the matched slice's text (plain text output, counts, lists).</summary>
+    public bool NeedMatchText { get; init; } = true;
+
+    /// <summary>
     /// When set, matches are handed off as each file is confirmed and are not retained.
     /// Index search emits in path order. A content scan emits as soon as the file is
     /// confirmed and does not wait for the rest of the walk.

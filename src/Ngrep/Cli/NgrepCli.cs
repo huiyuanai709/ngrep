@@ -743,6 +743,13 @@ internal static class NgrepCli
         var roots = searchStdin ? [StandardInput.DisplayPath] : bound.Paths;
         var multiple = roots.Length > 1;
         var extra = patterns.Count > 1 ? patterns[1..] : [];
+
+        // Only a matches report prints a line. Machine formats print text and lineText for
+        // every report they support, and the matched slice is read only where it is shown.
+        var needLineText = report == ReportMode.Matches || parsedFormat != OutputFormat.Text;
+        var needMatchText = parsedFormat != OutputFormat.Text
+            || (report == ReportMode.Matches
+                && (colorOn || result.GetValue(onlyMatching) || replacer != null));
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var parts = new List<SearchOutcome>(roots.Length);
         var pathFailed = false;
@@ -790,6 +797,8 @@ internal static class NgrepCli
                     TypeAdds = adds,
                     MaxDepth = MaxDepth(result, maxDepth),
                     MaxDegreeOfParallelism = ThreadCount(result, threads),
+                    NeedLineText = needLineText,
+                    NeedMatchText = needMatchText,
                     CancellationToken = cancellationToken,
                     Events = events,
                 });

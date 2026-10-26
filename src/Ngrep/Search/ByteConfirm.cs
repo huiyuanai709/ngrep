@@ -190,9 +190,10 @@ internal static class ByteConfirm
         return false;
     }
 
-    /// <summary>False when a hit sits in a non-ASCII file and columns must be decoded.</summary>
+    /// <summary>False when a hit sits in a file that is not UTF-8 and columns must be decoded.</summary>
     private static bool Collect(ReadOnlySpan<byte> span, string relativePath, MatchPlan plan, List<SearchMatch> matches)
     {
+        span = span[TextFiles.Utf8BomLength(span)..];
         plan.Literals!.TryAsciiOr(plan.IgnoreCase, out var any, out var each, out var lengths);
         var hits = new List<Hit>(4);
         if (plan.StopAtFirst)
@@ -315,8 +316,11 @@ internal static class ByteConfirm
             return true;
         }
 
-        // Byte offsets are char offsets only while the file is ASCII.
-        if (!Ascii.IsValid(span))
+        // An ASCII needle matches the same bytes in UTF-8, so the hit is real. Byte
+        // offsets stop being character offsets at the first non-ASCII byte; that line's
+        // column is counted in characters instead of decoding the whole file again.
+        var ascii = Ascii.IsValid(span);
+        if (!ascii && !System.Text.Unicode.Utf8.IsValid(span))
         {
             return false;
         }
@@ -325,7 +329,7 @@ internal static class ByteConfirm
         // hit avoids building a line-start table for the rest of the file.
         if (!plan.WantsContext && hits.Count == 1)
         {
-            EmitOne(span, relativePath, hits[0], matches);
+            EmitOne(span, relativePath, hits[0], matches, ascii, plan.NeedLineText || plan.NeedMatchText);
             return true;
         }
 
@@ -340,10 +344,15 @@ internal static class ByteConfirm
         foreach (var hit in hits)
         {
             var (line, column) = LineMap.Map(starts, hit.Index);
+            if (!ascii)
+            {
+                column = TextFiles.Column(span, LineStart(starts, line), hit.Index);
+            }
+
             if (sharedText == null || line != sharedLine)
             {
                 sharedLine = line;
-                sharedText = LineText(span, starts, line);
+                sharedText = plan.NeedLineText ? LineText(span, starts, line) : "";
                 (sharedBefore, sharedAfter) = Context(span, starts, lineCount, line, plan);
             }
 
@@ -351,7 +360,7 @@ internal static class ByteConfirm
                 relativePath,
                 line,
                 column,
-                AsciiText(span.Slice(hit.Index, hit.Length)),
+                plan.NeedMatchText ? Text(span.Slice(hit.Index, hit.Length)) : "",
                 sharedText,
                 sharedBefore,
                 sharedAfter,
@@ -361,7 +370,7 @@ internal static class ByteConfirm
         return true;
     }
 
-    private static void EmitOne(ReadOnlySpan<byte> span, string relativePath, Hit hit, List<SearchMatch> matches)
+    private static void EmitOne(ReadOnlySpan<byte> span, string relativePath, Hit hit, List<SearchMatch> matches, bool ascii, bool needText)
     {
         var index = hit.Index;
         var line = 1 + span[..index].Count((byte)'\n');
@@ -383,12 +392,13 @@ internal static class ByteConfirm
             textEnd--;
         }
 
+        var column = ascii ? index - start + 1 : TextFiles.Column(span, start, index);
         matches.Add(new SearchMatch(
             relativePath,
             line,
-            index - start + 1,
-            AsciiText(span.Slice(index, hit.Length)),
-            AsciiText(span[start..textEnd]),
+            column,
+            needText ? Text(span.Slice(index, hit.Length)) : "",
+            needText ? Text(span[start..textEnd]) : "",
             null,
             null,
             index));
@@ -512,10 +522,14 @@ internal static class ByteConfirm
             end = start;
         }
 
-        return AsciiText(span[start..end]);
+        return Text(span[start..end]);
     }
 
-    private static string AsciiText(ReadOnlySpan<byte> bytes) => Encoding.ASCII.GetString(bytes);
+    /// <summary>1-based line start offset, for the non-ASCII column count.</summary>
+    private static int LineStart(int[] starts, int line) =>
+        line >= 1 && line <= starts.Length ? starts[line - 1] : 0;
+
+    private static string Text(ReadOnlySpan<byte> bytes) => Encoding.UTF8.GetString(bytes);
 
     private static (IReadOnlyList<ContextLine>? Before, IReadOnlyList<ContextLine>? After) Context(
         ReadOnlySpan<byte> span,

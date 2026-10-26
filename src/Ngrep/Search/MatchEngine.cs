@@ -73,6 +73,19 @@ internal sealed class MatchPlan
 
     public bool NoMessages { get; init; }
 
+    /// <summary>
+    /// False when the report cannot print a line (count, files-with/without-match, quiet).
+    /// <see cref="SearchMatch.LineText"/> is then empty and no line is decoded or copied.
+    /// </summary>
+    public bool NeedLineText { get; init; } = true;
+
+    /// <summary>
+    /// False when nothing reads <see cref="SearchMatch.Text"/>: plain text output without
+    /// color, <c>-o</c>, or <c>-r</c>, and the count/list reports. Each hit then skips the
+    /// string for the matched slice.
+    /// </summary>
+    public bool NeedMatchText { get; init; } = true;
+
     /// <summary>Default regex engine (also selected by <c>-E</c>). False when <c>-P</c> selects the backtracking interpreter.</summary>
     public bool NonBacktracking { get; init; }
 
@@ -210,6 +223,8 @@ internal sealed class MatchPlan
             CollectAll = query.Stats,
             LineRegexp = query.LineRegexp,
             NoMessages = query.NoMessages,
+            NeedLineText = query.NeedLineText,
+            NeedMatchText = query.NeedMatchText,
             NonBacktracking = nonBacktracking,
             BytePrograms = bytePrograms,
             UseLinePrefilter = regex && !crosses && literalsQuery is { HasLinePrefilter: true } && !HasAbsoluteAnchor(patterns),
@@ -290,6 +305,7 @@ internal sealed class MatchPlan
             return false;
         }
 
+        bytes = bytes[TextFiles.Utf8BomLength(bytes)..];
         var countOnly = plan.Report == ReportMode.FilesWithoutMatch && !plan.CollectAll;
         var hits = countOnly ? null : new List<Hit>();
         foreach (var program in plan.BytePrograms)
@@ -306,7 +322,9 @@ internal sealed class MatchPlan
                     return true;
                 }
 
-                var value = Encoding.ASCII.GetString(bytes.Slice(candidate.Index, candidate.Length));
+                var value = plan.NeedMatchText
+                    ? Encoding.ASCII.GetString(bytes.Slice(candidate.Index, candidate.Length))
+                    : "";
                 hits!.Add(new Hit(candidate.Index, candidate.Length, value));
                 if (plan.StopAtFirst)
                 {
@@ -331,14 +349,16 @@ internal sealed class MatchPlan
             return true;
         }
 
-        // Columns are byte offsets only while the file is ASCII. A hit in a
-        // non-ASCII file is confirmed again on the decoded string.
-        if (!Ascii.IsValid(bytes))
+        // An ASCII pattern matches the same bytes in UTF-8 and 0x0A never appears inside
+        // a multi-byte sequence, so the line and the hit are real. Only the column needs
+        // characters instead of bytes, and only on the lines that hold non-ASCII text.
+        var ascii = Ascii.IsValid(bytes);
+        if (!ascii && !System.Text.Unicode.Utf8.IsValid(bytes))
         {
             return false;
         }
 
-        EmitByteHits(bytes, relativePath, hits, matches, plan.MaxCount);
+        EmitByteHits(bytes, relativePath, hits, matches, plan.MaxCount, ascii);
         matched = true;
         return true;
     }
@@ -458,7 +478,7 @@ internal sealed class MatchPlan
         return true;
     }
 
-    private static void EmitByteHits(ReadOnlySpan<byte> bytes, string relativePath, List<Hit> hits, List<SearchMatch> matches, int? maxLines = null)
+    private static void EmitByteHits(ReadOnlySpan<byte> bytes, string relativePath, List<Hit> hits, List<SearchMatch> matches, int? maxLines = null, bool ascii = true)
     {
         hits.Sort(static (left, right) =>
         {
@@ -500,13 +520,14 @@ internal sealed class MatchPlan
             if (sharedText == null || lineStart != sharedStart)
             {
                 sharedStart = lineStart;
-                sharedText = Encoding.ASCII.GetString(bytes[lineStart..textEnd]);
+                sharedText = Encoding.UTF8.GetString(bytes[lineStart..textEnd]);
             }
 
+            var column = ascii ? hit.Index - lineStart + 1 : TextFiles.Column(bytes, lineStart, hit.Index);
             matches.Add(new SearchMatch(
                 relativePath,
                 lineNo,
-                hit.Index - lineStart + 1,
+                column,
                 hit.Value,
                 sharedText,
                 null,
@@ -530,10 +551,18 @@ internal sealed class MatchPlan
                     continue;
                 }
 
-                var lineText = LineMap.LineText(text, starts, line);
+                var lineText = plan.NeedLineText || plan.NeedMatchText ? LineMap.LineText(text, starts, line) : "";
                 var (before, after) = Context(text, starts, lineCount, line, plan);
                 var offset = line - 1 < starts.Length ? starts[line - 1] : 0;
-                matches.Add(new SearchMatch(relativePath, line, 1, lineText, lineText, before, after, offset));
+                matches.Add(new SearchMatch(
+                    relativePath,
+                    line,
+                    1,
+                    plan.NeedMatchText ? lineText : "",
+                    plan.NeedLineText ? lineText : "",
+                    before,
+                    after,
+                    offset));
                 if (plan.StopAtFirst || (plan.MaxCount is int limit && matches.Count >= limit))
                 {
                     return;
@@ -606,7 +635,7 @@ internal sealed class MatchPlan
                         break;
                     }
 
-                    hits.Add(new Hit(match.Index, match.Length, match.Value));
+                    hits.Add(new Hit(match.Index, match.Length, plan.NeedMatchText ? match.Value : ""));
                 }
             }
         }
@@ -621,7 +650,7 @@ internal sealed class MatchPlan
                     continue;
                 }
 
-                CollectLiteral(text, pattern, ComparisonAt(plan, i), plan.Word, hits, lineLimit);
+                CollectLiteral(text, pattern, ComparisonAt(plan, i), plan.Word, hits, lineLimit, plan.NeedMatchText);
             }
         }
 
@@ -660,7 +689,7 @@ internal sealed class MatchPlan
         {
             cache.Ready = true;
             cache.Line = line;
-            cache.Text = LineMap.LineText(text, starts, line);
+            cache.Text = plan.NeedLineText ? LineMap.LineText(text, starts, line) : "";
             (cache.Before, cache.After) = Context(text, starts, lineCount, line, plan);
         }
 
@@ -834,7 +863,7 @@ internal sealed class MatchPlan
                         continue;
                     }
 
-                    hits.Add(new Hit(index, match.Length, match.Value));
+                    hits.Add(new Hit(index, match.Length, plan.NeedMatchText ? match.Value : ""));
                 }
             }
         });
@@ -1302,7 +1331,7 @@ internal sealed class MatchPlan
         }
     }
 
-    private static void CollectLiteral(string text, string pattern, StringComparison comparison, bool word, List<Hit> hits, int maxLines = 0)
+    private static void CollectLiteral(string text, string pattern, StringComparison comparison, bool word, List<Hit> hits, int maxLines = 0, bool needText = true)
     {
         if (pattern.Length == 0 || pattern.Length > text.Length)
         {
@@ -1329,7 +1358,7 @@ internal sealed class MatchPlan
                     return;
                 }
 
-                hits.Add(new Hit(idx, pattern.Length, text.Substring(idx, pattern.Length)));
+                hits.Add(new Hit(idx, pattern.Length, needText ? text.Substring(idx, pattern.Length) : ""));
                 from = idx + pattern.Length;
             }
             else

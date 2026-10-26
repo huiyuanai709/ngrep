@@ -22,12 +22,30 @@ internal static class TextFiles
 
     public static string Decode(ReadOnlySpan<byte> bytes)
     {
-        if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+        var bom = Utf8BomLength(bytes);
+        return Encoding.UTF8.GetString(bytes[bom..]);
+    }
+
+    /// <summary>UTF-8 byte order mark length, or 0. <see cref="Decode"/> drops it and so does the byte path.</summary>
+    public static int Utf8BomLength(ReadOnlySpan<byte> bytes) =>
+        bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF ? 3 : 0;
+
+    /// <summary>
+    /// 1-based character column of <paramref name="index"/> on a line that starts at
+    /// <paramref name="lineStart"/>. A byte offset is a character offset on ASCII, so the
+    /// common path does no decoding at all.
+    /// </summary>
+    public static int Column(ReadOnlySpan<byte> bytes, int lineStart, int index)
+    {
+        var start = Math.Max(lineStart, Utf8BomLength(bytes));
+        if (index <= start)
         {
-            bytes = bytes[3..];
+            return 1;
         }
 
-        return Encoding.UTF8.GetString(bytes);
+        return Ascii.IsValid(bytes[start..index])
+            ? index - start + 1
+            : 1 + Encoding.UTF8.GetCharCount(bytes[start..index]);
     }
 
     public static string Sha256Hex(ReadOnlySpan<byte> bytes) =>
