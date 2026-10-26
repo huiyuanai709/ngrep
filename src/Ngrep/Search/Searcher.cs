@@ -861,6 +861,22 @@ internal static class Searcher
             return true;
         }
 
+        // A Pike VM walks every byte, so narrow to candidate lines first. This is the
+        // same literal filter the no-automaton path uses, and it leaves non-ASCII files
+        // to the automaton below.
+        if (plan.BytePrefilterFirst && MatchPlan.TryCollectBytes(read.Span, file.RelativePath, plan, matches, out var narrowed))
+        {
+            tally.File(narrowed);
+            if (!narrowed)
+            {
+                filesWithoutMatch?.Add(file.RelativePath);
+            }
+
+            examined = true;
+            matched = narrowed;
+            return true;
+        }
+
         if (MatchPlan.TryCollectAutomaton(read.Span, file.RelativePath, plan, matches, out var automatonMatched))
         {
             tally.File(automatonMatched);

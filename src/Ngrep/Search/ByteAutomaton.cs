@@ -339,6 +339,30 @@ internal static class ByteAutomaton
 
     private static Re Simplify(Re ast)
     {
+        // Alternation is associative, so a nested alt can be flattened into its parent.
+        // Doing it here lets `foo|(bar|baz)` reach TryLiteralAlt as a literal alternation
+        // instead of falling through to the (much slower) Pike VM.
+        if (ast is ReAlt alt)
+        {
+            var alternatives = new List<Re>(alt.Parts.Length);
+            var changed = false;
+            foreach (var part in alt.Parts)
+            {
+                var simplified = Simplify(part);
+                if (simplified is ReAlt nested)
+                {
+                    alternatives.AddRange(nested.Parts);
+                    changed = true;
+                    continue;
+                }
+
+                changed |= !ReferenceEquals(simplified, part);
+                alternatives.Add(simplified);
+            }
+
+            return changed ? new ReAlt(alternatives.ToArray()) : ast;
+        }
+
         if (ast is not ReCat cat)
         {
             return ast;
@@ -1337,6 +1361,13 @@ internal static class ByteAutomaton
 
 internal abstract class ByteProgram
 {
+    /// <summary>
+    /// True when running this program over whole bytes is expected to lose to narrowing
+    /// to candidate lines first. The Pike VM touches every byte with a thread list, so a
+    /// required ASCII literal is a far cheaper filter than the VM itself.
+    /// </summary>
+    public virtual bool PrefersLiteralPrefilter => false;
+
     public abstract void Collect(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits);
 
     protected static bool ContainsNewline(ReadOnlySpan<byte> text, int index, int length)
@@ -2520,6 +2551,8 @@ internal sealed class PikeProgram : ByteProgram
             _prefixScan = SimdLiteralScanner.Create([prefix], ignoreCase);
         }
     }
+
+    public override bool PrefersLiteralPrefilter => true;
 
     public override void Collect(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits)
     {

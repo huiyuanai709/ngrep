@@ -235,6 +235,12 @@ internal sealed class LiteralQuery
                 var found = new List<int>();
                 AddLineStarts(bytes, ignoreCase ? part.Insensitive : part.Sensitive, part.Length, found);
                 acc = acc == null ? found : IntersectSorted(acc, found);
+                if (acc.Count == 0)
+                {
+                    // A line must contain every required part, so an empty intersection
+                    // stays empty. Skip the remaining scans for this clause.
+                    break;
+                }
             }
 
             if (selective == 0)

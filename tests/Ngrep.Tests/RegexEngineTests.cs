@@ -211,6 +211,69 @@ public class RegexEngineTests
         Assert.Contains(regex.Matches, match => match.Text == "TAILNEEDLE");
     }
 
+    [Theory]
+    [InlineData("NEEDLE|Method12")]
+    [InlineData("foo|bar")]
+    [InlineData("foo|bar|baz")]
+    [InlineData("foo|(bar|baz)")]
+    public void Literal_alternation_reaches_the_teddy_matcher(string pattern)
+    {
+        Assert.True(ByteAutomaton.TryCompile(pattern, new ByteAutomaton.Options(false, false), out var program), pattern);
+        Assert.IsType<LiteralAltProgram>(program);
+    }
+
+    [Fact]
+    public void Pike_programs_narrow_to_candidate_lines_first()
+    {
+        var pike = MatchPlan.Create(new SearchQuery { Pattern = @"\bhandle\s+\w+", Path = ".", Regex = true, ForceScan = true });
+        Assert.IsType<PikeProgram>(Assert.Single(pike.BytePrograms!));
+        Assert.True(pike.UseLinePrefilter);
+        Assert.True(pike.BytePrefilterFirst);
+
+        // A literal prefix already scans fast, so it keeps the byte program.
+        var sequence = MatchPlan.Create(new SearchQuery { Pattern = "NEEDLE[0-9]", Path = ".", Regex = true, ForceScan = true });
+        Assert.False(sequence.BytePrefilterFirst);
+
+        // No required literal means there is no line prefilter to prefer.
+        var literalless = MatchPlan.Create(new SearchQuery { Pattern = @"\w\w\w", Path = ".", Regex = true, ForceScan = true });
+        Assert.False(literalless.UseLinePrefilter);
+        Assert.False(literalless.BytePrefilterFirst);
+    }
+
+    [Fact]
+    public void Pike_pattern_prefilter_reports_the_dotnet_spans_and_honors_max_count()
+    {
+        using var tree = new TempDir();
+        File.WriteAllText(tree.File("a.txt"), "handle alpha\nx handle beta y\nnothing\nhandle\n");
+        File.WriteAllText(tree.File("b.txt"), "nothing here\n");
+
+        var all = Search(tree.Root, @"\bhandle\s+\w+");
+        Assert.Equal(
+            ["a.txt:1:1:handle alpha", "a.txt:2:3:handle beta"],
+            all.Matches.Select(match => $"{match.Path}:{match.Line}:{match.Column}:{match.Text}").OrderBy(text => text, StringComparer.Ordinal).ToArray());
+
+        var limited = Search(tree.Root, @"\bhandle\s+\w+", maxCount: 1);
+        var single = Assert.Single(limited.Matches);
+        Assert.Equal("a.txt", single.Path);
+        Assert.Equal(1, single.Line);
+
+        var word = Search(tree.Root, @"\bhandle\s+\w+", word: true);
+        Assert.Equal(2, word.Matches.Count);
+    }
+
+    private static SearchOutcome Search(string root, string pattern, int? maxCount = null, bool word = false) =>
+        Searcher.Search(new SearchQuery
+        {
+            Pattern = pattern,
+            Path = root,
+            Regex = true,
+            ForceScan = true,
+            NoIgnore = true,
+            WordRegexp = word,
+            MaxCount = maxCount,
+            MaxDegreeOfParallelism = 1,
+        }).GetAwaiter().GetResult();
+
     private static int TextFilesThreshold() => 256 * 1024;
 
     private sealed class TempDir : IDisposable

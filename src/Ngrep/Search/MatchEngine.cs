@@ -92,6 +92,13 @@ internal sealed class MatchPlan
     /// <summary>ASCII byte automata for patterns the linear compiler recognized. Null when any pattern opted out.</summary>
     public ByteProgram[]? BytePrograms { get; init; }
 
+    /// <summary>
+    /// True when a byte program exists but should be preceded by the required-literal
+    /// line prefilter. Set when any program is a Pike VM, which walks every byte with a
+    /// thread list and loses badly to a SIMD literal scan that narrows the candidate lines.
+    /// </summary>
+    public bool BytePrefilterFirst { get; init; }
+
     public bool StopAtFirst =>
         (Report == ReportMode.FilesWithMatches || Report == ReportMode.Quiet) && !CollectAll;
 
@@ -197,6 +204,9 @@ internal sealed class MatchPlan
         }
 
         var crosses = query.Multiline || query.MultilineDotAll;
+        var useLinePrefilter = regex && !crosses && literalsQuery is { HasLinePrefilter: true } && !HasAbsoluteAnchor(patterns);
+        var bytePrefilterFirst = useLinePrefilter && bytePrograms != null
+            && Array.Exists(bytePrograms, static program => program.PrefersLiteralPrefilter);
         return new MatchPlan
         {
             Patterns = patterns,
@@ -227,7 +237,8 @@ internal sealed class MatchPlan
             NeedMatchText = query.NeedMatchText,
             NonBacktracking = nonBacktracking,
             BytePrograms = bytePrograms,
-            UseLinePrefilter = regex && !crosses && literalsQuery is { HasLinePrefilter: true } && !HasAbsoluteAnchor(patterns),
+            BytePrefilterFirst = bytePrefilterFirst,
+            UseLinePrefilter = useLinePrefilter,
         };
     }
 
@@ -430,19 +441,15 @@ internal sealed class MatchPlan
                     continue;
                 }
 
-                foreach (Match match in plan.Regexes[i].Matches(slice))
+                foreach (var match in plan.Regexes[i].EnumerateMatches(slice))
                 {
-                    if (!match.Success)
-                    {
-                        continue;
-                    }
-
                     if (plan.Word && !WordBoundary.At(slice, match.Index, match.Length))
                     {
                         continue;
                     }
 
-                    var hit = new Hit(lineStart + match.Index, match.Length, match.Value);
+                    var value = plan.NeedMatchText ? slice.Substring(match.Index, match.Length) : "";
+                    var hit = new Hit(lineStart + match.Index, match.Length, value);
                     if (earliest == null || hit.Index < earliest.Value.Index || (hit.Index == earliest.Value.Index && hit.Length < earliest.Value.Length))
                     {
                         earliest = hit;
@@ -858,20 +865,16 @@ internal sealed class MatchPlan
                     continue;
                 }
 
-                foreach (Match match in plan.Regexes[i].Matches(slice))
+                foreach (var match in plan.Regexes[i].EnumerateMatches(slice))
                 {
-                    if (!match.Success)
-                    {
-                        continue;
-                    }
-
                     var index = start + match.Index;
                     if (plan.Word && !WordBoundary.At(text, index, match.Length))
                     {
                         continue;
                     }
 
-                    hits.Add(new Hit(index, match.Length, plan.NeedMatchText ? match.Value : ""));
+                    var value = plan.NeedMatchText ? slice.Substring(match.Index, match.Length) : "";
+                    hits.Add(new Hit(index, match.Length, value));
                 }
             }
         });
