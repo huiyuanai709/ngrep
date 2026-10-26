@@ -101,10 +101,12 @@ internal static partial class MachineOutput
             Console.WriteLine($"skippedBinary {result.SkippedBinary}");
             Console.WriteLine($"skippedTooLarge {result.SkippedTooLarge}");
             Console.WriteLine($"skippedUnreadable {result.SkippedUnreadable}");
+            Console.Out.Flush();
             return;
         }
 
         Console.WriteLine(IndexJson(result));
+        Console.Out.Flush();
     }
 
     public static void WriteWatch(WatchEvent watch, OutputFormat format)
@@ -120,10 +122,12 @@ internal static partial class MachineOutput
 
             Console.WriteLine(
                 $"{watch.Event} documents={watch.Result.Documents} added={watch.Result.Added} updated={watch.Result.Updated} unchanged={watch.Result.Unchanged} removed={watch.Result.Removed}");
+            Console.Out.Flush();
             return;
         }
 
         Console.WriteLine(WatchJson(watch));
+        Console.Out.Flush();
     }
 
     public static void Note(string? note)

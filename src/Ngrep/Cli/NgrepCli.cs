@@ -30,7 +30,6 @@ internal static class NgrepCli
 
     public static async Task<int> Run(string[] args)
     {
-        Console.OutputEncoding = Encoding.UTF8;
         try
         {
             args = ConfigFile.Apply(args, out var config);
@@ -62,6 +61,10 @@ internal static class NgrepCli
         {
             Console.Error.WriteLine(ex.Message);
             return ExitCodes.Error;
+        }
+        finally
+        {
+            Output.Stdout.Flush();
         }
     }
 
@@ -420,6 +423,7 @@ internal static class NgrepCli
                 e.Cancel = true;
                 if (!RequestSearchCancel(ref interrupts, cts))
                 {
+                    Output.Stdout.Flush();
                     Environment.Exit(ExitCodes.Error);
                 }
             }
