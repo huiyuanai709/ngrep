@@ -20,7 +20,7 @@ public class CliTests
         {
             Assert.Equal("index", indexDoc.RootElement.GetProperty("command").GetString());
             Assert.Equal(1, indexDoc.RootElement.GetProperty("documents").GetInt32());
-            Assert.Equal(1, indexDoc.RootElement.GetProperty("formatVersion").GetInt32());
+            Assert.Equal(2, indexDoc.RootElement.GetProperty("formatVersion").GetInt32());
         }
 
         capture.Clear();

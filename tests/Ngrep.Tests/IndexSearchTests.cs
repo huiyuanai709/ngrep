@@ -41,7 +41,7 @@ public class IndexSearchTests
         Assert.True(File.Exists(Path.Combine(built.IndexPath, "documents.ndjson")));
 
         var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(built.IndexPath, "manifest.json")));
-        Assert.Equal(1, manifest.RootElement.GetProperty("formatVersion").GetInt32());
+        Assert.Equal(2, manifest.RootElement.GetProperty("formatVersion").GetInt32());
         Assert.Equal("invariant-lowercase", manifest.RootElement.GetProperty("caseFolding").GetString());
         Assert.Equal("utf16-code-unit", manifest.RootElement.GetProperty("columnUnit").GetString());
 
@@ -49,7 +49,8 @@ public class IndexSearchTests
         Assert.NotNull(loaded);
         Assert.Contains(loaded!.Postings.Keys, gram => gram == "net");
         var doc = Assert.Single(loaded.Documents, d => d.Path == "src/App.cs");
-        Assert.Equal(new[] { 0, 6, 25 }, doc.LineStarts);
+        Assert.Equal(25, doc.Size);
+        Assert.False(string.IsNullOrEmpty(doc.Sha256));
 
         var outcome = Searcher.Search(new SearchQuery { Pattern = "netgrep", Path = tree.Root }).GetAwaiter().GetResult();
         Assert.True(outcome.UsedIndex);
@@ -92,7 +93,7 @@ public class IndexSearchTests
     }
 
     [Fact]
-    public void Search_load_skips_line_starts_and_unused_postings()
+    public void Search_load_reads_only_the_requested_postings()
     {
         using var tree = new TempTree();
         File.WriteAllText(tree.File("a.txt"), "alpha netgrep\n");
@@ -100,13 +101,11 @@ public class IndexSearchTests
         var built = Indexer.Build(tree.Root);
         var full = IndexStore.TryLoad(built.IndexPath);
         Assert.NotNull(full);
-        Assert.NotEmpty(full!.Documents[0].LineStarts);
         Assert.True(full.Postings.Count > 3);
 
         var grams = new HashSet<string>(Trigrams.ForQuery("netgrep"), StringComparer.Ordinal);
         var search = IndexStore.TryLoadForSearch(built.IndexPath, grams);
         Assert.NotNull(search);
-        Assert.All(search!.Documents, doc => Assert.Empty(doc.LineStarts));
         Assert.NotEmpty(search.Postings);
         Assert.All(search.Postings.Keys, key => Assert.Contains(key, grams));
         Assert.True(search.Postings.Count < full.Postings.Count);
@@ -114,7 +113,6 @@ public class IndexSearchTests
         var headerOnly = IndexStore.TryLoadForSearch(built.IndexPath, grams: null);
         Assert.NotNull(headerOnly);
         Assert.Empty(headerOnly!.Postings);
-        Assert.All(headerOnly.Documents, doc => Assert.Empty(doc.LineStarts));
     }
 
     [Fact]

@@ -1,6 +1,8 @@
-# ngrep index format v1
+# ngrep index format v2
 
 The index is a directory, by default `<root>/.ngrep/index`. `ngrep index --index <dir>` writes somewhere else. An index left in `.netgrep` is not opened; index the tree again so it is written under `.ngrep`. Each commit is atomic on the same filesystem: files are written to `<index>.tmp`, the previous directory is renamed to `<index>.bak`, then the temp directory becomes `<index>`. A crash can leave `.bak`. Readers use `<index>` when `manifest.json` is there, and otherwise fall back to `<index>.bak`. A failure while writing `<index>.tmp` deletes that temp directory and leaves the previous index in place.
+
+v2 drops the `lineStarts` array that v1 stored on every row. Nothing read it, and it made `documents.ndjson` about ten times larger. An index in another version is not read: `search` scans content instead, and `index` starts over and replaces the directory.
 
 ## manifest.json
 
@@ -8,7 +10,7 @@ UTF-8 JSON object, indented, field names stable:
 
 | Field | Meaning |
 | --- | --- |
-| `formatVersion` | Integer. This document is version **1**. |
+| `formatVersion` | Integer. This document is version **2**. |
 | `tool` | `ngrep`. |
 | `root` | Absolute path of the indexed tree at build time. |
 | `createdUtc` | First build, `yyyy-MM-ddTHH:mm:ss.fffZ`. |
@@ -29,16 +31,8 @@ One JSON object per indexed file, sorted by `path`. Paths are relative to `root`
 | `size` | Byte length of the file as read. |
 | `mtimeUnixMs` | Last write time, Unix milliseconds. Together with `size`, this skips a re-hash. |
 | `sha256` | Lowercase hex SHA-256 of the raw file bytes (BOM included). Equal hashes skip reindexing even if mtime changed. |
-| `lineStarts` | `0`-based UTF-16 offsets of the first character of each line. Line 1 starts at `lineStarts[0]` (always `0`). A `\n` ends a line; `\r\n` keeps the `\r` on the previous line. |
 
-Line and column from a match offset `index` (0-based, into the decoded string):
-
-```
-line   = largest n such that lineStarts[n - 1] <= index, 1-based
-column = index - lineStarts[line - 1] + 1
-```
-
-Search re-reads the file and recomputes this from the live text. `lineStarts` is still stored so a reader can map an offset without scanning for newlines. v1 postings do not store per-occurrence offsets; verification opens the file.
+Line and column from a match offset `index` (0-based, into the decoded string) are not stored. Search re-reads the file and maps the offset against the live text: a `\n` ends a line, and `\r\n` keeps the `\r` on the previous line. Postings do not store per-occurrence offsets either; verification opens the file.
 
 Files shorter than 3 characters are documents with an empty trigram set. They are found only by the short-pattern scan.
 
@@ -49,7 +43,7 @@ Little-endian. Trigrams are 3 consecutive UTF-16 code units of the invariant-low
 ```
 offset  type     field
 0       4 bytes  magic "NGTR"
-4       int32    version = 1
+4       int32    version = 2
 8       int32    trigramCount
 then trigramCount records, sorted by trigram UTF-8 bytes (ordinal):
         uint16   gramByteLen
@@ -58,7 +52,7 @@ then trigramCount records, sorted by trigram UTF-8 bytes (ordinal):
         int32[]  docIds, sorted ascending, unique
 ```
 
-A literal query of length >= 3 is answered by intersecting the posting lists of every trigram in the lowercased pattern, then checking the candidate files. Case-sensitive search still uses the folded lists and rejects false positives while reading the file. Queries shorter than 3 characters, and `--regex` queries that are not trigram-safe, read every indexed document when the search path is the indexed root (still honor the path filter) because v1 does not trigram-filter them. The same query under a subdirectory scans that directory instead of treating a missing document row as no match.
+A literal query of length >= 3 is answered by intersecting the posting lists of every trigram in the lowercased pattern, then checking the candidate files. Case-sensitive search still uses the folded lists and rejects false positives while reading the file. Queries shorter than 3 characters, and `--regex` queries that are not trigram-safe, read every indexed document when the search path is the indexed root (still honor the path filter) because the format does not trigram-filter them. The same query under a subdirectory scans that directory instead of treating a missing document row as no match.
 
 ## Incremental updates
 
@@ -69,15 +63,15 @@ A literal query of length >= 3 is answered by intersecting the posting lists of 
 - content change: delete that `id` from every posting list, insert the new trigrams
 - path missing from the walk: after every walked file has been considered, delete that document and its postings (ordinal path order), counting toward the same chunk size
 
-A commit rewrites `manifest.json`, `documents.ndjson`, and `postings.bin` into `<index>.tmp` and replaces `<index>` only after those files are complete. The committed directory is a normal v1 index: `documentCount` matches the rows, and postings refer only to ids in that snapshot. `.ngrep/` appears when the first chunk finishes, not as each file is read.
+A commit rewrites `manifest.json`, `documents.ndjson`, and `postings.bin` into `<index>.tmp` and replaces `<index>` only after those files are complete. The committed directory is a normal v2 index: `documentCount` matches the rows, and postings refer only to ids in that snapshot. `.ngrep/` appears when the first chunk finishes, not as each file is read.
 
 A killed `ngrep index` or `watch` leaves the last successful chunk. Files from later chunks are absent. Removals that have not reached a chunk commit are still present. A crash while writing the temp directory does not replace a good index. The final commit also covers an empty tree and refreshes `updatedUtc`.
 
-Memory during the build is the live index plus one chunk, not a second copy of the tree. Document rows and posting lists stay for the whole build (posting lists are about 4 bytes per distinct trigram per file). Decoded text is discarded after trigrams and line starts are taken. At most `workers × 4` files are in flight, and each file is at most 32 MiB. Progress lines are kept only for the open chunk (at most 4096 paths). Serialized document lines used to write a chunk are dropped after that commit. A cold build of 100,000 tiny files peaked near 270 MB RSS.
+Memory during the build is the live index plus one chunk, not a second copy of the tree. Document rows and posting lists stay for the whole build (posting lists are about 4 bytes per distinct trigram per file). Decoded text is discarded after its trigrams are taken. At most `workers × 4` files are in flight, and each file is at most 32 MiB. Progress lines are kept only for the open chunk (at most 4096 paths). Serialized document lines used to write a chunk are dropped after that commit. A cold build of 100,000 tiny files peaked near 270 MB RSS.
 
 A caller that supplies a persistence callback is the exception: each added, updated, or removed document is committed before the callback returns, then one more commit stores unchanged hash refreshes and `updatedUtc`. That prefix is what a crash keeps. Removals in that mode still run one path at a time after the walk. The chunk limits are not used.
 
-v1 still rewrites the three files as a whole on every commit. It is not a write-ahead log. A later version can shard postings by document id without changing the trigram or line/column rules.
+v2 still rewrites the three files as a whole on every commit. It is not a write-ahead log. A later version can shard postings by document id without changing the trigram or line/column rules.
 
 ## What is not in the index
 

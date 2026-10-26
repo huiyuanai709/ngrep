@@ -38,9 +38,8 @@ internal static class IndexStore
     }
 
     /// <summary>
-    /// Search load. Skips <c>lineStarts</c> (search recomputes them from the file)
-    /// and materializes only <paramref name="grams"/>. A null set checks the postings
-    /// header and does not read posting lists.
+    /// Search load. Materializes only <paramref name="grams"/>. A null set checks the
+    /// postings header and does not read posting lists.
     /// </summary>
     public static IndexData? TryLoadForSearch(string indexDirectory, HashSet<string>? grams)
     {
@@ -58,20 +57,16 @@ internal static class IndexStore
         public IndexRead()
         {
             AllPostings = true;
-            LineStarts = true;
             Grams = null;
         }
 
         public IndexRead(HashSet<string>? grams)
         {
             AllPostings = false;
-            LineStarts = false;
             Grams = grams;
         }
 
         public bool AllPostings { get; }
-
-        public bool LineStarts { get; }
 
         public HashSet<string>? Grams { get; }
     }
@@ -151,7 +146,7 @@ internal static class IndexStore
         return Encoding.UTF8.GetString(stream.ToArray());
     }
 
-    private static IndexData Read(string directory, IndexRead read)
+    private static IndexData? Read(string directory, IndexRead read)
     {
         var manifestPath = Path.Combine(directory, "manifest.json");
         var documentsPath = Path.Combine(directory, "documents.ndjson");
@@ -164,11 +159,12 @@ internal static class IndexStore
         var manifest = ReadManifest(File.ReadAllText(manifestPath));
         if (manifest.FormatVersion != IndexPaths.FormatVersion)
         {
-            throw new InvalidDataException(
-                $"Unsupported index format version {manifest.FormatVersion}. This build reads version {IndexPaths.FormatVersion}.");
+            // Another format is not read. A search scans and a build starts over,
+            // which replaces the directory rather than failing on it.
+            return null;
         }
 
-        var documents = read.LineStarts ? ReadDocuments(documentsPath) : ReadDocumentMeta(documentsPath);
+        var documents = ReadDocumentMeta(documentsPath);
         Dictionary<string, List<int>> postings;
         using (var stream = File.OpenRead(postingsPath))
         {
@@ -188,7 +184,7 @@ internal static class IndexStore
     /// Manifest and postings only. Document rows stay on disk until the caller knows
     /// which ids the trigrams kept, so a selective query never parses the whole table.
     /// </summary>
-    private static IndexData ReadForSearch(string directory, HashSet<string>? grams)
+    private static IndexData? ReadForSearch(string directory, HashSet<string>? grams)
     {
         var manifestPath = Path.Combine(directory, "manifest.json");
         var documentsPath = Path.Combine(directory, "documents.ndjson");
@@ -201,8 +197,8 @@ internal static class IndexStore
         var manifest = ReadManifest(File.ReadAllText(manifestPath));
         if (manifest.FormatVersion != IndexPaths.FormatVersion)
         {
-            throw new InvalidDataException(
-                $"Unsupported index format version {manifest.FormatVersion}. This build reads version {IndexPaths.FormatVersion}.");
+            // Another format is not read: the caller scans content instead.
+            return null;
         }
 
         Dictionary<string, List<int>> postings;
@@ -222,8 +218,8 @@ internal static class IndexStore
 
     /// <summary>
     /// Ids and paths from <c>documents.ndjson</c>. Fields after <c>path</c> (size, mtime,
-    /// hash, line starts) are not read, and a record outside <paramref name="onlyIds"/> does
-    /// not become a string.
+    /// hash) are not read, and a record outside <paramref name="onlyIds"/> does not become
+    /// a string.
     /// </summary>
     public static List<DocumentRecord> ReadSearchDocuments(string path, HashSet<int>? onlyIds)
     {
@@ -421,61 +417,14 @@ internal static class IndexStore
             writer.WriteNumber("size", document.Size);
             writer.WriteNumber("mtimeUnixMs", document.MtimeUnixMs);
             writer.WriteString("sha256", document.Sha256);
-            writer.WriteStartArray("lineStarts");
-            foreach (var start in document.LineStarts)
-            {
-                writer.WriteNumberValue(start);
-            }
-
-            writer.WriteEndArray();
             writer.WriteEndObject();
         }
 
         return buffer.WrittenSpan.ToArray();
     }
 
-    private static List<DocumentRecord> ReadDocuments(string path)
-    {
-        var documents = new List<DocumentRecord>();
-        foreach (var line in File.ReadLines(path))
-        {
-            if (line.Length == 0)
-            {
-                continue;
-            }
-
-            try
-            {
-                using var doc = JsonDocument.Parse(line);
-                var root = doc.RootElement;
-                var starts = new List<int>();
-                foreach (var item in root.GetProperty("lineStarts").EnumerateArray())
-                {
-                    starts.Add(item.GetInt32());
-                }
-
-                documents.Add(new DocumentRecord
-                {
-                    Id = RequiredInt(root, "id"),
-                    Path = RequiredString(root, "path"),
-                    Size = RequiredLong(root, "size"),
-                    MtimeUnixMs = RequiredLong(root, "mtimeUnixMs"),
-                    Sha256 = RequiredString(root, "sha256"),
-                    LineStarts = starts.Count == 0 ? [0] : starts.ToArray(),
-                });
-            }
-            catch (Exception ex) when (ex is JsonException or KeyNotFoundException or FormatException or InvalidOperationException)
-            {
-                throw new InvalidDataException("documents.ndjson contains an invalid record.", ex);
-            }
-        }
-
-        return documents;
-    }
-
     /// <summary>
-    /// Document id, path, size, mtime, and hash only. The lineStarts array is skipped
-    /// without becoming a string or an int[].
+    /// Document id, path, size, mtime, and hash.
     /// </summary>
     private static List<DocumentRecord> ReadDocumentMeta(string path)
     {
@@ -519,8 +468,6 @@ internal static class IndexStore
         return documents;
     }
 
-    private static readonly byte[] LineStartsMarker = "\"lineStarts\""u8.ToArray();
-
     private static void AddMeta(List<DocumentRecord> documents, ReadOnlySpan<byte> line)
     {
         if (line.Length > 0 && line[^1] == (byte)'\r')
@@ -530,34 +477,6 @@ internal static class IndexStore
 
         if (line.IsEmpty)
         {
-            return;
-        }
-
-        var cut = line.IndexOf(LineStartsMarker);
-        if (cut >= 0)
-        {
-            var end = cut;
-            while (end > 0 && (line[end - 1] == (byte)' ' || line[end - 1] == (byte)','))
-            {
-                end--;
-            }
-
-            var rented = ArrayPool<byte>.Shared.Rent(end + 1);
-            try
-            {
-                line[..end].CopyTo(rented);
-                rented[end] = (byte)'}';
-                documents.Add(ParseMeta(rented.AsSpan(0, end + 1)));
-            }
-            catch (Exception ex) when (ex is InvalidDataException or JsonException or InvalidOperationException or FormatException)
-            {
-                documents.Add(ParseMeta(line));
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-            }
-
             return;
         }
 
@@ -635,7 +554,6 @@ internal static class IndexStore
             Size = size,
             MtimeUnixMs = mtime,
             Sha256 = hash,
-            LineStarts = [],
         };
     }
 
@@ -961,11 +879,6 @@ internal static class IndexStore
 
     private static int RequiredInt(JsonElement root, string name) =>
         root.TryGetProperty(name, out var value) && value.TryGetInt32(out var number)
-            ? number
-            : throw new InvalidDataException($"Missing integer field '{name}'.");
-
-    private static long RequiredLong(JsonElement root, string name) =>
-        root.TryGetProperty(name, out var value) && value.TryGetInt64(out var number)
             ? number
             : throw new InvalidDataException($"Missing integer field '{name}'.");
 

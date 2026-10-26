@@ -202,7 +202,6 @@ internal static class Indexer
                 Size = prep.Size,
                 MtimeUnixMs = prep.Mtime,
                 Sha256 = prep.Hash ?? "",
-                LineStarts = LineMap.Build(prep.Text ?? ""),
             };
             seen.Add(file.RelativePath);
             Note(kind, file.RelativePath, prep.Size);
@@ -630,7 +629,6 @@ internal static class Indexer
                 Size = bytes.Length,
                 Mtime = mtime,
                 Hash = hash,
-                Text = text,
                 Grams = copy,
             };
         }
@@ -712,8 +710,6 @@ internal static class Indexer
         public long Mtime { get; init; }
 
         public string? Hash { get; init; }
-
-        public string? Text { get; init; }
 
         public string[]? Grams { get; init; }
 

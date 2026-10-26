@@ -12,8 +12,6 @@ internal sealed class DocumentRecord
 
     public string Sha256 { get; set; } = "";
 
-    public int[] LineStarts { get; set; } = [0];
-
     /// <summary>UTF-8 ndjson object without the trailing newline. Cleared when size or mtime changes.</summary>
     internal byte[]? CachedLine { get; set; }
 }
@@ -80,7 +78,8 @@ internal sealed class IndexResult
 
 internal static class IndexPaths
 {
-    public const int FormatVersion = 1;
+    /// <summary>2 dropped <c>lineStarts</c>, which no reader consumed and which dominated the table.</summary>
+    public const int FormatVersion = 2;
     public const string ToolName = "ngrep";
     public const string FolderName = ".ngrep";
     public const string IndexName = "index";
