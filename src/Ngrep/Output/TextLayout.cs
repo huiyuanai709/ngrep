@@ -165,6 +165,73 @@ internal static class TextLayout
         target.Append(color).Append(text).Append(TextColor.Reset);
     }
 
+    /// <summary>
+    /// Appends one plain text record whose body is copied as UTF-8 bytes. No color, no
+    /// replacement: the separator layout matches <see cref="WriteRecord"/>, so the printed
+    /// bytes are the same as the string path would produce.
+    /// </summary>
+    public static void WriteRawRecord(
+        System.Buffers.IBufferWriter<byte> sink,
+        ReadOnlySpan<byte> body,
+        string? path,
+        int? line,
+        int? column,
+        bool nullPath)
+    {
+        var pending = false;
+        var afterPath = false;
+
+        void Break()
+        {
+            if (!pending)
+            {
+                return;
+            }
+
+            Append(sink, afterPath && nullPath ? "\0" : ":");
+            pending = false;
+            afterPath = false;
+        }
+
+        if (path != null)
+        {
+            Append(sink, path);
+            pending = true;
+            afterPath = true;
+        }
+
+        if (line != null)
+        {
+            Break();
+            Append(sink, line.Value.ToString(CultureInfo.InvariantCulture));
+            pending = true;
+        }
+
+        if (column != null)
+        {
+            Break();
+            Append(sink, column.Value.ToString(CultureInfo.InvariantCulture));
+            pending = true;
+        }
+
+        Break();
+        var span = sink.GetSpan(body.Length);
+        body.CopyTo(span);
+        sink.Advance(body.Length);
+        Append(sink, Environment.NewLine);
+    }
+
+    private static void Append(System.Buffers.IBufferWriter<byte> sink, string text)
+    {
+        var span = sink.GetSpan(text.Length);
+        for (var i = 0; i < text.Length; i++)
+        {
+            span[i] = (byte)text[i];
+        }
+
+        sink.Advance(text.Length);
+    }
+
     private static void WritePaint(string text, string? color)
     {
         if (color == null)

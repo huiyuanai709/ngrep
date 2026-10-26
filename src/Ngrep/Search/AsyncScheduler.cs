@@ -5,9 +5,15 @@ namespace Ngrep.Search;
 
 internal readonly record struct ConfirmFile(string FullPath, string RelativePath);
 
-internal readonly record struct ConfirmResult(bool Examined, bool Matched)
+internal readonly record struct ConfirmResult(bool Examined, bool Matched, bool Raw = false)
 {
     public static ConfirmResult Skip => new(false, false);
+
+    /// <summary>Concatenated row bodies for a raw text file, printed on the consumer thread.</summary>
+    public byte[]? RawBody { get; init; }
+
+    /// <summary>Rows into <see cref="RawBody"/>, one per printed line.</summary>
+    public List<RawLine>? RawRows { get; init; }
 }
 
 internal readonly record struct EmitJob(bool Confirm, ConfirmFile File);

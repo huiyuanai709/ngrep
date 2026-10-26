@@ -15,6 +15,28 @@ internal static class Stdout
     private const int BufferSize = 64 * 1024;
 
     private static bool _installed;
+    private static Stream? _raw;
+
+    /// <summary>True when raw UTF-8 bytes can be written without disturbing buffered text.</summary>
+    public static bool CanWriteRaw => _installed;
+
+    /// <summary>
+    /// Writes bytes that are already UTF-8. Buffered text is flushed first so the ordering is
+    /// the same as if everything had gone through the writer. A host that replaced
+    /// <see cref="Console.Out"/> (a test, an embedder) gets the decoded string instead.
+    /// </summary>
+    public static void WriteBytes(ReadOnlySpan<byte> bytes)
+    {
+        if (!_installed)
+        {
+            Console.Out.Write(Encoding.UTF8.GetString(bytes));
+            return;
+        }
+
+        Flush();
+        _raw ??= Console.OpenStandardOutput();
+        _raw.Write(bytes);
+    }
 
     /// <summary>
     /// Replaces <see cref="Console.Out"/>. Call after the output encoding is set, because

@@ -693,6 +693,18 @@ internal static class NgrepCli
             && !result.GetValue(vimgrep)
             && replacer == null;
 
+        // Plain text with no color is printed straight from the file bytes: the line body is
+        // already the UTF-8 the writer would encode. One pattern keeps the row order simple.
+        var rawTextLines = oneRowPerLine
+            && !colorOn
+            && !result.GetValue(lineRegexp)
+            && patterns.Count == 1
+            && patterns[0].Length > 0
+            && beforeCount == 0
+            && afterCount == 0
+            && !result.GetValue(invert)
+            && !wantStats;
+
         SearchPresentation Present(bool heading) => new(
             report,
             result.GetValue(onlyMatching),
@@ -799,6 +811,8 @@ internal static class NgrepCli
                     MaxDegreeOfParallelism = ThreadCount(result, threads),
                     NeedLineText = needLineText,
                     NeedMatchText = needMatchText,
+                    OneRowPerLine = oneRowPerLine,
+                    RawTextLines = rawTextLines,
                     CancellationToken = cancellationToken,
                     Events = events,
                 });

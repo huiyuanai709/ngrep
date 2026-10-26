@@ -112,6 +112,15 @@ internal sealed class SearchQuery
     /// <summary>When set, <c>-l</c> does not stop at the first hit, so line stats are complete.</summary>
     public bool Stats { get; init; }
 
+    /// <summary>
+    /// Plain text prints one row per matching line. The search then keeps only the first hit
+    /// on each line instead of materializing every hit for the writer to discard.
+    /// </summary>
+    public bool OneRowPerLine { get; init; }
+
+    /// <summary>The writer can take line byte ranges instead of decoded line strings.</summary>
+    public bool RawTextLines { get; init; }
+
     public int BeforeContext { get; init; }
 
     public int AfterContext { get; init; }
@@ -173,7 +182,19 @@ internal readonly struct SearchBatch
     public bool Matched { get; init; }
 
     public bool PrefilterMiss { get; init; }
+
+    /// <summary>Row bodies already encoded as UTF-8. The writer prints these instead of decoded text.</summary>
+    public byte[]? RawBody { get; init; }
+
+    /// <summary>One entry per printed row, indexing <see cref="RawBody"/>.</summary>
+    public List<RawLine>? RawRows { get; init; }
 }
+
+/// <summary>
+/// One printed row's body inside the per-file byte buffer. The search builds it on a worker;
+/// the writer prints it on the consumer thread so output order is the same as before.
+/// </summary>
+internal readonly record struct RawLine(int Line, int Column, int Start, int Length);
 
 internal sealed class SearchOutcome
 {
@@ -778,6 +799,13 @@ internal static class Searcher
                 return new ValueTask<ConfirmResult>(Done(plan, matches, examined, matched));
             }
 
+            var rawLines = new List<RawLine>();
+            if (TryCollectRaw(text, read.Span, file, plan, matches, filesWithoutMatch, tally, out var rawBody, out var rawRows, out var rawMatched))
+            {
+                var result = Done(plan, matches, examined: true, rawMatched, raw: true);
+                return new ValueTask<ConfirmResult>(result with { RawBody = rawBody, RawRows = rawRows });
+            }
+
             matched = CollectDecoded(text, file, plan, matches, filesWithoutMatch, tally);
             return new ValueTask<ConfirmResult>(Done(plan, matches, examined: true, matched));
         }
@@ -788,10 +816,55 @@ internal static class Searcher
     }
 
     /// <summary>
+    /// Builds the printed rows for a plain text report from the file bytes, with no line
+    /// strings. Runs on a worker, so it only fills a buffer; the consumer thread prints.
+    /// </summary>
+    private static bool TryCollectRaw(
+        string text,
+        ReadOnlySpan<byte> bytes,
+        ConfirmFile file,
+        MatchPlan plan,
+        List<SearchMatch> matches,
+        ConcurrentBag<string>? filesWithoutMatch,
+        SearchTally tally,
+        out byte[]? body,
+        out List<RawLine>? rows,
+        out bool matched)
+    {
+        body = null;
+        rows = null;
+        matched = false;
+        if (!plan.RawTextLines || plan.Invert || plan.WantsContext || plan.CollectAll)
+        {
+            return false;
+        }
+
+        if (!System.Text.Ascii.IsValid(bytes))
+        {
+            return false;
+        }
+
+        var lines = new List<RawLine>();
+        var buffer = new System.Buffers.ArrayBufferWriter<byte>(1 << 16);
+        MatchPlan.CollectRawLines(text, bytes, file.RelativePath, plan, lines, matches, buffer);
+        tally.File(lines.Count > 0);
+        if (lines.Count == 0)
+        {
+            filesWithoutMatch?.Add(file.RelativePath);
+            return true;
+        }
+
+        body = buffer.WrittenSpan.ToArray();
+        rows = lines;
+        matched = true;
+        return true;
+    }
+
+    /// <summary>
     /// Drops matching lines past <c>-m</c>. Callers stop their own scan; this keeps every
     /// path, including ones that already buffered the file, inside the same limit.
     /// </summary>
-    private static ConfirmResult Done(MatchPlan plan, List<SearchMatch> matches, bool examined, bool matched)
+    private static ConfirmResult Done(MatchPlan plan, List<SearchMatch> matches, bool examined, bool matched, bool raw = false)
     {
         if (plan.MaxCount is int max && matches.Count > 0)
         {
@@ -801,7 +874,7 @@ internal static class Searcher
             matched = matches.Count > 0;
         }
 
-        return new ConfirmResult(examined, matched);
+        return new ConfirmResult(examined, matched, raw);
     }
 
     /// <summary>True when the file is finished. False when <paramref name="text"/> must be matched as a string.</summary>
@@ -1035,6 +1108,8 @@ internal static class Searcher
                 Examined = examined,
                 Matched = matched,
                 PrefilterMiss = !job.Confirm,
+                RawBody = result.RawBody,
+                RawRows = result.RawRows,
             });
         }
     }

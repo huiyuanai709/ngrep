@@ -18,7 +18,9 @@ internal static partial class MachineOutput
         // Text records for one file are buffered here and written in bulk. Flushed at a
         // bounded size so a file with many hits does not hold its whole output in memory.
         private readonly StringBuilder _sink = new(1 << 16);
+        private readonly System.Buffers.ArrayBufferWriter<byte> _raw = new(1 << 16);
         private const int SinkFlush = 1 << 16;
+        private const int RawFlush = 1 << 16;
         private bool _useHeading;
         private List<SearchMatch>? _held;
         private string? _headingPath;
@@ -52,6 +54,14 @@ internal static partial class MachineOutput
 
             if (!batch.Examined)
             {
+                return;
+            }
+
+            if (batch.RawBody != null)
+            {
+                // Rows were prepared from the file bytes; print them here, on this thread, so
+                // the order matches the decoded path.
+                WriteRawRows(batch.Path, batch.RawBody, batch.RawRows ?? []);
                 return;
             }
 
@@ -376,6 +386,50 @@ internal static partial class MachineOutput
             }
 
             _sink.Clear();
+        }
+
+        /// <summary>
+        /// Prints prepared rows from their UTF-8 bodies. A row is the same prefix the string
+        /// path writes plus the original bytes, so no decode or re-encode happens.
+        /// </summary>
+        private void WriteRawRows(string path, byte[] body, List<RawLine> rows)
+        {
+            if (_format != OutputFormat.Text || rows.Count == 0)
+            {
+                return;
+            }
+
+            EnsureHeading(path);
+            var includePath = _presentation.WithFilename && !_useHeading;
+            var shownPath = includePath ? path : null;
+            var bytes = body.AsSpan();
+            foreach (var row in rows)
+            {
+                TextLayout.WriteRawRecord(
+                    _raw,
+                    bytes.Slice(row.Start, row.Length),
+                    shownPath,
+                    _presentation.LineNumbers ? row.Line : null,
+                    _presentation.Column ? row.Column : null,
+                    _presentation.NullPaths);
+                if (_raw.WrittenCount >= RawFlush)
+                {
+                    FlushRaw();
+                }
+            }
+
+            FlushRaw();
+        }
+
+        private void FlushRaw()
+        {
+            if (_raw.WrittenCount == 0)
+            {
+                return;
+            }
+
+            Stdout.WriteBytes(_raw.WrittenSpan);
+            _raw.Clear();
         }
 
         private void EnsureHeading(string path)

@@ -69,6 +69,15 @@ internal sealed class MatchPlan
 
     public bool CollectAll { get; init; }
 
+    /// <summary>
+    /// Plain text output prints one row per matching line, so a later hit on a line that
+    /// already has one is dropped during confirmation instead of in the writer.
+    /// </summary>
+    public bool OneRowPerLine { get; init; }
+
+    /// <summary>The writer takes line byte ranges instead of decoded line strings.</summary>
+    public bool RawTextLines { get; init; }
+
     public bool LineRegexp { get; init; }
 
     public bool NoMessages { get; init; }
@@ -231,6 +240,8 @@ internal sealed class MatchPlan
             IncludeHidden = query.IncludeHidden,
             SearchBinary = query.SearchBinary || query.SearchText,
             CollectAll = query.Stats,
+            OneRowPerLine = query.OneRowPerLine && !query.Stats,
+            RawTextLines = query.RawTextLines && patterns.Length == 1 && patterns[0].Length > 0 && !query.LineRegexp,
             LineRegexp = query.LineRegexp,
             NoMessages = query.NoMessages,
             NeedLineText = query.NeedLineText,
@@ -317,6 +328,49 @@ internal sealed class MatchPlan
         }
 
         bytes = bytes[TextFiles.Utf8BomLength(bytes)..];
+
+        // The VM cannot produce spans cheaply, so the decoded engine confirms the file. The
+        // DFA in front of it still settles a miss without a decode, but only ASCII bytes are
+        // safe for that: pattern classes are byte classes, so a multi-byte character would
+        // look like several unrelated bytes.
+        var defer = false;
+        foreach (var program in plan.BytePrograms)
+        {
+            if (program.PrefersDecoded)
+            {
+                defer = true;
+                break;
+            }
+        }
+
+        if (defer && System.Text.Unicode.Utf8.IsValid(bytes))
+        {
+            if (Ascii.IsValid(bytes))
+            {
+                var everyProgramFilters = true;
+                var anyMaybe = false;
+                foreach (var program in plan.BytePrograms)
+                {
+                    if (program is DfaProgram filter)
+                    {
+                        anyMaybe |= filter.MayMatch(bytes);
+                    }
+                    else
+                    {
+                        everyProgramFilters = false;
+                    }
+                }
+
+                if (everyProgramFilters && !anyMaybe)
+                {
+                    // Every pattern rejected the bytes, so the file has no match at all.
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         var countOnly = plan.Report == ReportMode.FilesWithoutMatch && !plan.CollectAll;
         var hits = countOnly ? null : new List<Hit>();
         foreach (var program in plan.BytePrograms)
@@ -565,8 +619,9 @@ internal sealed class MatchPlan
                 null,
                 null,
                 lineStart + hit.Index));
-            if (plan.StopAtFirst)
+            if (plan.StopAtFirst || plan.OneRowPerLine)
             {
+                // One row per line: later hits on this line would be dropped by the writer.
                 return;
             }
         }
@@ -710,13 +765,8 @@ internal sealed class MatchPlan
                 var cursor = 0;
                 var kept = 0;
                 var lastLine = 0;
-                foreach (Match match in plan.Regexes[i].Matches(text))
+                foreach (var match in plan.Regexes[i].EnumerateMatches(text))
                 {
-                    if (!match.Success)
-                    {
-                        continue;
-                    }
-
                     if (!plan.CrossesLines && ContainsLineBreak(text, match.Index, match.Length))
                     {
                         continue;
@@ -732,7 +782,10 @@ internal sealed class MatchPlan
                         break;
                     }
 
-                    hits.Add(new Hit(match.Index, match.Length, plan.NeedMatchText ? match.Value : ""));
+                    hits.Add(new Hit(
+                        match.Index,
+                        match.Length,
+                        plan.NeedMatchText ? text.Substring(match.Index, match.Length) : ""));
                 }
             }
         }
@@ -751,18 +804,31 @@ internal sealed class MatchPlan
             }
         }
 
-        hits.Sort(static (left, right) =>
+        // A single pattern enumerates in ascending order and never repeats a span, so the
+        // sort and the dedup only re-check an order that already holds.
+        if (plan.Patterns.Length > 1)
         {
-            var index = left.Index.CompareTo(right.Index);
-            return index != 0 ? index : left.Length.CompareTo(right.Length);
-        });
+            hits.Sort(static (left, right) =>
+            {
+                var index = left.Index.CompareTo(right.Index);
+                return index != 0 ? index : left.Length.CompareTo(right.Length);
+            });
+            hits = Dedup(hits);
+        }
 
-        var deduped = Dedup(hits);
         var cache = default(SharedLine);
         var budget = new LineBudget(plan.MaxCount);
-        foreach (var hit in deduped)
+        var lineCursor = 0;
+        foreach (var hit in hits)
         {
-            if (!budget.Allow(LineMap.Map(starts, hit.Index).Line))
+            // Hits ascend, so the line only moves forward: walk the line starts instead of
+            // binary searching them twice per hit.
+            while (lineCursor + 1 < starts.Length && starts[lineCursor + 1] <= hit.Index)
+            {
+                lineCursor++;
+            }
+
+            if (!budget.Allow(lineCursor + 1))
             {
                 break;
             }
@@ -788,6 +854,11 @@ internal sealed class MatchPlan
             cache.Line = line;
             cache.Text = plan.NeedLineText ? LineMap.LineText(text, starts, line) : "";
             (cache.Before, cache.After) = Context(text, starts, lineCount, line, plan);
+        }
+        else if (plan.OneRowPerLine)
+        {
+            // Plain text prints one row per line, so a later hit on this line adds nothing.
+            return;
         }
 
         matches.Add(new SearchMatch(
@@ -1143,6 +1214,87 @@ internal sealed class MatchPlan
 
             var next = match.Index + Math.Max(1, match.Length);
             from = next <= from ? from + 1 : next;
+        }
+    }
+
+    /// <summary>
+    /// Collects the printed rows for a plain text report straight from the text, with no line
+    /// strings. One row per matching line, in path order, holding the byte range the writer
+    /// copies. ASCII input only: character offsets are byte offsets there.
+    /// </summary>
+    public static void CollectRawLines(
+        string text,
+        ReadOnlySpan<byte> bytes,
+        string relativePath,
+        MatchPlan plan,
+        List<RawLine> lines,
+        List<SearchMatch> matches,
+        System.Buffers.ArrayBufferWriter<byte> body)
+    {
+        var starts = LineMap.Build(text);
+        var lineCount = LineMap.LineCount(text, starts);
+        if (lineCount == 0 || plan.Regexes == null)
+        {
+            return;
+        }
+
+        var limit = plan.MaxCount ?? int.MaxValue;
+        var lastLine = 0;
+        var lineCursor = 0;
+        for (var i = 0; i < plan.Regexes.Length; i++)
+        {
+            if (plan.Patterns[i].Length == 0)
+            {
+                continue;
+            }
+
+            foreach (var match in plan.Regexes[i].EnumerateMatches(text))
+            {
+                if (!plan.CrossesLines && ContainsLineBreak(text, match.Index, match.Length))
+                {
+                    continue;
+                }
+
+                if (plan.Word && !WordBoundary.At(text, match.Index, match.Length))
+                {
+                    continue;
+                }
+
+                while (lineCursor + 1 < starts.Length && starts[lineCursor + 1] <= match.Index)
+                {
+                    lineCursor++;
+                }
+
+                var line = lineCursor + 1;
+                if (line <= lastLine)
+                {
+                    continue;
+                }
+
+                if (lines.Count >= limit)
+                {
+                    return;
+                }
+
+                lastLine = line;
+                var start = starts[line - 1];
+                var end = line < starts.Length ? starts[line] - 1 : text.Length;
+                if (end > start && text[end - 1] == '\r')
+                {
+                    end--;
+                }
+
+                // Copy the row body once, as bytes. No line string is ever built.
+                var offset = body.WrittenCount;
+                var slice = bytes.Slice(start, end - start);
+                slice.CopyTo(body.GetSpan(slice.Length));
+                body.Advance(slice.Length);
+                lines.Add(new RawLine(line, match.Index - start + 1, offset, slice.Length));
+
+                // The pipeline still needs one record per printed row for counting and for the
+                // exit code, but the writer reads the bytes, so the texts stay empty.
+                matches.Add(new SearchMatch(relativePath, line, match.Index - start + 1, "", "", null, null, match.Index));
+            }
         }
     }
 

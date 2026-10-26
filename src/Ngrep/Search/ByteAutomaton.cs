@@ -81,7 +81,8 @@ internal static class ByteAutomaton
             return false;
         }
 
-        program = new PikeProgram(insts, anchored, unanchored, prefix, ignoreCase);
+        var pike = new PikeProgram(insts, anchored, unanchored, prefix, ignoreCase);
+        program = DfaProgram.Wrap(pike, insts, unanchored, prefix) ?? pike;
         return true;
     }
 
@@ -1368,6 +1369,14 @@ internal abstract class ByteProgram
     /// </summary>
     public virtual bool PrefersLiteralPrefilter => false;
 
+    /// <summary>
+    /// True when decoding the file and confirming with the .NET engine beats running this
+    /// program over the bytes. The VM is linear but about fifty times slower per byte than
+    /// the engine on a decoded string, so it is only worth running when there is no decode
+    /// to pay for and the VM can stop early.
+    /// </summary>
+    public virtual bool PrefersDecoded => false;
+
     public abstract void Collect(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits);
 
     protected static bool ContainsNewline(ReadOnlySpan<byte> text, int index, int length)
@@ -2553,6 +2562,13 @@ internal sealed class PikeProgram : ByteProgram
     }
 
     public override bool PrefersLiteralPrefilter => true;
+
+    /// <summary>
+    /// Without a literal prefix the VM scans every byte, so the decoded engine wins on the
+    /// files that reach it. With a prefix the SIMD scan already rejects a miss cheaply, so
+    /// the VM stays.
+    /// </summary>
+    public override bool PrefersDecoded => _prefixScan == null;
 
     public override void Collect(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits)
     {

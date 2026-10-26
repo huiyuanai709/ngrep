@@ -226,9 +226,14 @@ public class RegexEngineTests
     public void Pike_programs_narrow_to_candidate_lines_first()
     {
         var pike = MatchPlan.Create(new SearchQuery { Pattern = @"\bhandle\s+\w+", Path = ".", Regex = true, ForceScan = true });
-        Assert.IsType<PikeProgram>(Assert.Single(pike.BytePrograms!));
         Assert.True(pike.UseLinePrefilter);
         Assert.True(pike.BytePrefilterFirst);
+
+        // A DFA filter in front of the VM must not turn that routing off.
+        var filtered = MatchPlan.Create(new SearchQuery { Pattern = "(alpha|beta)+.*token", Path = ".", Regex = true, ForceScan = true });
+        Assert.IsType<DfaProgram>(Assert.Single(filtered.BytePrograms!));
+        Assert.True(filtered.UseLinePrefilter);
+        Assert.True(filtered.BytePrefilterFirst);
 
         // A literal prefix already scans fast, so it keeps the byte program.
         var sequence = MatchPlan.Create(new SearchQuery { Pattern = "NEEDLE[0-9]", Path = ".", Regex = true, ForceScan = true });
@@ -294,6 +299,99 @@ public class RegexEngineTests
         Assert.Equal(
             ["a.txt:1:1:handle one", "a.txt:4:1:handle two", "a.txt:6:1:handle three"],
             all.Matches.Select(match => $"{match.Path}:{match.Line}:{match.Column}:{match.Text}").ToArray());
+    }
+
+    [Theory]
+    [InlineData("[a-z]+[0-9]+")]
+    [InlineData("[a-f][0-9][a-f]")]
+    [InlineData("[a-z]{2,4}[0-9]")]
+    [InlineData(@"\d+\s\d+")]
+    [InlineData("[a-z][a-z][a-z]")]
+    [InlineData("^[a-z]+[0-9]+$")]
+    [InlineData(@"\b[a-z]+[0-9]+")]
+    [InlineData(@"[a-z]+[0-9]+\z")]
+    public void Anchorless_or_anchored_pike_programs_get_a_dfa_filter(string pattern)
+    {
+        Assert.True(ByteAutomaton.TryCompile(pattern, new ByteAutomaton.Options(false, false), out var program), pattern);
+        Assert.IsType<DfaProgram>(program);
+    }
+
+    [Theory]
+    [InlineData(@"[a-z]+[0-9]+\Z")]  // \Z needs one byte of lookahead
+    [InlineData("handle[a-z]+[0-9]+")]   // a literal prefix already scans with SIMD
+    public void Lookahead_or_prefixed_pike_programs_keep_the_vm_alone(string pattern)
+    {
+        Assert.True(ByteAutomaton.TryCompile(pattern, new ByteAutomaton.Options(false, false), out var program), pattern);
+        Assert.IsType<PikeProgram>(program);
+    }
+
+    [Theory]
+    [InlineData("[a-z]+[0-9]+", "abc123 def456", new[] { "0:6:abc123", "7:6:def456" })]
+    [InlineData("[a-z]+[0-9]+", "no digits here", new string[0])]
+    [InlineData("[a-f][0-9][a-f]", "xxa1bx xz9xqx", new[] { "2:3:a1b" })]
+    [InlineData(@"\d+\s\d+", "1 2 3", new[] { "0:3:1 2" })]
+    public void Dfa_filter_reports_the_same_spans_as_the_net_engine(string pattern, string text, string[] expected)
+    {
+        var bytes = Encoding.ASCII.GetBytes(text);
+        var options = RegexOptions.CultureInvariant | RegexOptions.Multiline | RegexOptions.NonBacktracking;
+        var regex = new Regex(pattern, options, TimeSpan.FromSeconds(5));
+        var reference = new List<string>();
+        foreach (var match in regex.EnumerateMatches(text))
+        {
+            reference.Add($"{match.Index}:{match.Length}:{text.Substring(match.Index, match.Length)}");
+        }
+
+        Assert.Equal(expected, reference);
+
+        Assert.True(ByteAutomaton.TryCompile(pattern, new ByteAutomaton.Options(false, false), out var program), pattern);
+        Assert.IsType<DfaProgram>(program);
+        var hits = new List<ByteMatch>();
+        program.Collect(bytes, false, stopAtFirst: false, hits);
+        Assert.Equal(
+            expected,
+            hits.Select(hit => $"{hit.Index}:{hit.Length}:{text.Substring(hit.Index, hit.Length)}").ToArray());
+    }
+
+    [Theory]
+    [InlineData("^[a-z]+[0-9]+$", "abc123")]
+    [InlineData("^[a-z]+[0-9]+$", "xx\nabc123\nyy")]
+    [InlineData("^[a-z]+[0-9]+$", "abc123x")]
+    [InlineData("^[a-z]+[0-9]+$", "xabc123")]
+    [InlineData("^[a-z]+[0-9]+$", "abc\n123")]
+    [InlineData("^[a-z]+[0-9]+$", "\n\nabc123\n\n")]
+    [InlineData(@"\b[a-z]+[0-9]+", "xx abc123yy abc456")]
+    [InlineData(@"\b[a-z]+[0-9]+", "_abc1 abc2")]
+    [InlineData(@"[a-z]+[0-9]+\z", "xx abc123")]
+    [InlineData(@"[a-z]+[0-9]+\z", "xx abc123\n")]
+    public void Dfa_filter_agrees_with_the_net_engine_on_anchors(string pattern, string text)
+    {
+        AssertSameSpans(pattern, text);
+    }
+
+    private static void AssertSameSpans(string pattern, string text)
+    {
+        var bytes = Encoding.ASCII.GetBytes(text);
+        var options = RegexOptions.CultureInvariant | RegexOptions.Multiline | RegexOptions.NonBacktracking;
+        var regex = new Regex(pattern, options, TimeSpan.FromSeconds(5));
+        var expected = new List<string>();
+        foreach (var match in regex.EnumerateMatches(text))
+        {
+            // A hit that spans a newline is dropped by the engine unless -U is set.
+            if (match.Length > 0 && text.IndexOf('\n', match.Index, match.Length) >= 0)
+            {
+                continue;
+            }
+
+            expected.Add($"{match.Index}:{match.Length}:{text.Substring(match.Index, match.Length)}");
+        }
+
+        Assert.True(ByteAutomaton.TryCompile(pattern, new ByteAutomaton.Options(false, false), out var program), pattern);
+        Assert.IsType<DfaProgram>(program);
+        var hits = new List<ByteMatch>();
+        program.Collect(bytes, false, stopAtFirst: false, hits);
+        Assert.Equal(
+            expected,
+            hits.Select(hit => $"{hit.Index}:{hit.Length}:{text.Substring(hit.Index, hit.Length)}").ToArray());
     }
 
     private static SearchOutcome Search(string root, string pattern, int? maxCount = null, bool word = false) =>
