@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using Ngrep.Indexing;
 using Ngrep.Ignore;
 using Ngrep.Search;
 using Ngrep.Text;
@@ -93,13 +94,30 @@ try
 
     var tinyFiles = WriteTiny(tiny, dirs: 40, sub: 20, perDir: 15);
     var tinySingle = await TimeSingleFile(Path.Combine(tiny, "src", "d39", "s19", "f14.cs"), "token");
+
+    var buildClock = Stopwatch.StartNew();
+    var built = Indexer.Build(root);
+    buildClock.Stop();
+    var indexedHit = await TimeIndexed(root, "NEEDLE");
+    var indexedSelective = await TimeIndexed(root, "NEEDLE9");
+    var indexedMiss = await TimeIndexed(root, "unlikely-token-zz");
+    var indexCosts = TimeIndexParts(built.IndexPath);
     var tinyMiss = await TimeTiny(tiny, "unlikely-token-zz", ignore: true, quiet: false, list: false);
+    var tinyMiss1 = await TimeTiny(tiny, "unlikely-token-zz", ignore: true, quiet: false, list: false, workers: 1);
+    var tinyRead1 = TimeReadOnly(tiny);
     var tinyNoIgnore = await TimeTiny(tiny, "unlikely-token-zz", ignore: false, quiet: false, list: false);
     var tinyQuiet = await TimeTiny(tiny, "NEEDLE", ignore: true, quiet: true, list: false);
     var tinyList = await TimeTiny(tiny, "token", ignore: true, quiet: false, list: true);
     var walkMs = TimeWalk(tiny, gitignore: true);
     Console.WriteLine($"tiny_files={tinyFiles} tiny_root={tiny}");
     Print("tiny_single_file_scan", tinySingle);
+    Print("tiny_ignore_miss_1w", tinyMiss1);
+    Console.WriteLine($"tiny_read_only_1w_ms={tinyRead1:F1}");
+    Console.WriteLine($"index_build_ms={buildClock.Elapsed.TotalMilliseconds:F1} documents={built.Documents}");
+    Percent("indexed_hit", indexedHit);
+    Percent("indexed_selective", indexedSelective);
+    Percent("indexed_miss", indexedMiss);
+    Console.WriteLine($"index_parts {indexCosts}");
     Print("tiny_ignore_miss", tinyMiss);
     Print("tiny_noignore_miss", tinyNoIgnore);
     Print("tiny_quiet_hit", tinyQuiet);
@@ -432,14 +450,90 @@ static int WriteTiny(string root, int dirs, int sub, int perDir)
     return n;
 }
 
-static async Task<(double Ms, int Files, int Matches)> TimeTiny(string root, string pattern, bool ignore, bool quiet, bool list)
+static async Task<(double Ms, int Files, int Matches)> TimeTiny(string root, string pattern, bool ignore, bool quiet, bool list, int workers = 0)
 {
-    var query = TinyQuery(root, pattern, ignore, quiet, list);
+    var query = TinyQuery(root, pattern, ignore, quiet, list, workers);
     await Searcher.Search(query);
     var clock = Stopwatch.StartNew();
     var outcome = await Searcher.Search(query);
     clock.Stop();
     return (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.Matches.Count);
+}
+
+// Where a query spends it wins: the document table and the posting lists, measured apart.
+static string TimeIndexParts(string indexDirectory)
+{
+    var documents = Path.Combine(indexDirectory, "documents.ndjson");
+    var one = new HashSet<int> { 1 };
+    var none = new HashSet<int>();
+    var grams = new HashSet<string>(Trigrams.ForQuery("needle9"), StringComparer.Ordinal);
+    var docsOne = double.MaxValue;
+    var docsNone = double.MaxValue;
+    var postings = double.MaxValue;
+    for (var run = 0; run < 5; run++)
+    {
+        var clock = Stopwatch.StartNew();
+        IndexStore.ReadSearchDocuments(documents, one);
+        docsOne = Math.Min(docsOne, clock.Elapsed.TotalMilliseconds);
+
+        clock.Restart();
+        IndexStore.ReadSearchDocuments(documents, none);
+        docsNone = Math.Min(docsNone, clock.Elapsed.TotalMilliseconds);
+
+        clock.Restart();
+        IndexStore.TryLoadForSearch(indexDirectory, grams);
+        postings = Math.Min(postings, clock.Elapsed.TotalMilliseconds);
+    }
+
+    var size = new FileInfo(documents).Length;
+    return $"docs_1id_ms={docsOne:F2} docs_none_ms={docsNone:F2} postings_ms={postings:F2} docs_bytes={size}";
+}
+
+// The index path: trigram postings pick the candidates, so only those files are opened.
+static async Task<(double Ms, int Files, int Matches)> TimeIndexed(string root, string pattern)
+{
+    var query = new SearchQuery
+    {
+        Pattern = pattern,
+        Path = root,
+        MaxDegreeOfParallelism = Environment.ProcessorCount,
+    };
+    await Searcher.Search(query);
+    var best = (Ms: double.MaxValue, Files: 0, Matches: 0);
+    for (var run = 0; run < 5; run++)
+    {
+        var clock = Stopwatch.StartNew();
+        var outcome = await Searcher.Search(query);
+        clock.Stop();
+        if (clock.Elapsed.TotalMilliseconds < best.Ms)
+        {
+            best = (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.Matches.Count);
+        }
+    }
+
+    return best;
+}
+
+static void Percent(string name, (double Ms, int Files, int Matches) sample) =>
+    Console.WriteLine($"{name}_ms={sample.Ms:F1} files={sample.Files} matches={sample.Matches}");
+
+// The same files with only open, read, and close: the floor a search over them cannot beat.
+static double TimeReadOnly(string root)
+{
+    var best = double.MaxValue;
+    for (var run = 0; run < 3; run++)
+    {
+        var clock = Stopwatch.StartNew();
+        foreach (var file in TreeWalker.Enumerate(root, null, new WalkStats(), IgnorePolicy.All, includeHidden: false))
+        {
+            using var bytes = TextFiles.Read(file.FullPath, stop: null, searchBinary: false, CancellationToken.None);
+        }
+
+        clock.Stop();
+        best = Math.Min(best, clock.Elapsed.TotalMilliseconds);
+    }
+
+    return best;
 }
 
 static double TimeWalk(string root, bool gitignore)
@@ -457,7 +551,7 @@ static double TimeWalk(string root, bool gitignore)
     return clock.Elapsed.TotalMilliseconds;
 }
 
-static SearchQuery TinyQuery(string root, string pattern, bool ignore, bool quiet, bool list) => new()
+static SearchQuery TinyQuery(string root, string pattern, bool ignore, bool quiet, bool list, int workers = 0) => new()
 {
     Pattern = pattern,
     Path = root,
@@ -465,7 +559,7 @@ static SearchQuery TinyQuery(string root, string pattern, bool ignore, bool quie
     NoIgnore = !ignore,
     IncludeHidden = false,
     Report = quiet ? ReportMode.Quiet : list ? ReportMode.FilesWithMatches : ReportMode.Matches,
-    MaxDegreeOfParallelism = Environment.ProcessorCount,
+    MaxDegreeOfParallelism = workers > 0 ? workers : Environment.ProcessorCount,
 };
 
 static double TimeProcess(string bin, string[] argv)

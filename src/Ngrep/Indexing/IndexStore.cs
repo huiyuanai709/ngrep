@@ -227,6 +227,13 @@ internal static class IndexStore
     /// </summary>
     public static List<DocumentRecord> ReadSearchDocuments(string path, HashSet<int>? onlyIds)
     {
+        // Every candidate was filtered out, so no row can be materialized. The table
+        // is large (it carries line starts) and reading it is pure cost for a miss.
+        if (onlyIds is { Count: 0 })
+        {
+            return [];
+        }
+
         var documents = new List<DocumentRecord>(onlyIds?.Count ?? 256);
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, FileOptions.SequentialScan);
         var chunk = ArrayPool<byte>.Shared.Rent(1 << 16);
