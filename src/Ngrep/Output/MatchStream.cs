@@ -255,8 +255,19 @@ internal static partial class MachineOutput
             var lines = LineIndex(matches, _presentation, _presentation.OnlyMatching);
             if (_presentation.OnlyMatching || matches.All(static match => match.Before == null && match.After == null))
             {
+                string? lastPath = null;
+                var lastWrittenLine = 0;
                 foreach (var match in matches)
                 {
+                    if (_presentation.OneRowPerLine
+                        && match.Line == lastWrittenLine
+                        && string.Equals(lastPath, match.Path, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    lastPath = match.Path;
+                    lastWrittenLine = match.Line;
                     EnsureHeading(match.Path);
                     WriteMatchLine(match, MatchBody(match, lines, _presentation, _presentation.OnlyMatching), _presentation, includePath: _presentation.WithFilename && !_useHeading, colorizeBody: _presentation.Replacer == null);
                 }
@@ -273,9 +284,20 @@ internal static partial class MachineOutput
             var path = matches[0].Path;
             var lastLine = 0;
             var printed = false;
+            string? lastMatchPath = null;
+            var lastMatchLine = 0;
             EnsureHeading(path);
             foreach (var match in matches)
             {
+                if (_presentation.OneRowPerLine
+                    && match.Line == lastMatchLine
+                    && string.Equals(lastMatchPath, match.Path, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                lastMatchPath = match.Path;
+                lastMatchLine = match.Line;
                 if (match.Before == null && match.After == null)
                 {
                     WriteMatchLine(match, MatchBody(match, lines, _presentation, onlyMatching: false), _presentation, includePath: _presentation.WithFilename && !_useHeading, colorizeBody: _presentation.Replacer == null);

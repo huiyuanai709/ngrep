@@ -15,7 +15,7 @@ public class MaxCountTests
 
         var scan = Run("-F", "-m", "1", "alpha", tree.Root, "--scan", "-j", "1");
         Assert.Equal(ExitCodes.Success, scan.Code);
-        Assert.Equal("a.txt:1:1:alpha\nb.txt:1:1:alpha alpha\nb.txt:1:7:alpha alpha", scan.Stdout.Trim());
+        Assert.Equal("a.txt:1:1:alpha\nb.txt:1:1:alpha alpha", scan.Stdout.Trim());
 
         Indexer.Build(tree.Root);
         var indexed = Run("-F", "--max-count", "1", "alpha", tree.Root, "-j", "1");

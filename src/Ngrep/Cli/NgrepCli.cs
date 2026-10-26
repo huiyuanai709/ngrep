@@ -687,6 +687,12 @@ internal static class NgrepCli
                 casing.PerPattern);
         }
 
+        var oneRowPerLine = parsedFormat == OutputFormat.Text
+            && report == ReportMode.Matches
+            && !result.GetValue(onlyMatching)
+            && !result.GetValue(vimgrep)
+            && replacer == null;
+
         SearchPresentation Present(bool heading) => new(
             report,
             result.GetValue(onlyMatching),
@@ -696,7 +702,8 @@ internal static class NgrepCli
             showColumn,
             result.GetValue(nullPaths),
             replacer,
-            showFilename);
+            showFilename,
+            oneRowPerLine);
 
         var autoHeading = parsedFormat == OutputFormat.Text
             && report == ReportMode.Matches

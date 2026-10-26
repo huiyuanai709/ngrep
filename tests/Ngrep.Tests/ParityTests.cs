@@ -548,7 +548,7 @@ public class ParityTests
         using var capture = new Capture();
         Assert.Equal(ExitCodes.Success, NgrepCli.Run(["netgrep", tree.Root, "--stats", "-j", "1"]).GetAwaiter().GetResult());
         Assert.Equal(
-            "a.txt:1:1:netgrep netgrep\na.txt:1:9:netgrep netgrep\n",
+            "a.txt:1:1:netgrep netgrep\n",
             capture.Stdout.Replace("\r\n", "\n", StringComparison.Ordinal));
         Assert.Contains("files searched: 2", capture.Stderr, StringComparison.Ordinal);
         Assert.Contains("files matched: 1", capture.Stderr, StringComparison.Ordinal);

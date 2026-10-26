@@ -17,7 +17,8 @@ internal readonly record struct SearchPresentation(
     bool Column = true,
     bool NullPaths = false,
     LineReplacer? Replacer = null,
-    bool WithFilename = true);
+    bool WithFilename = true,
+    bool OneRowPerLine = false);
 
 internal static partial class MachineOutput
 {
@@ -266,8 +267,19 @@ internal static partial class MachineOutput
         HashSet<int>? fileMatches = null;
         var lastLine = 0;
         var printed = false;
+        string? lastMatchPath = null;
+        var lastMatchLine = 0;
         foreach (var match in matches)
         {
+            if (presentation.OneRowPerLine
+                && match.Line == lastMatchLine
+                && string.Equals(lastMatchPath, match.Path, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            lastMatchPath = match.Path;
+            lastMatchLine = match.Line;
             if (match.Before == null && match.After == null)
             {
                 EnsureHeading(match.Path);
