@@ -93,19 +93,100 @@ internal static class TreeWalker
     /// True when a content scan of <paramref name="walkRoot"/> would not yield <paramref name="fullPath"/>.
     /// Hidden names are included, so a path the user named is not rejected only for a leading dot.
     /// Symlinks are not yielded, so a named symlink is treated as not searched.
+    /// Only the path's own components are examined: the tree is not listed, which keeps a
+    /// search of one named file from costing a walk of its whole parent directory.
     /// </summary>
     public static bool IsIgnoredFile(string walkRoot, string fullPath, IgnorePolicy? policy = null)
     {
-        var stats = new WalkStats();
-        foreach (var file in Enumerate(walkRoot, indexDirectory: null, stats, policy, includeHidden: true))
+        var chosen = policy ?? IgnorePolicy.All;
+        var root = CreateRoot(walkRoot, chosen);
+        var target = Path.GetFullPath(fullPath);
+        var relative = Path.GetRelativePath(root.Full, target).Replace('\\', '/');
+        if (relative is "" or "." || Path.IsPathRooted(relative) || relative == ".."
+            || relative.StartsWith("../", StringComparison.Ordinal))
         {
-            if (string.Equals(file.FullPath, fullPath, StringComparison.Ordinal))
-            {
-                return false;
-            }
+            return true;
         }
 
-        return true;
+        // The walk reads a listed directory's ignore files before it checks that
+        // directory's entries, so the root's files come first and each level adds its own.
+        var ignores = AddDirectoryIgnoreFiles(root.Ignores, root.Full, root.ScopeRelative, chosen);
+        var scope = root.ScopeRelative;
+        var dir = root.Full;
+        var parts = relative.Split('/');
+        for (var i = 0; i < parts.Length; i++)
+        {
+            var name = parts[i];
+            var last = i == parts.Length - 1;
+            var full = Path.Join(dir, name);
+            var kind = KindOfPath(full);
+            if (kind == DirentKind.Other)
+            {
+                return true;
+            }
+
+            // The walk never yields links or directories here: this check is the default walk.
+            if (kind == DirentKind.Symlink || (last && kind == DirentKind.Directory))
+            {
+                return true;
+            }
+
+            if (kind == DirentKind.Directory && name is ".git" or ".ngrep")
+            {
+                return true;
+            }
+
+            scope = JoinRelative(scope, name);
+            // Ignored directories are never entered, so no ancestor is re-tested.
+            if (ignores.IsIgnored(scope, isDirectory: !last, checkParents: false))
+            {
+                return true;
+            }
+
+            if (last)
+            {
+                break;
+            }
+
+            dir = full;
+            ignores = AddDirectoryIgnoreFiles(ignores, dir, scope, chosen);
+        }
+
+        return false;
+    }
+
+    private static IgnoreStack AddDirectoryIgnoreFiles(IgnoreStack ignores, string directory, string scopeRelative, IgnorePolicy policy)
+    {
+        if (policy.Vcs)
+        {
+            ignores = TryAddIfExists(ignores, Path.Join(directory, ".gitignore"), IgnoreSource.Git, scopeRelative);
+        }
+
+        if (policy.Custom)
+        {
+            ignores = TryAddIfExists(ignores, Path.Join(directory, ".ignore"), IgnoreSource.DotIgnore, scopeRelative);
+            ignores = TryAddIfExists(ignores, Path.Join(directory, ".rgignore"), IgnoreSource.RgIgnore, scopeRelative);
+        }
+
+        return ignores;
+    }
+
+    private static DirentKind KindOfPath(string full)
+    {
+        try
+        {
+            var attributes = File.GetAttributes(full);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                return DirentKind.Symlink;
+            }
+
+            return (attributes & FileAttributes.Directory) != 0 ? DirentKind.Directory : DirentKind.File;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return DirentKind.Other;
+        }
     }
 
     /// <summary>

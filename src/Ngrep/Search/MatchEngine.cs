@@ -351,14 +351,15 @@ internal sealed class MatchPlan
 
         // An ASCII pattern matches the same bytes in UTF-8 and 0x0A never appears inside
         // a multi-byte sequence, so the line and the hit are real. Only the column needs
-        // characters instead of bytes, and only on the lines that hold non-ASCII text.
-        var ascii = Ascii.IsValid(bytes);
-        if (!ascii && !System.Text.Unicode.Utf8.IsValid(bytes))
+        // characters instead of bytes, and only on the lines that hold non-ASCII text;
+        // each hit line is checked on its own instead of the whole file.
+        var before = matches.Count;
+        if (!EmitByteHits(bytes, relativePath, hits!, matches, plan.MaxCount))
         {
+            matches.RemoveRange(before, matches.Count - before);
             return false;
         }
 
-        EmitByteHits(bytes, relativePath, hits, matches, plan.MaxCount, ascii);
         matched = true;
         return true;
     }
@@ -457,7 +458,11 @@ internal sealed class MatchPlan
             if (plan.StopAtFirst && earliest != null)
             {
                 hits!.Add(earliest.Value);
-                EmitByteHits(bytes, relativePath, hits, matches, plan.MaxCount);
+                if (!EmitByteHits(bytes, relativePath, hits, matches, plan.MaxCount))
+                {
+                    return false;
+                }
+
                 matched = true;
                 return true;
             }
@@ -478,7 +483,7 @@ internal sealed class MatchPlan
         return true;
     }
 
-    private static void EmitByteHits(ReadOnlySpan<byte> bytes, string relativePath, List<Hit> hits, List<SearchMatch> matches, int? maxLines = null, bool ascii = true)
+    private static bool EmitByteHits(ReadOnlySpan<byte> bytes, string relativePath, List<Hit> hits, List<SearchMatch> matches, int? maxLines = null)
     {
         hits.Sort(static (left, right) =>
         {
@@ -488,16 +493,14 @@ internal sealed class MatchPlan
         var lineNo = 1;
         var cursor = 0;
         var sharedStart = -1;
+        var sharedAscii = true;
         string? sharedText = null;
         var budget = new LineBudget(maxLines);
         foreach (var hit in Dedup(hits))
         {
-            var lineStart = hit.Index;
-            while (lineStart > 0 && bytes[lineStart - 1] != (byte)'\n')
-            {
-                lineStart--;
-            }
-
+            // LastIndexOf and IndexOf scan vectorized; a byte loop costs a minified line.
+            var newline = bytes[..hit.Index].LastIndexOf((byte)'\n');
+            var lineStart = newline < 0 ? 0 : newline + 1;
             lineNo += bytes[cursor..lineStart].Count((byte)'\n');
             cursor = lineStart;
             if (!budget.Allow(lineNo))
@@ -505,12 +508,8 @@ internal sealed class MatchPlan
                 break;
             }
 
-            var end = lineStart;
-            while (end < bytes.Length && bytes[end] != (byte)'\n')
-            {
-                end++;
-            }
-
+            var rel = bytes[lineStart..].IndexOf((byte)'\n');
+            var end = rel < 0 ? bytes.Length : lineStart + rel;
             var textEnd = end;
             if (textEnd > lineStart && bytes[textEnd - 1] == (byte)'\r')
             {
@@ -520,10 +519,17 @@ internal sealed class MatchPlan
             if (sharedText == null || lineStart != sharedStart)
             {
                 sharedStart = lineStart;
-                sharedText = Encoding.UTF8.GetString(bytes[lineStart..textEnd]);
+                var lineSpan = bytes[lineStart..Math.Max(lineStart, textEnd)];
+                sharedAscii = Ascii.IsValid(lineSpan);
+                if (!sharedAscii && !System.Text.Unicode.Utf8.IsValid(lineSpan))
+                {
+                    return false;
+                }
+
+                sharedText = Encoding.UTF8.GetString(lineSpan);
             }
 
-            var column = ascii ? hit.Index - lineStart + 1 : TextFiles.Column(bytes, lineStart, hit.Index);
+            var column = sharedAscii ? hit.Index - lineStart + 1 : TextFiles.Column(bytes, lineStart, hit.Index);
             matches.Add(new SearchMatch(
                 relativePath,
                 lineNo,
@@ -534,6 +540,8 @@ internal sealed class MatchPlan
                 null,
                 hit.Index));
         }
+
+        return true;
     }
 
     public static void Collect(string text, string relativePath, MatchPlan plan, List<SearchMatch> matches)

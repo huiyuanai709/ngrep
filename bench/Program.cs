@@ -18,10 +18,14 @@ var largeBytes = 8 * 1024 * 1024;
 var root = Directory.CreateTempSubdirectory("ngrep-bench-").FullName;
 var largeRoot = Path.Combine(root, "large");
 var tiny = Directory.CreateTempSubdirectory("ngrep-bench-tiny-").FullName;
+// One 31 MiB file, the largest the reader accepts: a first-line hit confirms over
+// the whole file, and a stopped read of it shows the map-then-scan path.
+var oneBig = Directory.CreateTempSubdirectory("ngrep-bench-onebig-").FullName;
 try
 {
     WriteSmall(root, files, smallBytes);
     WriteLarge(largeRoot, largeCount, largeBytes);
+    WriteLarge(oneBig, 1, 31 * 1024 * 1024);
 
     ScannerThroughput();
     var miss = await Time(root, "unlikely-token-zz", regex: false);
@@ -32,8 +36,12 @@ try
     var largeConfirm = await Time(largeRoot, "NEEDLE", regex: false);
     var largeRegex = await Time(largeRoot, "NEEDLE[0-9]", regex: true);
     var classMiss = await Time(largeRoot, "[abc]{8}", regex: true);
+    var singleFile = await TimeSingleFile(Path.Combine(root, $"d{(files - 1) % 20}", $"f{files - 1}.ts"), "NEEDLE");
+    var largeListMiss = await Time(oneBig, "unlikely-token-zz", regex: false, filesWithMatches: true, workers: 1, runs: 5);
+    var largeEarlyConfirm = await Time(oneBig, "EARLY", regex: false, workers: 1, runs: 5);
 
     Console.WriteLine("measure=in-process paired=yes");
+    Console.WriteLine("new_rows=best_of_5");
     Console.WriteLine($"small_files={files} bytes_each={smallBytes} total_mib={files * (long)smallBytes / (1024 * 1024)}");
     Print("literal_miss", miss);
     Print("literal_confirm", confirm);
@@ -44,6 +52,9 @@ try
     Print("large_regex", largeRegex);
     Print("regex_class_miss", classMiss);
     Print("files_with_matches", listed);
+    Print("single_file_scan", singleFile);
+    Print("large_list_miss", largeListMiss);
+    Print("large_early_confirm", largeEarlyConfirm);
 
     var rg = Which("rg", "/exec-daemon/rg");
     var grep = Which("grep");
@@ -81,12 +92,14 @@ try
     }
 
     var tinyFiles = WriteTiny(tiny, dirs: 40, sub: 20, perDir: 15);
+    var tinySingle = await TimeSingleFile(Path.Combine(tiny, "src", "d39", "s19", "f14.cs"), "token");
     var tinyMiss = await TimeTiny(tiny, "unlikely-token-zz", ignore: true, quiet: false, list: false);
     var tinyNoIgnore = await TimeTiny(tiny, "unlikely-token-zz", ignore: false, quiet: false, list: false);
     var tinyQuiet = await TimeTiny(tiny, "NEEDLE", ignore: true, quiet: true, list: false);
     var tinyList = await TimeTiny(tiny, "token", ignore: true, quiet: false, list: true);
     var walkMs = TimeWalk(tiny, gitignore: true);
     Console.WriteLine($"tiny_files={tinyFiles} tiny_root={tiny}");
+    Print("tiny_single_file_scan", tinySingle);
     Print("tiny_ignore_miss", tinyMiss);
     Print("tiny_noignore_miss", tinyNoIgnore);
     Print("tiny_quiet_hit", tinyQuiet);
@@ -107,6 +120,7 @@ finally
 {
     Directory.Delete(root, recursive: true);
     Directory.Delete(tiny, recursive: true);
+    Directory.Delete(oneBig, recursive: true);
 }
 
 static void Print(string name, (double Ms, int Files, int Matches) sample) =>
@@ -224,17 +238,26 @@ static void WriteLarge(string root, int count, int bytesEach)
     }
 }
 
-static async Task<(double Ms, int Files, int Matches)> Time(string root, string pattern, bool regex, bool filesWithMatches = false)
+static async Task<(double Ms, int Files, int Matches)> Time(string root, string pattern, bool regex, bool filesWithMatches = false, int workers = 0, int runs = 1)
 {
-    var query = Query(root, pattern, regex, filesWithMatches);
+    var query = Query(root, pattern, regex, filesWithMatches, workers);
     await Searcher.Search(query);
-    var clock = Stopwatch.StartNew();
-    var outcome = await Searcher.Search(query);
-    clock.Stop();
-    return (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.Matches.Count);
+    var best = (Ms: double.MaxValue, Files: 0, Matches: 0);
+    for (var run = 0; run < runs; run++)
+    {
+        var clock = Stopwatch.StartNew();
+        var outcome = await Searcher.Search(query);
+        clock.Stop();
+        if (clock.Elapsed.TotalMilliseconds < best.Ms)
+        {
+            best = (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.Matches.Count);
+        }
+    }
+
+    return best;
 }
 
-static SearchQuery Query(string root, string pattern, bool regex, bool filesWithMatches) => new()
+static SearchQuery Query(string root, string pattern, bool regex, bool filesWithMatches, int workers) => new()
 {
     Pattern = pattern,
     Path = root,
@@ -243,8 +266,36 @@ static SearchQuery Query(string root, string pattern, bool regex, bool filesWith
     NoIgnore = true,
     IncludeHidden = true,
     Report = filesWithMatches ? ReportMode.FilesWithMatches : ReportMode.Matches,
-    MaxDegreeOfParallelism = Environment.ProcessorCount,
+    MaxDegreeOfParallelism = workers > 0 ? workers : Environment.ProcessorCount,
 };
+
+// A named file keeps the ignore policy on, which is the path that used to enumerate
+// the whole parent tree to decide whether the one file is ignored.
+static async Task<(double Ms, int Files, int Matches)> TimeSingleFile(string file, string pattern)
+{
+    var query = new SearchQuery
+    {
+        Pattern = pattern,
+        Path = file,
+        ForceScan = true,
+        Report = ReportMode.FilesWithMatches,
+        MaxDegreeOfParallelism = 1,
+    };
+    await Searcher.Search(query);
+    var best = (Ms: double.MaxValue, Files: 0, Matches: 0);
+    for (var run = 0; run < 5; run++)
+    {
+        var clock = Stopwatch.StartNew();
+        var outcome = await Searcher.Search(query);
+        clock.Stop();
+        if (clock.Elapsed.TotalMilliseconds < best.Ms)
+        {
+            best = (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.Matches.Count);
+        }
+    }
+
+    return best;
+}
 
 static string? Which(string name, params string[] preferred)
 {

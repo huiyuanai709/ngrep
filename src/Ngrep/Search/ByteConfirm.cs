@@ -316,44 +316,51 @@ internal static class ByteConfirm
             return true;
         }
 
-        // An ASCII needle matches the same bytes in UTF-8, so the hit is real. Byte
-        // offsets stop being character offsets at the first non-ASCII byte; that line's
-        // column is counted in characters instead of decoding the whole file again.
-        var ascii = Ascii.IsValid(span);
-        if (!ascii && !System.Text.Unicode.Utf8.IsValid(span))
-        {
-            return false;
-        }
-
+        var before = matches.Count;
         // One hit per file is the common confirm. Counting newlines up to that
         // hit avoids building a line-start table for the rest of the file.
         if (!plan.WantsContext && hits.Count == 1)
         {
-            EmitOne(span, relativePath, hits[0], matches, ascii, plan.NeedLineText || plan.NeedMatchText);
-            return true;
+            return EmitOne(span, relativePath, hits[0], matches, plan);
         }
 
         var starts = LineStarts(span);
         var lineCount = span.Length == 0 ? 0 : span[^1] == (byte)'\n' ? starts.Length - 1 : starts.Length;
         // Hits are in order. A minified line can contain the needle thousands of times;
-        // one string (and one context pair) is shared by every hit on that line.
+        // one string (and one context pair) is shared by every hit on that line, and only
+        // that line is checked for UTF-8 validity. An ASCII needle matches the same bytes
+        // in UTF-8, and 0x0A never appears inside a multi-byte sequence, so the hit is real.
+        // Byte offsets stop being character offsets on a non-ASCII line, and only that
+        // line's column is counted in characters.
         var sharedLine = 0;
+        var sharedStart = 0;
+        var sharedAscii = true;
         string? sharedText = null;
         IReadOnlyList<ContextLine>? sharedBefore = null;
         IReadOnlyList<ContextLine>? sharedAfter = null;
         foreach (var hit in hits)
         {
             var (line, column) = LineMap.Map(starts, hit.Index);
-            if (!ascii)
-            {
-                column = TextFiles.Column(span, LineStart(starts, line), hit.Index);
-            }
-
             if (sharedText == null || line != sharedLine)
             {
                 sharedLine = line;
-                sharedText = plan.NeedLineText ? LineText(span, starts, line) : "";
+                sharedStart = LineStart(starts, line);
+                var (textStart, textEnd) = LineBounds(span, starts, line);
+                var lineSpan = span[textStart..textEnd];
+                sharedAscii = Ascii.IsValid(lineSpan);
+                if (!sharedAscii && !System.Text.Unicode.Utf8.IsValid(lineSpan))
+                {
+                    matches.RemoveRange(before, matches.Count - before);
+                    return false;
+                }
+
+                sharedText = plan.NeedLineText ? Text(lineSpan) : "";
                 (sharedBefore, sharedAfter) = Context(span, starts, lineCount, line, plan);
+            }
+
+            if (!sharedAscii)
+            {
+                column = TextFiles.Column(span, sharedStart, hit.Index);
             }
 
             matches.Add(new SearchMatch(
@@ -370,38 +377,39 @@ internal static class ByteConfirm
         return true;
     }
 
-    private static void EmitOne(ReadOnlySpan<byte> span, string relativePath, Hit hit, List<SearchMatch> matches, bool ascii, bool needText)
+    private static bool EmitOne(ReadOnlySpan<byte> span, string relativePath, Hit hit, List<SearchMatch> matches, MatchPlan plan)
     {
         var index = hit.Index;
         var line = 1 + span[..index].Count((byte)'\n');
-        var start = index;
-        while (start > 0 && span[start - 1] != (byte)'\n')
-        {
-            start--;
-        }
-
-        var end = index + hit.Length;
-        while (end < span.Length && span[end] != (byte)'\n')
-        {
-            end++;
-        }
-
+        var newline = span[..index].LastIndexOf((byte)'\n');
+        var start = newline < 0 ? 0 : newline + 1;
+        var rel = span[(index + hit.Length)..].IndexOf((byte)'\n');
+        var end = rel < 0 ? span.Length : index + hit.Length + rel;
         var textEnd = end;
         if (textEnd > start && span[textEnd - 1] == (byte)'\r')
         {
             textEnd--;
         }
 
+        var lineSpan = span[start..Math.Max(start, textEnd)];
+        var ascii = Ascii.IsValid(lineSpan);
+        if (!ascii && !System.Text.Unicode.Utf8.IsValid(lineSpan))
+        {
+            return false;
+        }
+
+        var needText = plan.NeedLineText || plan.NeedMatchText;
         var column = ascii ? index - start + 1 : TextFiles.Column(span, start, index);
         matches.Add(new SearchMatch(
             relativePath,
             line,
             column,
             needText ? Text(span.Slice(index, hit.Length)) : "",
-            needText ? Text(span[start..textEnd]) : "",
+            needText ? Text(lineSpan) : "",
             null,
             null,
             index));
+        return true;
     }
 
     /// <summary>
@@ -481,26 +489,36 @@ internal static class ByteConfirm
 
     private static int[] LineStarts(ReadOnlySpan<byte> span)
     {
-        var count = 1;
-        foreach (var value in span)
-        {
-            if (value == (byte)'\n')
-            {
-                count++;
-            }
-        }
-
-        var starts = new int[count];
+        // Count is vectorized; the second pass only visits newlines, not every byte.
+        var starts = new int[1 + span.Count((byte)'\n')];
         var n = 1;
-        for (var i = 0; i < span.Length; i++)
+        var from = 0;
+        while (true)
         {
-            if (span[i] == (byte)'\n')
+            var rel = span[from..].IndexOf((byte)'\n');
+            if (rel < 0)
             {
-                starts[n++] = i + 1;
+                break;
             }
+
+            from += rel + 1;
+            starts[n++] = from;
         }
 
         return starts;
+    }
+
+    /// <summary>Line text bounds after the trailing CR is dropped. <c>End</c> is exclusive.</summary>
+    private static (int Start, int End) LineBounds(ReadOnlySpan<byte> span, int[] starts, int line)
+    {
+        var start = LineStart(starts, line);
+        var end = line < starts.Length ? starts[line] - 1 : span.Length;
+        if (end > start && span[end - 1] == (byte)'\r')
+        {
+            end--;
+        }
+
+        return (start, end < start ? start : end);
     }
 
     private static string LineText(ReadOnlySpan<byte> span, int[] starts, int line)
@@ -510,18 +528,7 @@ internal static class ByteConfirm
             return "";
         }
 
-        var start = starts[line - 1];
-        var end = line < starts.Length ? starts[line] - 1 : span.Length;
-        if (end > start && span[end - 1] == (byte)'\r')
-        {
-            end--;
-        }
-
-        if (end < start)
-        {
-            end = start;
-        }
-
+        var (start, end) = LineBounds(span, starts, line);
         return Text(span[start..end]);
     }
 
