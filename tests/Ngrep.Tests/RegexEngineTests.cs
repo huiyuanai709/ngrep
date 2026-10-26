@@ -261,6 +261,41 @@ public class RegexEngineTests
         Assert.Equal(2, word.Matches.Count);
     }
 
+    [Fact]
+    public void Count_report_counts_a_prefiltered_regex_once_per_line()
+    {
+        using var tree = new TempDir();
+        File.WriteAllText(tree.File("a.txt"), "handle one handle two\nnope\nhandle three\n");
+        File.WriteAllText(tree.File("b.txt"), "nope\n");
+
+        using var capture = new Capture();
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run([@"handle\w*", tree.Root, "-c", "-E", "-j", "1"]).GetAwaiter().GetResult());
+        Assert.Equal("a.txt:2", capture.Stdout.Trim());
+
+        // -m caps the counted lines, not the hits on them.
+        capture.Clear();
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run([@"handle\w*", tree.Root, "-c", "-E", "-m", "1", "-j", "1"]).GetAwaiter().GetResult());
+        Assert.Equal("a.txt:1", capture.Stdout.Trim());
+
+        // --stats still reports every hit, so that path keeps the full match scan.
+        capture.Clear();
+        Assert.Equal(ExitCodes.Success, NgrepCli.Run([@"handle\w*", tree.Root, "-c", "-E", "--stats", "-j", "1"]).GetAwaiter().GetResult());
+        Assert.Equal("a.txt:2", capture.Stdout.Trim());
+        Assert.Contains("matches: 3", capture.Stderr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Prefiltered_regex_keeps_line_numbers_across_gaps()
+    {
+        using var tree = new TempDir();
+        File.WriteAllText(tree.File("a.txt"), "handle one\nnope\nnope\nhandle two\nnope\nhandle three\n");
+
+        var all = Search(tree.Root, @"\bhandle\s+\w+");
+        Assert.Equal(
+            ["a.txt:1:1:handle one", "a.txt:4:1:handle two", "a.txt:6:1:handle three"],
+            all.Matches.Select(match => $"{match.Path}:{match.Line}:{match.Column}:{match.Text}").ToArray());
+    }
+
     private static SearchOutcome Search(string root, string pattern, int? maxCount = null, bool word = false) =>
         Searcher.Search(new SearchQuery
         {

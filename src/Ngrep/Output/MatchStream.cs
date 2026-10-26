@@ -15,6 +15,10 @@ internal static partial class MachineOutput
         private readonly OutputFormat _format;
         private readonly SearchPresentation _presentation;
         private readonly bool _holdAutoHeading;
+        // Text records for one file are buffered here and written in bulk. Flushed at a
+        // bounded size so a file with many hits does not hold its whole output in memory.
+        private readonly StringBuilder _sink = new(1 << 16);
+        private const int SinkFlush = 1 << 16;
         private bool _useHeading;
         private List<SearchMatch>? _held;
         private string? _headingPath;
@@ -269,9 +273,11 @@ internal static partial class MachineOutput
                     lastPath = match.Path;
                     lastWrittenLine = match.Line;
                     EnsureHeading(match.Path);
-                    WriteMatchLine(match, MatchBody(match, lines, _presentation, _presentation.OnlyMatching), _presentation, includePath: _presentation.WithFilename && !_useHeading, colorizeBody: _presentation.Replacer == null);
+                    WriteMatchLine(match, MatchBody(match, lines, _presentation, _presentation.OnlyMatching), _presentation, includePath: _presentation.WithFilename && !_useHeading, colorizeBody: _presentation.Replacer == null, _sink);
+                    MaybeFlushSink();
                 }
 
+                FlushSink();
                 return;
             }
 
@@ -300,7 +306,8 @@ internal static partial class MachineOutput
                 lastMatchLine = match.Line;
                 if (match.Before == null && match.After == null)
                 {
-                    WriteMatchLine(match, MatchBody(match, lines, _presentation, onlyMatching: false), _presentation, includePath: _presentation.WithFilename && !_useHeading, colorizeBody: _presentation.Replacer == null);
+                    WriteMatchLine(match, MatchBody(match, lines, _presentation, onlyMatching: false), _presentation, includePath: _presentation.WithFilename && !_useHeading, colorizeBody: _presentation.Replacer == null, _sink);
+                    MaybeFlushSink();
                     continue;
                 }
 
@@ -308,7 +315,7 @@ internal static partial class MachineOutput
                 var upcoming = NextVisible(before, fileMatches, match.Line);
                 if (printed && upcoming > lastLine + 1)
                 {
-                    Console.WriteLine("--");
+                    _sink.Append("--").Append(Console.Out.NewLine);
                 }
 
                 foreach (var line in before)
@@ -318,12 +325,12 @@ internal static partial class MachineOutput
                         continue;
                     }
 
-                    WriteContextLine(match.Path, line.Line, line.Text, _presentation, includePath: _presentation.WithFilename && !_useHeading);
+                    WriteContextLine(match.Path, line.Line, line.Text, _presentation, includePath: _presentation.WithFilename && !_useHeading, _sink);
                     lastLine = line.Line;
                     printed = true;
                 }
 
-                WriteMatchLine(match, MatchBody(match, lines, _presentation, onlyMatching: false), _presentation, includePath: _presentation.WithFilename && !_useHeading, colorizeBody: _presentation.Replacer == null);
+                WriteMatchLine(match, MatchBody(match, lines, _presentation, onlyMatching: false), _presentation, includePath: _presentation.WithFilename && !_useHeading, colorizeBody: _presentation.Replacer == null, _sink);
                 if (match.Line > lastLine)
                 {
                     lastLine = match.Line;
@@ -337,10 +344,38 @@ internal static partial class MachineOutput
                         continue;
                     }
 
-                    WriteContextLine(match.Path, line.Line, line.Text, _presentation, includePath: _presentation.WithFilename && !_useHeading);
+                    WriteContextLine(match.Path, line.Line, line.Text, _presentation, includePath: _presentation.WithFilename && !_useHeading, _sink);
                     lastLine = line.Line;
                 }
+
+                MaybeFlushSink();
             }
+
+            FlushSink();
+        }
+
+        /// <summary>Writes buffered records once they reach a bounded size, keeping order.</summary>
+        private void MaybeFlushSink()
+        {
+            if (_sink.Length >= SinkFlush)
+            {
+                FlushSink();
+            }
+        }
+
+        private void FlushSink()
+        {
+            if (_sink.Length == 0)
+            {
+                return;
+            }
+
+            foreach (var chunk in _sink.GetChunks())
+            {
+                Console.Out.Write(chunk.Span);
+            }
+
+            _sink.Clear();
         }
 
         private void EnsureHeading(string path)
@@ -350,6 +385,8 @@ internal static partial class MachineOutput
                 return;
             }
 
+            // The heading is written directly, so buffered records must land first.
+            FlushSink();
             if (_headingStarted)
             {
                 Console.WriteLine();

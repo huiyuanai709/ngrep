@@ -404,36 +404,77 @@ internal sealed class MatchPlan
         }
 
         var countOnly = plan.Report == ReportMode.FilesWithoutMatch && !plan.CollectAll;
-        var hits = countOnly ? null : new List<Hit>();
-        var matchedLines = 0;
+        // -c in text output needs the matching line count, not the matches. IsMatch skips the
+        // span work that EnumerateMatches does (finding the start after the end), which is the
+        // largest cost of a match-dense regex. Word boundaries need the span, so that stays out.
+        var countLinesOnly = plan.Report == ReportMode.Count
+            && !plan.CollectAll
+            && !plan.Word
+            && !plan.NeedLineText
+            && !plan.NeedMatchText;
+        var lineHits = new List<Hit>(8);
+        var lineNo = 1;
+        var previousEnd = -1;
+        var linesEmitted = 0;
+        var limit = plan.MaxCount ?? int.MaxValue;
         foreach (var lineStart in lineStarts)
         {
-            var end = lineStart;
-            while (end < bytes.Length && bytes[end] != (byte)'\n')
+            // IndexOf scans the line vectorized; a byte loop costs the whole line.
+            var relative = bytes[lineStart..].IndexOf((byte)'\n');
+            var end = relative < 0 ? bytes.Length : lineStart + relative;
+
+            // Candidate lines are usually adjacent, so the line number is one more.
+            // A gap only happens when a line without a required literal is skipped.
+            if (previousEnd >= 0 && lineStart == previousEnd + 1)
             {
-                end++;
+                lineNo++;
+            }
+            else
+            {
+                // Count from the previous line's own newline, so a gap of N skipped
+                // lines adds N + 1.
+                lineNo += bytes[(previousEnd < 0 ? 0 : previousEnd)..lineStart].Count((byte)'\n');
             }
 
+            previousEnd = end;
             var textEnd = end;
             if (textEnd > lineStart && bytes[textEnd - 1] == (byte)'\r')
             {
                 textEnd--;
             }
 
+            // The file is ASCII, so this one decode serves both the regex and the printed line.
             var slice = Encoding.ASCII.GetString(bytes[lineStart..textEnd]);
-            if (countOnly)
+            if (countLinesOnly)
             {
-                if (SliceHits(slice, slice, 0, plan))
+                var hitsLine = false;
+                for (var i = 0; i < plan.Regexes.Length; i++)
                 {
-                    matched = true;
-                    return true;
+                    if (plan.Patterns[i].Length != 0 && plan.Regexes[i].IsMatch(slice))
+                    {
+                        hitsLine = true;
+                        break;
+                    }
                 }
 
+                if (!hitsLine)
+                {
+                    continue;
+                }
+
+                matched = true;
+                if (linesEmitted >= limit)
+                {
+                    break;
+                }
+
+                linesEmitted++;
+                // One record per matching line; -c prints only Line, so the texts stay empty.
+                matches.Add(new SearchMatch(relativePath, lineNo, 1, "", "", null, null, lineStart));
                 continue;
             }
 
-            Hit? earliest = null;
-            var beforeHits = hits!.Count;
+            lineHits.Clear();
             for (var i = 0; i < plan.Regexes.Length; i++)
             {
                 if (plan.Patterns[i].Length == 0)
@@ -448,46 +489,87 @@ internal sealed class MatchPlan
                         continue;
                     }
 
-                    var value = plan.NeedMatchText ? slice.Substring(match.Index, match.Length) : "";
-                    var hit = new Hit(lineStart + match.Index, match.Length, value);
-                    if (earliest == null || hit.Index < earliest.Value.Index || (hit.Index == earliest.Value.Index && hit.Length < earliest.Value.Length))
-                    {
-                        earliest = hit;
-                    }
-
-                    if (!plan.StopAtFirst)
-                    {
-                        hits!.Add(hit);
-                    }
+                    lineHits.Add(new Hit(match.Index, match.Length, ""));
                 }
             }
 
-            if (plan.StopAtFirst && earliest != null)
+            if (lineHits.Count == 0)
             {
-                hits!.Add(earliest.Value);
-                if (!EmitByteHits(bytes, relativePath, hits, matches, plan.MaxCount))
-                {
-                    return false;
-                }
+                continue;
+            }
 
-                matched = true;
+            matched = true;
+            if (countOnly)
+            {
                 return true;
             }
 
-            if (hits!.Count > beforeHits && plan.MaxCount is int maxLines && ++matchedLines >= maxLines)
+            if (linesEmitted >= limit)
             {
                 break;
             }
+
+            linesEmitted++;
+            EmitLineHits(slice, lineStart, lineNo, relativePath, plan, lineHits, matches);
+            if (plan.StopAtFirst)
+            {
+                return true;
+            }
         }
 
-        if (countOnly)
-        {
-            return true;
-        }
-
-        EmitByteHits(bytes, relativePath, hits!, matches, plan.MaxCount);
-        matched = hits!.Count > 0;
         return true;
+    }
+
+    /// <summary>
+    /// Appends one candidate line's hits in (index, length) order, dropping the duplicates
+    /// a second matching pattern produces. The line's byte start and number are already
+    /// known, so no hit is re-located and the decoded line is reused for the text.
+    /// </summary>
+    private static void EmitLineHits(
+        string slice,
+        int lineStart,
+        int lineNo,
+        string relativePath,
+        MatchPlan plan,
+        List<Hit> hits,
+        List<SearchMatch> matches)
+    {
+        if (hits.Count > 1)
+        {
+            hits.Sort(static (left, right) =>
+            {
+                var index = left.Index.CompareTo(right.Index);
+                return index != 0 ? index : left.Length.CompareTo(right.Length);
+            });
+        }
+
+        var lineText = plan.NeedLineText ? slice : "";
+        var lastIndex = -1;
+        var lastLength = -1;
+        foreach (var hit in hits)
+        {
+            if (hit.Index == lastIndex && hit.Length == lastLength)
+            {
+                continue;
+            }
+
+            lastIndex = hit.Index;
+            lastLength = hit.Length;
+            var value = plan.NeedMatchText ? slice.Substring(hit.Index, hit.Length) : "";
+            matches.Add(new SearchMatch(
+                relativePath,
+                lineNo,
+                hit.Index + 1,
+                value,
+                lineText,
+                null,
+                null,
+                lineStart + hit.Index));
+            if (plan.StopAtFirst)
+            {
+                return;
+            }
+        }
     }
 
     private static bool EmitByteHits(ReadOnlySpan<byte> bytes, string relativePath, List<Hit> hits, List<SearchMatch> matches, int? maxLines = null)

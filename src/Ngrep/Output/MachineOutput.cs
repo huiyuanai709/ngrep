@@ -335,11 +335,11 @@ internal static partial class MachineOutput
         }
     }
 
-    private static void WriteMatchLine(SearchMatch match, string body, SearchPresentation presentation, bool includePath, bool colorizeBody) =>
-        TextLayout.WriteMatch(match, body, presentation, includePath, colorizeBody);
+    private static void WriteMatchLine(SearchMatch match, string body, SearchPresentation presentation, bool includePath, bool colorizeBody, StringBuilder? sink = null) =>
+        TextLayout.WriteMatch(match, body, presentation, includePath, colorizeBody, sink);
 
-    private static void WriteContextLine(string path, int line, string text, SearchPresentation presentation, bool includePath) =>
-        TextLayout.WriteContext(path, line, text, presentation, includePath);
+    private static void WriteContextLine(string path, int line, string text, SearchPresentation presentation, bool includePath, StringBuilder? sink = null) =>
+        TextLayout.WriteContext(path, line, text, presentation, includePath, sink);
 
     private static string MatchBody(
         SearchMatch match,

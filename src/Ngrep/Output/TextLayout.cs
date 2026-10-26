@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using Ngrep.Search;
 
 namespace Ngrep.Output;
@@ -11,7 +12,7 @@ namespace Ngrep.Output;
 /// </summary>
 internal static class TextLayout
 {
-    public static void WriteMatch(SearchMatch match, string body, SearchPresentation presentation, bool includePath, bool colorizeBody)
+    public static void WriteMatch(SearchMatch match, string body, SearchPresentation presentation, bool includePath, bool colorizeBody, StringBuilder? sink = null)
     {
         if (colorizeBody && presentation.Color)
         {
@@ -27,10 +28,11 @@ internal static class TextLayout
             body,
             presentation.Color,
             presentation.NullPaths,
-            context: false);
+            context: false,
+            sink);
     }
 
-    public static void WriteContext(string path, int line, string text, SearchPresentation presentation, bool includePath)
+    public static void WriteContext(string path, int line, string text, SearchPresentation presentation, bool includePath, StringBuilder? sink = null)
     {
         WriteRecord(
             includePath ? path : null,
@@ -39,7 +41,8 @@ internal static class TextLayout
             text,
             presentation.Color,
             presentation.NullPaths,
-            context: true);
+            context: true,
+            sink);
     }
 
     public static void WriteHeading(string path, SearchPresentation presentation)
@@ -82,6 +85,9 @@ internal static class TextLayout
         Console.WriteLine();
     }
 
+    [ThreadStatic]
+    private static StringBuilder? _record;
+
     private static void WriteRecord(
         string? path,
         int? line,
@@ -89,9 +95,20 @@ internal static class TextLayout
         string body,
         bool color,
         bool nullPath,
-        bool context)
+        bool context,
+        StringBuilder? sink)
     {
         var separator = context ? "-" : ":";
+        // A record is a path, separators, and the body, then a newline. Console.Write locks
+        // the synchronized writer and encodes on every call, so a dense search that prints
+        // one line per match spent most of its time in ~6 calls per record. Build the record
+        // once and hand the writer a single buffer instead. A caller that passes a sink
+        // batches a whole file and writes it in bulk.
+        var record = sink ?? (_record ??= new StringBuilder(256));
+        if (sink == null)
+        {
+            record.Clear();
+        }
         var pending = false;
         var afterPath = false;
 
@@ -102,14 +119,14 @@ internal static class TextLayout
                 return;
             }
 
-            Console.Write(afterPath && nullPath ? "\0" : separator);
+            record.Append(afterPath && nullPath ? "\0" : separator);
             pending = false;
             afterPath = false;
         }
 
         if (path != null)
         {
-            WritePaint(path, color ? TextColor.Path : null);
+            Paint(record, path, color ? TextColor.Path : null);
             pending = true;
             afterPath = true;
         }
@@ -117,20 +134,35 @@ internal static class TextLayout
         if (line != null)
         {
             Break();
-            WritePaint(line.Value.ToString(CultureInfo.InvariantCulture), color ? TextColor.Line : null);
+            Paint(record, line.Value.ToString(CultureInfo.InvariantCulture), color ? TextColor.Line : null);
             pending = true;
         }
 
         if (column != null)
         {
             Break();
-            WritePaint(column.Value.ToString(CultureInfo.InvariantCulture), color ? TextColor.Column : null);
+            Paint(record, column.Value.ToString(CultureInfo.InvariantCulture), color ? TextColor.Column : null);
             pending = true;
         }
 
         Break();
-        Console.Write(body);
-        Console.WriteLine();
+        record.Append(body);
+        record.Append(Console.Out.NewLine);
+        if (sink == null)
+        {
+            Console.Out.Write(record);
+        }
+    }
+
+    private static void Paint(StringBuilder target, string text, string? color)
+    {
+        if (color == null)
+        {
+            target.Append(text);
+            return;
+        }
+
+        target.Append(color).Append(text).Append(TextColor.Reset);
     }
 
     private static void WritePaint(string text, string? color)

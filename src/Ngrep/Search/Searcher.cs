@@ -949,7 +949,7 @@ internal static class Searcher
         SearchTally tally,
         Stopwatch clock)
     {
-        matches.Sort(CompareMatches);
+        SortIfNeeded(matches);
         var filesWithout = NormalizeWithout(without);
         return new SearchOutcome
         {
@@ -1016,7 +1016,7 @@ internal static class Searcher
         {
             if (matches.Count > 1)
             {
-                matches.Sort(CompareMatches);
+                SortIfNeeded(matches);
             }
 
             var examined = job.Confirm && result.Examined;
@@ -1036,6 +1036,23 @@ internal static class Searcher
                 Matched = matched,
                 PrefilterMiss = !job.Confirm,
             });
+        }
+    }
+
+    /// <summary>
+    /// The byte and text confirm paths already emit hits in path, line, column order, which is
+    /// the order <see cref="CompareMatches"/> defines. A sort of tens of thousands of matches
+    /// then only re-checks an order that already holds, so scan first and sort only a disorder.
+    /// </summary>
+    private static void SortIfNeeded(List<SearchMatch> matches)
+    {
+        for (var i = 1; i < matches.Count; i++)
+        {
+            if (CompareMatches(matches[i - 1], matches[i]) > 0)
+            {
+                matches.Sort(CompareMatches);
+                return;
+            }
         }
     }
 
