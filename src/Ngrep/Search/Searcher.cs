@@ -543,7 +543,8 @@ internal static class Searcher
             return await ScanAndFinish(start, plan, workers, query, UnindexedPathNote, tally, clock);
         }
 
-        var degree = (stream != null ? jobs!.Count : files.Count) > 1 ? workers : 1;
+        var candidateCount = stream != null ? jobs!.Count : files.Count;
+        var degree = candidateCount > 1 ? Math.Min(workers, candidateCount) : 1;
         var stopOnMatch = plan.Report == ReportMode.Quiet && plan.StopAtFirst;
         if (stream != null)
         {
