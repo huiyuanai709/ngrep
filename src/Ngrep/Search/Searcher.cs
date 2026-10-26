@@ -445,6 +445,14 @@ internal static class Searcher
             selectedIds = ids;
         }
 
+        // Rows the trigrams rejected are never materialized, so a selective query does not
+        // parse the whole document table. Postings are already loaded at this point.
+        // --files-without-match has to name those rejected files, so it reads every row.
+        var onlyIds = plan.Report == ReportMode.FilesWithoutMatch ? null : selectedIds;
+        var documents = index.DocumentsFile is { } documentsFile
+            ? IndexStore.ReadSearchDocuments(documentsFile, onlyIds)
+            : index.Documents;
+
         var stream = query.Events?.Batch != null ? new StreamCount(query.Events) : null;
         var files = new List<ConfirmFile>();
         var jobs = stream != null ? new List<EmitJob>() : null;
@@ -468,7 +476,7 @@ internal static class Searcher
         // --ignore-file only removes paths. The index was built with the higher sources,
         // so a whitelist there still keeps the file and a lower rule cannot put a skipped file back.
         var extra = plan.Ignore.HasExtra ? TreeWalker.LoadStack(root, plan.Ignore, plan.IncludeHidden) : null;
-        foreach (var document in index.Documents)
+        foreach (var document in documents)
         {
             if (prefix.Length > 0 && !Under(document.Path, prefix, prefixIsFile))
             {
@@ -519,8 +527,10 @@ internal static class Searcher
             {
                 jobs!.Add(new EmitJob(true, file));
             }
-            else if (File.Exists(full))
+            else
             {
+                // Existence is checked by the worker, in parallel with the reads, and only
+                // until the first hit for -q. A serial stat here delayed every query.
                 files.Add(file);
             }
         }
@@ -552,7 +562,7 @@ internal static class Searcher
             files,
             degree,
             query.CancellationToken,
-            (file, local, token) => TryCollectAsync(file, plan, local, stats: null, without, tally, token, errorIfUnreadable: prefixIsFile, checkExists: false),
+            (file, local, token) => TryCollectAsync(file, plan, local, stats: null, without, tally, token, errorIfUnreadable: prefixIsFile, checkExists: true),
             stopOnMatch);
 
         return Finish(matches, usedIndex: true, note: null, degree, usedPrefilter, without, tally, clock);

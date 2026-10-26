@@ -50,7 +50,7 @@ internal static class IndexStore
             return null;
         }
 
-        return Read(dir, new IndexRead(grams));
+        return ReadForSearch(dir, grams);
     }
 
     private readonly struct IndexRead
@@ -182,6 +182,157 @@ internal static class IndexStore
             Documents = documents,
             Postings = postings,
         };
+    }
+
+    /// <summary>
+    /// Manifest and postings only. Document rows stay on disk until the caller knows
+    /// which ids the trigrams kept, so a selective query never parses the whole table.
+    /// </summary>
+    private static IndexData ReadForSearch(string directory, HashSet<string>? grams)
+    {
+        var manifestPath = Path.Combine(directory, "manifest.json");
+        var documentsPath = Path.Combine(directory, "documents.ndjson");
+        var postingsPath = Path.Combine(directory, "postings.bin");
+        if (!File.Exists(manifestPath) || !File.Exists(documentsPath) || !File.Exists(postingsPath))
+        {
+            throw new InvalidDataException($"Index at {directory} is incomplete.");
+        }
+
+        var manifest = ReadManifest(File.ReadAllText(manifestPath));
+        if (manifest.FormatVersion != IndexPaths.FormatVersion)
+        {
+            throw new InvalidDataException(
+                $"Unsupported index format version {manifest.FormatVersion}. This build reads version {IndexPaths.FormatVersion}.");
+        }
+
+        Dictionary<string, List<int>> postings;
+        using (var stream = File.OpenRead(postingsPath))
+        {
+            postings = ReadSelectedPostings(stream, grams);
+        }
+
+        return new IndexData
+        {
+            Manifest = manifest,
+            Directory = directory,
+            DocumentsFile = documentsPath,
+            Postings = postings,
+        };
+    }
+
+    /// <summary>
+    /// Ids and paths from <c>documents.ndjson</c>. Fields after <c>path</c> (size, mtime,
+    /// hash, line starts) are not read, and a record outside <paramref name="onlyIds"/> does
+    /// not become a string.
+    /// </summary>
+    public static List<DocumentRecord> ReadSearchDocuments(string path, HashSet<int>? onlyIds)
+    {
+        var documents = new List<DocumentRecord>(onlyIds?.Count ?? 256);
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, FileOptions.SequentialScan);
+        var chunk = ArrayPool<byte>.Shared.Rent(1 << 16);
+        var line = new ArrayBufferWriter<byte>(256);
+        try
+        {
+            int read;
+            while ((read = stream.Read(chunk, 0, chunk.Length)) > 0)
+            {
+                var span = chunk.AsSpan(0, read);
+                var offset = 0;
+                while (offset < span.Length)
+                {
+                    var newline = span[offset..].IndexOf((byte)'\n');
+                    if (newline < 0)
+                    {
+                        line.Write(span[offset..]);
+                        break;
+                    }
+
+                    line.Write(span.Slice(offset, newline));
+                    AddSearchDocument(documents, line.WrittenSpan, onlyIds);
+                    line.Clear();
+                    offset += newline + 1;
+                }
+            }
+
+            if (line.WrittenCount > 0)
+            {
+                AddSearchDocument(documents, line.WrittenSpan, onlyIds);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(chunk);
+        }
+
+        return documents;
+    }
+
+    private static void AddSearchDocument(List<DocumentRecord> documents, ReadOnlySpan<byte> line, HashSet<int>? onlyIds)
+    {
+        if (line.Length > 0 && line[^1] == (byte)'\r')
+        {
+            line = line[..^1];
+        }
+
+        if (line.IsEmpty)
+        {
+            return;
+        }
+
+        var reader = new Utf8JsonReader(line, isFinalBlock: true, state: default);
+        if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject)
+        {
+            throw new InvalidDataException("documents.ndjson contains an invalid record.");
+        }
+
+        var id = -1;
+        string? path = null;
+        try
+        {
+            while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
+            {
+                if (reader.ValueTextEquals("id"u8))
+                {
+                    reader.Read();
+                    id = reader.GetInt32();
+                    continue;
+                }
+
+                if (reader.ValueTextEquals("path"u8))
+                {
+                    reader.Read();
+                    // A filtered-out id still has to be parsed, but not materialized.
+                    if (onlyIds == null || onlyIds.Contains(id))
+                    {
+                        path = reader.GetString();
+                    }
+
+                    break;
+                }
+
+                reader.Read();
+                if (reader.TokenType is JsonTokenType.StartArray or JsonTokenType.StartObject)
+                {
+                    reader.Skip();
+                }
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
+        {
+            throw new InvalidDataException("documents.ndjson contains an invalid record.", ex);
+        }
+
+        if (onlyIds != null && !onlyIds.Contains(id))
+        {
+            return;
+        }
+
+        if (path == null || id < 0)
+        {
+            throw new InvalidDataException("documents.ndjson contains an invalid record.");
+        }
+
+        documents.Add(new DocumentRecord { Id = id, Path = path });
     }
 
     private static string? ResolveExisting(string indexDirectory)

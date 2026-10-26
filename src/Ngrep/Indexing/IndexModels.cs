@@ -47,6 +47,9 @@ internal sealed class IndexData
 
     public List<DocumentRecord> Documents { get; init; } = [];
 
+    /// <summary>Set by a search load. The caller reads the rows it needs from here.</summary>
+    public string? DocumentsFile { get; init; }
+
     public Dictionary<string, List<int>> Postings { get; init; } = new(StringComparer.Ordinal);
 }
 
