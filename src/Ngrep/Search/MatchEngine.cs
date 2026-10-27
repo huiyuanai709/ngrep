@@ -78,6 +78,12 @@ internal sealed class MatchPlan
     /// <summary>The writer takes line byte ranges instead of decoded line strings.</summary>
     public bool RawTextLines { get; init; }
 
+    /// <summary>
+    /// A text <c>-c</c> report needs the number of matching lines, not the matches. The scan
+    /// then counts lines instead of building a record for each.
+    /// </summary>
+    public bool CountLinesOnly { get; init; }
+
     public bool LineRegexp { get; init; }
 
     public bool NoMessages { get; init; }
@@ -242,6 +248,11 @@ internal sealed class MatchPlan
             CollectAll = query.Stats,
             OneRowPerLine = query.OneRowPerLine && !query.Stats,
             RawTextLines = query.RawTextLines && patterns.Length == 1 && patterns[0].Length > 0 && !query.LineRegexp,
+            CountLinesOnly = query.Report == ReportMode.Count
+                && !query.Stats
+                && !query.InvertMatch
+                && !query.NeedLineText
+                && !query.NeedMatchText,
             LineRegexp = query.LineRegexp,
             NoMessages = query.NoMessages,
             NeedLineText = query.NeedLineText,
@@ -688,7 +699,7 @@ internal sealed class MatchPlan
         return true;
     }
 
-    public static void Collect(string text, string relativePath, MatchPlan plan, List<SearchMatch> matches)
+    public static int Collect(string text, string relativePath, MatchPlan plan, List<SearchMatch> matches)
     {
         var starts = LineMap.Build(text);
         var lineCount = LineMap.LineCount(text, starts);
@@ -717,17 +728,17 @@ internal sealed class MatchPlan
                     offset));
                 if (plan.StopAtFirst || (plan.MaxCount is int limit && matches.Count >= limit))
                 {
-                    return;
+                    return matches.Count;
                 }
             }
 
-            return;
+            return matches.Count;
         }
 
         if (plan.LineRegexp)
         {
             CollectLines(text, starts, lineCount, relativePath, plan, matches);
-            return;
+            return matches.Count;
         }
 
         if (plan.StopAtFirst)
@@ -738,13 +749,14 @@ internal sealed class MatchPlan
                 AddHit(text, starts, lineCount, relativePath, plan, first, matches, ref firstLine);
             }
 
-            return;
+            return matches.Count;
         }
 
         if (plan.UseLinePrefilter)
         {
             CollectPrefiltered(text, starts, lineCount, relativePath, plan, matches);
-            return;
+            // This path does not track distinct lines, so the caller recounts.
+            return -1;
         }
 
         var hits = new List<Hit>();
@@ -819,6 +831,8 @@ internal sealed class MatchPlan
         var cache = default(SharedLine);
         var budget = new LineBudget(plan.MaxCount);
         var lineCursor = 0;
+        var lines = 0;
+        var lastCountedLine = 0;
         foreach (var hit in hits)
         {
             // Hits ascend, so the line only moves forward: walk the line starts instead of
@@ -828,13 +842,34 @@ internal sealed class MatchPlan
                 lineCursor++;
             }
 
-            if (!budget.Allow(lineCursor + 1))
+            var line = lineCursor + 1;
+            if (!budget.Allow(line))
             {
                 break;
             }
 
+            if (plan.CountLinesOnly)
+            {
+                // -c prints a line count, so a repeat hit on a line adds nothing.
+                if (line != lastCountedLine)
+                {
+                    lastCountedLine = line;
+                    lines++;
+                }
+
+                continue;
+            }
+
+            if (line != lastCountedLine)
+            {
+                lastCountedLine = line;
+                lines++;
+            }
+
             AddHit(text, starts, lineCount, relativePath, plan, hit, matches, ref cache);
         }
+
+        return lines;
     }
 
     private static void AddHit(
@@ -1225,10 +1260,8 @@ internal sealed class MatchPlan
     public static void CollectRawLines(
         string text,
         ReadOnlySpan<byte> bytes,
-        string relativePath,
         MatchPlan plan,
         List<RawLine> lines,
-        List<SearchMatch> matches,
         System.Buffers.ArrayBufferWriter<byte> body)
     {
         var starts = LineMap.Build(text);
@@ -1290,10 +1323,6 @@ internal sealed class MatchPlan
                 slice.CopyTo(body.GetSpan(slice.Length));
                 body.Advance(slice.Length);
                 lines.Add(new RawLine(line, match.Index - start + 1, offset, slice.Length));
-
-                // The pipeline still needs one record per printed row for counting and for the
-                // exit code, but the writer reads the bytes, so the texts stay empty.
-                matches.Add(new SearchMatch(relativePath, line, match.Index - start + 1, "", "", null, null, match.Index));
             }
         }
     }

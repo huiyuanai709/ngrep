@@ -14,6 +14,9 @@ internal readonly record struct ConfirmResult(bool Examined, bool Matched, bool 
 
     /// <summary>Rows into <see cref="RawBody"/>, one per printed line.</summary>
     public List<RawLine>? RawRows { get; init; }
+
+    /// <summary>Distinct matching lines, or -1 when the path did not count them.</summary>
+    public int Lines { get; init; } = -1;
 }
 
 internal readonly record struct EmitJob(bool Confirm, ConfirmFile File);

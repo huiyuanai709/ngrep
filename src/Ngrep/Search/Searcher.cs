@@ -188,6 +188,9 @@ internal readonly struct SearchBatch
 
     /// <summary>One entry per printed row, indexing <see cref="RawBody"/>.</summary>
     public List<RawLine>? RawRows { get; init; }
+
+    /// <summary>Distinct matching lines, when the scan counted them without building records.</summary>
+    public int Lines { get; init; }
 }
 
 /// <summary>
@@ -763,8 +766,8 @@ internal static class Searcher
                 return new ConfirmResult(examined, matched);
             }
 
-            matched = CollectDecoded(text, file, plan, matches, filesWithoutMatch, tally);
-            return new ConfirmResult(true, matched);
+            matched = CollectDecoded(text, file, plan, matches, filesWithoutMatch, tally, out var decodedLines);
+            return new ConfirmResult(true, matched) { Lines = decodedLines };
         }
         finally
         {
@@ -799,15 +802,14 @@ internal static class Searcher
                 return new ValueTask<ConfirmResult>(Done(plan, matches, examined, matched));
             }
 
-            var rawLines = new List<RawLine>();
             if (TryCollectRaw(text, read.Span, file, plan, matches, filesWithoutMatch, tally, out var rawBody, out var rawRows, out var rawMatched))
             {
                 var result = Done(plan, matches, examined: true, rawMatched, raw: true);
-                return new ValueTask<ConfirmResult>(result with { RawBody = rawBody, RawRows = rawRows });
+                return new ValueTask<ConfirmResult>(result with { RawBody = rawBody, RawRows = rawRows, Lines = rawRows?.Count ?? 0 });
             }
 
-            matched = CollectDecoded(text, file, plan, matches, filesWithoutMatch, tally);
-            return new ValueTask<ConfirmResult>(Done(plan, matches, examined: true, matched));
+            matched = CollectDecoded(text, file, plan, matches, filesWithoutMatch, tally, out var decodedLines);
+            return new ValueTask<ConfirmResult>(Done(plan, matches, examined: true, matched) with { Lines = decodedLines });
         }
         finally
         {
@@ -846,7 +848,7 @@ internal static class Searcher
 
         var lines = new List<RawLine>();
         var buffer = new System.Buffers.ArrayBufferWriter<byte>(1 << 16);
-        MatchPlan.CollectRawLines(text, bytes, file.RelativePath, plan, lines, matches, buffer);
+        MatchPlan.CollectRawLines(text, bytes, plan, lines, buffer);
         tally.File(lines.Count > 0);
         if (lines.Count == 0)
         {
@@ -986,8 +988,10 @@ internal static class Searcher
         MatchPlan plan,
         List<SearchMatch> matches,
         ConcurrentBag<string>? filesWithoutMatch,
-        SearchTally tally)
+        SearchTally tally,
+        out int lines)
     {
+        lines = 0;
         if (plan.Report == ReportMode.FilesWithoutMatch && !plan.CollectAll)
         {
             var hit = MatchPlan.HasMatch(text, plan);
@@ -997,12 +1001,13 @@ internal static class Searcher
                 filesWithoutMatch?.Add(file.RelativePath);
             }
 
+            lines = hit ? 1 : 0;
             return hit;
         }
 
         var before = matches.Count;
-        MatchPlan.Collect(text, file.RelativePath, plan, matches);
-        var matched = matches.Count > before;
+        lines = MatchPlan.Collect(text, file.RelativePath, plan, matches);
+        var matched = lines > 0 || matches.Count > before;
         tally.File(matched);
         if (plan.Report == ReportMode.FilesWithoutMatch && !matched)
         {
@@ -1099,8 +1104,9 @@ internal static class Searcher
                 Without++;
             }
 
-            MatchCount += matches.Count;
-            Lines += CountMatchedLines(matches);
+            var counted = result.Lines >= 0 ? result.Lines : CountMatchedLines(matches);
+            MatchCount += matches.Count > 0 ? matches.Count : counted;
+            Lines += counted;
             _events.Batch?.Invoke(new SearchBatch
             {
                 Path = job.File.RelativePath,
@@ -1110,6 +1116,7 @@ internal static class Searcher
                 PrefilterMiss = !job.Confirm,
                 RawBody = result.RawBody,
                 RawRows = result.RawRows,
+                Lines = counted,
             });
         }
     }

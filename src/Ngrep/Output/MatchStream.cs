@@ -88,6 +88,11 @@ internal static partial class MachineOutput
                     {
                         Counts(batch.Matches);
                     }
+                    else if (batch.Lines > 0)
+                    {
+                        // The scan counted the lines without building a record per line.
+                        CountOnly(batch.Path, batch.Lines);
+                    }
 
                     return;
             }
@@ -197,6 +202,31 @@ internal static partial class MachineOutput
                     break;
                 case OutputFormat.RgJson:
                     WriteRgFile(batch.Matches);
+                    break;
+            }
+
+            Console.Out.Flush();
+        }
+
+        private void CountOnly(string path, int count)
+        {
+            switch (_format)
+            {
+                case OutputFormat.Text:
+                    TextLayout.WriteCount(path, count, _presentation);
+                    break;
+                case OutputFormat.Ndjson:
+                    Console.WriteLine(CountJson(path, count));
+                    break;
+                case OutputFormat.Json:
+                    JsonValue(CountJson(path, count));
+                    break;
+                case OutputFormat.RgJson:
+                    WriteRgBegin(path);
+                    WriteRgEnd(path, count, count);
+                    _rgFiles++;
+                    _rgMatches += count;
+                    _rgLines += count;
                     break;
             }
 
