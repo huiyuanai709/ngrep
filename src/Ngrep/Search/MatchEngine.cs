@@ -330,6 +330,7 @@ internal sealed class MatchPlan
         string relativePath,
         MatchPlan plan,
         List<SearchMatch> matches,
+        RawSink? raw,
         out bool matched)
     {
         matched = false;
@@ -430,7 +431,7 @@ internal sealed class MatchPlan
         // characters instead of bytes, and only on the lines that hold non-ASCII text;
         // each hit line is checked on its own instead of the whole file.
         var before = matches.Count;
-        if (!EmitByteHits(bytes, relativePath, hits!, matches, plan.MaxCount))
+        if (!EmitByteHits(bytes, relativePath, hits!, matches, plan.MaxCount, raw))
         {
             matches.RemoveRange(before, matches.Count - before);
             return false;
@@ -449,6 +450,7 @@ internal sealed class MatchPlan
         string relativePath,
         MatchPlan plan,
         List<SearchMatch> matches,
+        RawSink? raw,
         out bool matched)
     {
         matched = false;
@@ -575,7 +577,24 @@ internal sealed class MatchPlan
             }
 
             linesEmitted++;
-            EmitLineHits(slice, lineStart, lineNo, relativePath, plan, lineHits, matches);
+            if (raw != null)
+            {
+                var first = lineHits[0];
+                for (var h = 1; h < lineHits.Count; h++)
+                {
+                    if (lineHits[h].Index < first.Index)
+                    {
+                        first = lineHits[h];
+                    }
+                }
+
+                raw.Add(bytes[lineStart..textEnd], lineNo, first.Index + 1);
+            }
+            else
+            {
+                EmitLineHits(slice, lineStart, lineNo, relativePath, plan, lineHits, matches);
+            }
+
             if (plan.StopAtFirst)
             {
                 return true;
@@ -638,7 +657,7 @@ internal sealed class MatchPlan
         }
     }
 
-    private static bool EmitByteHits(ReadOnlySpan<byte> bytes, string relativePath, List<Hit> hits, List<SearchMatch> matches, int? maxLines = null)
+    private static bool EmitByteHits(ReadOnlySpan<byte> bytes, string relativePath, List<Hit> hits, List<SearchMatch> matches, int? maxLines, RawSink? raw)
     {
         hits.Sort(static (left, right) =>
         {
@@ -649,7 +668,7 @@ internal sealed class MatchPlan
         var cursor = 0;
         var sharedStart = -1;
         var sharedAscii = true;
-        string? sharedText = null;
+        var sharedText = "";
         var budget = new LineBudget(maxLines);
         foreach (var hit in Dedup(hits))
         {
@@ -671,17 +690,31 @@ internal sealed class MatchPlan
                 textEnd--;
             }
 
-            if (sharedText == null || lineStart != sharedStart)
+            var lineSpan = bytes[lineStart..Math.Max(lineStart, textEnd)];
+            if (lineStart != sharedStart)
             {
-                sharedStart = lineStart;
-                var lineSpan = bytes[lineStart..Math.Max(lineStart, textEnd)];
-                sharedAscii = Ascii.IsValid(lineSpan);
-                if (!sharedAscii && !System.Text.Unicode.Utf8.IsValid(lineSpan))
+                var lineAscii = Ascii.IsValid(lineSpan);
+                if (!lineAscii && !System.Text.Unicode.Utf8.IsValid(lineSpan))
                 {
                     return false;
                 }
 
-                sharedText = Encoding.UTF8.GetString(lineSpan);
+                sharedStart = lineStart;
+                if (raw != null)
+                {
+                    raw.Add(lineSpan, lineNo, lineAscii ? hit.Index - lineStart + 1 : TextFiles.Column(bytes, lineStart, hit.Index));
+                }
+                else
+                {
+                    sharedAscii = lineAscii;
+                    sharedText = Encoding.UTF8.GetString(lineSpan);
+                }
+            }
+
+            // One row per line: the writer would drop later hits on the same line.
+            if (raw != null)
+            {
+                continue;
             }
 
             var column = sharedAscii ? hit.Index - lineStart + 1 : TextFiles.Column(bytes, lineStart, hit.Index);

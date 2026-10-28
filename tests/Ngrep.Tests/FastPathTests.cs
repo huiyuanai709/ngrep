@@ -145,12 +145,12 @@ public class FastPathTests
         var plan = RawPlan("aa");
         var bytes = Encoding.UTF8.GetBytes("aaaa\r\nzz aa zz\r\n");
 
-        Assert.True(ByteConfirm.TryHandleRaw(bytes, plan, out var body, out var rows, out var matched));
+        var raw = new RawSink();
+        Assert.True(ByteConfirm.TryHandleRaw(bytes, plan, raw, out var matched));
         Assert.True(matched);
-        var list = rows!;
-        Assert.Equal(["aaaa", "zz aa zz"], RawTexts(body, list));
-        Assert.Equal([1, 2], list.Select(row => row.Line).ToArray());
-        Assert.Equal([1, 4], list.Select(row => row.Column).ToArray());
+        Assert.Equal(["aaaa", "zz aa zz"], RawTexts(raw));
+        Assert.Equal([1, 2], raw.Rows.Select(row => row.Line).ToArray());
+        Assert.Equal([1, 4], raw.Rows.Select(row => row.Column).ToArray());
     }
 
     [Fact]
@@ -159,10 +159,11 @@ public class FastPathTests
         var plan = RawPlan("net", word: true, maxCount: 1);
         var bytes = Encoding.UTF8.GetBytes("net net\ninternet\nnet.\n");
 
-        Assert.True(ByteConfirm.TryHandleRaw(bytes, plan, out var body, out var rows, out var matched));
+        var raw = new RawSink();
+        Assert.True(ByteConfirm.TryHandleRaw(bytes, plan, raw, out var matched));
         Assert.True(matched);
-        Assert.Equal(["net net"], RawTexts(body, rows!));
-        Assert.Equal(1, Assert.Single(rows!).Line);
+        Assert.Equal(["net net"], RawTexts(raw));
+        Assert.Equal(1, Assert.Single(raw.Rows).Line);
     }
 
     [Fact]
@@ -172,10 +173,11 @@ public class FastPathTests
             .Concat(Encoding.UTF8.GetBytes("NET net\n"))
             .ToArray();
 
-        Assert.True(ByteConfirm.TryHandleRaw(bytes, RawPlan("net", ignoreCase: true), out var body, out var rows, out var matched));
+        var raw = new RawSink();
+        Assert.True(ByteConfirm.TryHandleRaw(bytes, RawPlan("net", ignoreCase: true), raw, out var matched));
         Assert.True(matched);
-        Assert.Equal(["NET net"], RawTexts(body, rows!));
-        Assert.Equal(1, Assert.Single(rows!).Column);
+        Assert.Equal(["NET net"], RawTexts(raw));
+        Assert.Equal(1, Assert.Single(raw.Rows).Column);
     }
 
     [Fact]
@@ -183,10 +185,11 @@ public class FastPathTests
     {
         var bytes = Encoding.UTF8.GetBytes("café net\n");
 
-        Assert.True(ByteConfirm.TryHandleRaw(bytes, RawPlan("net"), out var body, out var rows, out var matched));
+        var raw = new RawSink();
+        Assert.True(ByteConfirm.TryHandleRaw(bytes, RawPlan("net"), raw, out var matched));
         Assert.True(matched);
-        Assert.Equal(["café net"], RawTexts(body, rows!));
-        Assert.Equal(6, Assert.Single(rows!).Column);
+        Assert.Equal(["café net"], RawTexts(raw));
+        Assert.Equal(6, Assert.Single(raw.Rows).Column);
     }
 
     [Fact]
@@ -197,7 +200,7 @@ public class FastPathTests
             .Concat(Encoding.UTF8.GetBytes(" net\n"))
             .ToArray();
 
-        Assert.False(ByteConfirm.TryHandleRaw(bytes, RawPlan("net"), out _, out _, out _));
+        Assert.False(ByteConfirm.TryHandleRaw(bytes, RawPlan("net"), new RawSink(), out _));
     }
 
     private static MatchPlan RawPlan(string pattern, bool word = false, bool ignoreCase = false, int? maxCount = null) =>
@@ -212,8 +215,8 @@ public class FastPathTests
             MaxDegreeOfParallelism = 1,
         });
 
-    private static string[] RawTexts(byte[]? body, List<RawLine> rows) =>
-        rows.Select(row => Encoding.UTF8.GetString(body!, row.Start, row.Length)).ToArray();
+    private static string[] RawTexts(RawSink raw) =>
+        raw.Rows.Select(row => Encoding.UTF8.GetString(raw.Buffer.WrittenSpan.Slice(row.Start, row.Length))).ToArray();
 
     private static SearchOutcome Search(
         string root,

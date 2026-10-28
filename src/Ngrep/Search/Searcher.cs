@@ -803,6 +803,7 @@ internal static class Searcher
                 var done = Done(plan, matches, examined, matched);
                 if (raw?.Rows is { Count: > 0 } rows)
                 {
+                    raw.Complete();
                     done = done with { RawBody = raw.Body, RawRows = rows, Lines = rows.Count };
                 }
 
@@ -886,14 +887,6 @@ internal static class Searcher
         return new ConfirmResult(examined, matched, raw);
     }
 
-    /// <summary>Receives byte rows when a literal file is confirmed without decoded strings.</summary>
-    private sealed class RawSink
-    {
-        public byte[]? Body { get; set; }
-
-        public List<RawLine>? Rows { get; set; }
-    }
-
     /// <summary>True when the file is finished. False when <paramref name="text"/> must be matched as a string.</summary>
     private static bool MatchLoaded(
         PooledBytes read,
@@ -932,7 +925,7 @@ internal static class Searcher
 
         // Plain text output can print the file bytes as they are, so try that before the
         // confirm that would decode every matching line into a SearchMatch.
-        if (raw != null && ByteConfirm.TryHandleRaw(read.Span, plan, out var rawBody, out var rawRows, out var rawMatched))
+        if (raw != null && ByteConfirm.TryHandleRaw(read.Span, plan, raw, out var rawMatched))
         {
             tally.File(rawMatched);
             if (!rawMatched)
@@ -942,10 +935,10 @@ internal static class Searcher
 
             examined = true;
             matched = rawMatched;
-            raw.Body = rawBody;
-            raw.Rows = rawRows;
             return true;
         }
+
+        raw?.Clear();
 
         if (ByteConfirm.TryHandle(read.Span, file.RelativePath, plan, matches, out var byteMatched))
         {
@@ -972,7 +965,7 @@ internal static class Searcher
         // A Pike VM walks every byte, so narrow to candidate lines first. This is the
         // same literal filter the no-automaton path uses, and it leaves non-ASCII files
         // to the automaton below.
-        if (plan.BytePrefilterFirst && MatchPlan.TryCollectBytes(read.Span, file.RelativePath, plan, matches, out var narrowed))
+        if (plan.BytePrefilterFirst && MatchPlan.TryCollectBytes(read.Span, file.RelativePath, plan, matches, raw, out var narrowed))
         {
             tally.File(narrowed);
             if (!narrowed)
@@ -985,7 +978,9 @@ internal static class Searcher
             return true;
         }
 
-        if (MatchPlan.TryCollectAutomaton(read.Span, file.RelativePath, plan, matches, out var automatonMatched))
+        raw?.Clear();
+
+        if (MatchPlan.TryCollectAutomaton(read.Span, file.RelativePath, plan, matches, raw, out var automatonMatched))
         {
             tally.File(automatonMatched);
             if (!automatonMatched)
@@ -998,7 +993,9 @@ internal static class Searcher
             return true;
         }
 
-        if (MatchPlan.TryCollectBytes(read.Span, file.RelativePath, plan, matches, out var prefiltered))
+        raw?.Clear();
+
+        if (MatchPlan.TryCollectBytes(read.Span, file.RelativePath, plan, matches, raw, out var prefiltered))
         {
             tally.File(prefiltered);
             if (!prefiltered)

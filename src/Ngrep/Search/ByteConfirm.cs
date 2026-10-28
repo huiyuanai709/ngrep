@@ -1,4 +1,3 @@
-using System.Buffers;
 using System.Text;
 using Ngrep.Text;
 
@@ -179,12 +178,9 @@ internal static class ByteConfirm
     public static bool TryHandleRaw(
         ReadOnlySpan<byte> span,
         MatchPlan plan,
-        out byte[]? body,
-        out List<RawLine>? rows,
+        RawSink raw,
         out bool matched)
     {
-        body = null;
-        rows = null;
         matched = false;
         if (!CanHandle(plan))
         {
@@ -218,16 +214,12 @@ internal static class ByteConfirm
         // starts the row at its byte offset and counts the chars before the hit.
         // An invalid line falls back to the decoded path, which replaces the bytes.
         var text = span[TextFiles.Utf8BomLength(span)..];
-        var lines = new List<RawLine>(8);
-        var buffer = new ArrayBufferWriter<byte>(Math.Max(64, Math.Min(text.Length, 1 << 16)));
-        if (!CollectRaw(text, plan, each == null ? any : each[0], lengths[0], lines, buffer))
+        if (!CollectRaw(text, plan, each == null ? any : each[0], lengths[0], raw))
         {
             return false;
         }
 
-        rows = lines;
-        body = lines.Count == 0 ? Array.Empty<byte>() : buffer.WrittenSpan.ToArray();
-        matched = lines.Count > 0;
+        matched = raw.Rows.Count > 0;
         return true;
     }
 
@@ -261,14 +253,13 @@ internal static class ByteConfirm
         MatchPlan plan,
         SimdLiteralScanner scanner,
         int length,
-        List<RawLine> rows,
-        ArrayBufferWriter<byte> body)
+        RawSink raw)
     {
         var limit = plan.MaxCount ?? int.MaxValue;
         var line = 1;
         var lineStart = 0;
         var from = 0;
-        while (rows.Count < limit && from <= span.Length - length)
+        while (raw.Rows.Count < limit && from <= span.Length - length)
         {
             var index = Find(scanner, span, from, length, plan.Word);
             if (index < 0)
@@ -304,10 +295,7 @@ internal static class ByteConfirm
                 return false;
             }
 
-            var offset = body.WrittenCount;
-            lineSpan.CopyTo(body.GetSpan(lineSpan.Length));
-            body.Advance(lineSpan.Length);
-            rows.Add(new RawLine(line, ascii ? index - lineStart + 1 : TextFiles.Column(span, lineStart, index), offset, lineSpan.Length));
+            raw.Add(lineSpan, line, ascii ? index - lineStart + 1 : TextFiles.Column(span, lineStart, index));
 
             if (newline < 0)
             {
