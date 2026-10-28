@@ -139,6 +139,82 @@ public class FastPathTests
         Assert.Equal("after", Assert.Single(pair[0].After!).Text);
     }
 
+    [Fact]
+    public void Literal_raw_rows_copy_the_bytes_and_keep_the_first_hit_per_line()
+    {
+        var plan = RawPlan("aa");
+        var bytes = Encoding.UTF8.GetBytes("aaaa\r\nzz aa zz\r\n");
+
+        Assert.True(ByteConfirm.TryHandleRaw(bytes, plan, out var body, out var rows, out var matched));
+        Assert.True(matched);
+        var list = rows!;
+        Assert.Equal(["aaaa", "zz aa zz"], RawTexts(body, list));
+        Assert.Equal([1, 2], list.Select(row => row.Line).ToArray());
+        Assert.Equal([1, 4], list.Select(row => row.Column).ToArray());
+    }
+
+    [Fact]
+    public void Literal_raw_rows_apply_word_and_max_count()
+    {
+        var plan = RawPlan("net", word: true, maxCount: 1);
+        var bytes = Encoding.UTF8.GetBytes("net net\ninternet\nnet.\n");
+
+        Assert.True(ByteConfirm.TryHandleRaw(bytes, plan, out var body, out var rows, out var matched));
+        Assert.True(matched);
+        Assert.Equal(["net net"], RawTexts(body, rows!));
+        Assert.Equal(1, Assert.Single(rows!).Line);
+    }
+
+    [Fact]
+    public void Literal_raw_rows_fold_case_and_drop_a_utf8_bom()
+    {
+        var bytes = Encoding.UTF8.GetPreamble()
+            .Concat(Encoding.UTF8.GetBytes("NET net\n"))
+            .ToArray();
+
+        Assert.True(ByteConfirm.TryHandleRaw(bytes, RawPlan("net", ignoreCase: true), out var body, out var rows, out var matched));
+        Assert.True(matched);
+        Assert.Equal(["NET net"], RawTexts(body, rows!));
+        Assert.Equal(1, Assert.Single(rows!).Column);
+    }
+
+    [Fact]
+    public void Literal_raw_rows_count_chars_on_a_utf8_line()
+    {
+        var bytes = Encoding.UTF8.GetBytes("café net\n");
+
+        Assert.True(ByteConfirm.TryHandleRaw(bytes, RawPlan("net"), out var body, out var rows, out var matched));
+        Assert.True(matched);
+        Assert.Equal(["café net"], RawTexts(body, rows!));
+        Assert.Equal(6, Assert.Single(rows!).Column);
+    }
+
+    [Fact]
+    public void Literal_raw_rows_leave_invalid_utf8_lines_to_the_decoded_path()
+    {
+        var bytes = Encoding.UTF8.GetBytes("bad ")
+            .Concat(new byte[] { 0xFF })
+            .Concat(Encoding.UTF8.GetBytes(" net\n"))
+            .ToArray();
+
+        Assert.False(ByteConfirm.TryHandleRaw(bytes, RawPlan("net"), out _, out _, out _));
+    }
+
+    private static MatchPlan RawPlan(string pattern, bool word = false, bool ignoreCase = false, int? maxCount = null) =>
+        MatchPlan.Create(new SearchQuery
+        {
+            Pattern = pattern,
+            Path = ".",
+            Regex = false,
+            WordRegexp = word,
+            IgnoreCase = ignoreCase,
+            MaxCount = maxCount,
+            MaxDegreeOfParallelism = 1,
+        });
+
+    private static string[] RawTexts(byte[]? body, List<RawLine> rows) =>
+        rows.Select(row => Encoding.UTF8.GetString(body!, row.Start, row.Length)).ToArray();
+
     private static SearchOutcome Search(
         string root,
         string pattern,

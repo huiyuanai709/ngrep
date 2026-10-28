@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using Ngrep.Text;
 
@@ -170,6 +171,66 @@ internal static class ByteConfirm
         return true;
     }
 
+    /// <summary>
+    /// Builds plain text output rows straight from ASCII bytes for a literal plan: one row
+    /// per matching line, copied unchanged, so no line string is decoded or encoded back.
+    /// False when the decoded path must confirm instead.
+    /// </summary>
+    public static bool TryHandleRaw(
+        ReadOnlySpan<byte> span,
+        MatchPlan plan,
+        out byte[]? body,
+        out List<RawLine>? rows,
+        out bool matched)
+    {
+        body = null;
+        rows = null;
+        matched = false;
+        if (!CanHandle(plan))
+        {
+            return false;
+        }
+
+        // RawTextLines allows one pattern, so a literal plan has one needle. Leave a
+        // multi-needle plan to the decoded path rather than report a false miss.
+        plan.Literals!.TryAsciiOr(plan.IgnoreCase, out var any, out var each, out var lengths);
+        if (lengths.Length != 1)
+        {
+            return false;
+        }
+
+        var state = _state;
+        if (state is { Active: true })
+        {
+            state.Active = false;
+            if (state.NonAscii)
+            {
+                return false;
+            }
+
+            if (state.Hit < 0)
+            {
+                return true;
+            }
+        }
+
+        // A byte column is a character column on an ASCII line; a UTF-8 line
+        // starts the row at its byte offset and counts the chars before the hit.
+        // An invalid line falls back to the decoded path, which replaces the bytes.
+        var text = span[TextFiles.Utf8BomLength(span)..];
+        var lines = new List<RawLine>(8);
+        var buffer = new ArrayBufferWriter<byte>(Math.Max(64, Math.Min(text.Length, 1 << 16)));
+        if (!CollectRaw(text, plan, each == null ? any : each[0], lengths[0], lines, buffer))
+        {
+            return false;
+        }
+
+        rows = lines;
+        body = lines.Count == 0 ? Array.Empty<byte>() : buffer.WrittenSpan.ToArray();
+        matched = lines.Count > 0;
+        return true;
+    }
+
     private static bool HasHit(ReadOnlySpan<byte> span, MatchPlan plan)
     {
         plan.Literals!.TryAsciiOr(plan.IgnoreCase, out var any, out var each, out var lengths);
@@ -188,6 +249,78 @@ internal static class ByteConfirm
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// One output row per matching line, in file order, for a single literal. A line with
+    /// several hits reports the first one, and the line body is copied as-is. False when a
+    /// printed line is not valid UTF-8 and the decoded path must confirm instead.
+    /// </summary>
+    private static bool CollectRaw(
+        ReadOnlySpan<byte> span,
+        MatchPlan plan,
+        SimdLiteralScanner scanner,
+        int length,
+        List<RawLine> rows,
+        ArrayBufferWriter<byte> body)
+    {
+        var limit = plan.MaxCount ?? int.MaxValue;
+        var line = 1;
+        var lineStart = 0;
+        var from = 0;
+        while (rows.Count < limit && from <= span.Length - length)
+        {
+            var index = Find(scanner, span, from, length, plan.Word);
+            if (index < 0)
+            {
+                return true;
+            }
+
+            // Hits are in order, so the line cursor only moves forward.
+            while (true)
+            {
+                var gap = span[lineStart..index].IndexOf((byte)'\n');
+                if (gap < 0)
+                {
+                    break;
+                }
+
+                lineStart += gap + 1;
+                line++;
+            }
+
+            var newline = span[index..].IndexOf((byte)'\n');
+            var end = newline < 0 ? span.Length : index + newline;
+            var textEnd = end;
+            if (textEnd > lineStart && span[textEnd - 1] == (byte)'\r')
+            {
+                textEnd--;
+            }
+
+            var lineSpan = span[lineStart..textEnd];
+            var ascii = Ascii.IsValid(lineSpan);
+            if (!ascii && !System.Text.Unicode.Utf8.IsValid(lineSpan))
+            {
+                return false;
+            }
+
+            var offset = body.WrittenCount;
+            lineSpan.CopyTo(body.GetSpan(lineSpan.Length));
+            body.Advance(lineSpan.Length);
+            rows.Add(new RawLine(line, ascii ? index - lineStart + 1 : TextFiles.Column(span, lineStart, index), offset, lineSpan.Length));
+
+            if (newline < 0)
+            {
+                return true;
+            }
+
+            // One row per line: skip the rest of this line's hits.
+            lineStart = end + 1;
+            line++;
+            from = lineStart;
+        }
+
+        return true;
     }
 
     /// <summary>False when a hit sits in a file that is not UTF-8 and columns must be decoded.</summary>

@@ -761,7 +761,7 @@ internal static class Searcher
             var input = query.StandardInput ?? StandardInput.Open();
             using var read = await TextFiles.ReadStreamAsync(input, stop, query.CancellationToken, plan.SearchBinary);
             ByteConfirm.Adopt(stop);
-            if (MatchLoaded(read, file, plan, matches, stats: null, filesWithoutMatch, tally, errorIfUnreadable: true, out var text, out var examined, out var matched))
+            if (MatchLoaded(read, file, plan, matches, stats: null, filesWithoutMatch, tally, errorIfUnreadable: true, raw: null, out var text, out var examined, out var matched))
             {
                 return new ConfirmResult(examined, matched);
             }
@@ -797,9 +797,16 @@ internal static class Searcher
         {
             using var read = TextFiles.Read(file.FullPath, stop, plan.SearchBinary, cancellation);
             ByteConfirm.Adopt(stop);
-            if (MatchLoaded(read, file, plan, matches, stats, filesWithoutMatch, tally, errorIfUnreadable, out var text, out var examined, out var matched))
+            var raw = plan.RawTextLines ? new RawSink() : null;
+            if (MatchLoaded(read, file, plan, matches, stats, filesWithoutMatch, tally, errorIfUnreadable, raw, out var text, out var examined, out var matched))
             {
-                return new ValueTask<ConfirmResult>(Done(plan, matches, examined, matched));
+                var done = Done(plan, matches, examined, matched);
+                if (raw?.Rows is { Count: > 0 } rows)
+                {
+                    done = done with { RawBody = raw.Body, RawRows = rows, Lines = rows.Count };
+                }
+
+                return new ValueTask<ConfirmResult>(done);
             }
 
             if (TryCollectRaw(text, read.Span, file, plan, matches, filesWithoutMatch, tally, out var rawBody, out var rawRows, out var rawMatched))
@@ -879,6 +886,14 @@ internal static class Searcher
         return new ConfirmResult(examined, matched, raw);
     }
 
+    /// <summary>Receives byte rows when a literal file is confirmed without decoded strings.</summary>
+    private sealed class RawSink
+    {
+        public byte[]? Body { get; set; }
+
+        public List<RawLine>? Rows { get; set; }
+    }
+
     /// <summary>True when the file is finished. False when <paramref name="text"/> must be matched as a string.</summary>
     private static bool MatchLoaded(
         PooledBytes read,
@@ -889,6 +904,7 @@ internal static class Searcher
         ConcurrentBag<string>? filesWithoutMatch,
         SearchTally tally,
         bool errorIfUnreadable,
+        RawSink? raw,
         out string text,
         out bool examined,
         out bool matched)
@@ -912,6 +928,23 @@ internal static class Searcher
                 }
 
                 return true;
+        }
+
+        // Plain text output can print the file bytes as they are, so try that before the
+        // confirm that would decode every matching line into a SearchMatch.
+        if (raw != null && ByteConfirm.TryHandleRaw(read.Span, plan, out var rawBody, out var rawRows, out var rawMatched))
+        {
+            tally.File(rawMatched);
+            if (!rawMatched)
+            {
+                filesWithoutMatch?.Add(file.RelativePath);
+            }
+
+            examined = true;
+            matched = rawMatched;
+            raw.Body = rawBody;
+            raw.Rows = rawRows;
+            return true;
         }
 
         if (ByteConfirm.TryHandle(read.Span, file.RelativePath, plan, matches, out var byteMatched))
