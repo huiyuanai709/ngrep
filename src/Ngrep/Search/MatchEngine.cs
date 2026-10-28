@@ -361,11 +361,13 @@ internal sealed class MatchPlan
             {
                 var everyProgramFilters = true;
                 var anyMaybe = false;
+                var lineSafe = true;
                 foreach (var program in plan.BytePrograms)
                 {
                     if (program is DfaProgram filter)
                     {
                         anyMaybe |= filter.MayMatch(bytes);
+                        lineSafe &= filter.LineSafe;
                     }
                     else
                     {
@@ -378,6 +380,16 @@ internal sealed class MatchPlan
                     // Every pattern rejected the bytes, so the file has no match at all.
                     return true;
                 }
+
+                // The filter is exact, so a file-level hit only needs the lines it accepted
+                // confirmed. A pattern that reads \A or \z still needs the whole text.
+                if (everyProgramFilters && lineSafe && !plan.CrossesLines && !plan.CountLinesOnly
+                    && TryCollectDfaLines(bytes, relativePath, plan, matches, raw, out matched))
+                {
+                    return true;
+                }
+
+                return false;
             }
 
             return false;
@@ -439,6 +451,159 @@ internal sealed class MatchPlan
 
         matched = true;
         return true;
+    }
+
+    /// <summary>
+    /// Confirms the lines the DFA accepted, one decode per line, instead of decoding the
+    /// whole file. Exact for a pattern with no <c>\A</c> or <c>\z</c>, where a line slice
+    /// sees the same text the whole-file engine would.
+    /// </summary>
+    private static bool TryCollectDfaLines(
+        ReadOnlySpan<byte> bytes,
+        string relativePath,
+        MatchPlan plan,
+        List<SearchMatch> matches,
+        RawSink? raw,
+        out bool matched)
+    {
+        matched = false;
+        if (plan.Regexes == null || plan.BytePrograms == null)
+        {
+            return false;
+        }
+
+        var existenceOnly = plan.Report == ReportMode.FilesWithoutMatch && !plan.CollectAll;
+        var limit = plan.StopAtFirst || existenceOnly ? 1 : plan.MaxCount ?? int.MaxValue;
+        var starts = new List<int>();
+        var found = new List<int>();
+        foreach (var program in plan.BytePrograms)
+        {
+            found.Clear();
+            ((DfaProgram)program).CollectMatchLines(bytes, found, limit);
+            MergeSorted(starts, found);
+            if (starts.Count >= limit)
+            {
+                break;
+            }
+        }
+
+        if (starts.Count == 0)
+        {
+            return false;
+        }
+
+        var before = matches.Count;
+        var hits = new List<Hit>(8);
+        var budget = new LineBudget(plan.MaxCount);
+        var lineNo = 1;
+        var cursor = 0;
+        foreach (var lineStart in starts)
+        {
+            lineNo += bytes[cursor..lineStart].Count((byte)'\n');
+            cursor = lineStart;
+            if (!budget.Allow(lineNo))
+            {
+                break;
+            }
+
+            var relative = bytes[lineStart..].IndexOf((byte)'\n');
+            var end = relative < 0 ? bytes.Length : lineStart + relative;
+            var textEnd = end;
+            if (textEnd > lineStart && bytes[textEnd - 1] == (byte)'\r')
+            {
+                textEnd--;
+            }
+
+            // Match the line as the engine would in the whole text: the CR before the
+            // LF is part of the search text, but not of the printed line.
+            var slice = Encoding.ASCII.GetString(bytes[lineStart..end]);
+            var shown = Encoding.ASCII.GetString(bytes[lineStart..textEnd]);
+            hits.Clear();
+            foreach (var regex in plan.Regexes)
+            {
+                foreach (var match in regex.EnumerateMatches(slice))
+                {
+                    if (plan.Word && !WordBoundary.At(slice, match.Index, match.Length))
+                    {
+                        continue;
+                    }
+
+                    hits.Add(new Hit(match.Index, match.Length, ""));
+                }
+            }
+
+            if (hits.Count == 0)
+            {
+                // The pattern reaches this line only across a newline, which a slice
+                // cannot confirm. Let the decoded engine decide.
+                matches.RemoveRange(before, matches.Count - before);
+                return false;
+            }
+
+            matched = true;
+            if (existenceOnly)
+            {
+                return true;
+            }
+
+            if (raw != null)
+            {
+                var first = hits[0];
+                for (var i = 1; i < hits.Count; i++)
+                {
+                    if (hits[i].Index < first.Index)
+                    {
+                        first = hits[i];
+                    }
+                }
+
+                raw.Add(bytes[lineStart..textEnd], lineNo, first.Index + 1);
+            }
+            else
+            {
+                EmitLineHits(slice, lineStart, lineNo, relativePath, plan, hits, matches, shown);
+            }
+
+            if (plan.StopAtFirst)
+            {
+                return true;
+            }
+        }
+
+        return true;
+    }
+
+    private static void MergeSorted(List<int> target, List<int> source)
+    {
+        if (source.Count == 0)
+        {
+            return;
+        }
+
+        if (target.Count == 0)
+        {
+            target.AddRange(source);
+            return;
+        }
+
+        var merged = new List<int>(target.Count + source.Count);
+        var left = 0;
+        var right = 0;
+        var last = -1;
+        while (left < target.Count || right < source.Count)
+        {
+            var value = right >= source.Count || (left < target.Count && target[left] <= source[right])
+                ? target[left++]
+                : source[right++];
+            if (value != last)
+            {
+                merged.Add(value);
+                last = value;
+            }
+        }
+
+        target.Clear();
+        target.AddRange(merged);
     }
 
     /// <summary>
@@ -616,7 +781,8 @@ internal sealed class MatchPlan
         string relativePath,
         MatchPlan plan,
         List<Hit> hits,
-        List<SearchMatch> matches)
+        List<SearchMatch> matches,
+        string? lineText = null)
     {
         if (hits.Count > 1)
         {
@@ -627,7 +793,7 @@ internal sealed class MatchPlan
             });
         }
 
-        var lineText = plan.NeedLineText ? slice : "";
+        var shown = plan.NeedLineText ? (lineText ?? slice) : "";
         var lastIndex = -1;
         var lastLength = -1;
         foreach (var hit in hits)
@@ -645,7 +811,7 @@ internal sealed class MatchPlan
                 lineNo,
                 hit.Index + 1,
                 value,
-                lineText,
+                shown,
                 null,
                 null,
                 lineStart + hit.Index));

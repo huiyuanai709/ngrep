@@ -26,11 +26,18 @@ internal sealed class DfaProgram : ByteProgram
     private readonly PikeProgram _inner;
     private readonly DfaTable _filter;
 
-    private DfaProgram(PikeProgram inner, DfaTable filter)
+    private DfaProgram(PikeProgram inner, DfaTable filter, bool lineSafe)
     {
         _inner = inner;
         _filter = filter;
+        LineSafe = lineSafe;
     }
+
+    /// <summary>
+    /// True when the pattern has no <c>\A</c> or <c>\z</c>, so confirming one line at a
+    /// time sees the same text the whole-file engine would.
+    /// </summary>
+    public bool LineSafe { get; }
 
     /// <summary>
     /// Wraps <paramref name="pike"/> when the filter is worth building. Null keeps the VM
@@ -53,13 +60,23 @@ internal sealed class DfaProgram : ByteProgram
             }
         }
 
+        var lineSafe = true;
+        foreach (var inst in insts)
+        {
+            if (inst.Op is PikeProgram.Op.Bos or PikeProgram.Op.Eos)
+            {
+                lineSafe = false;
+                break;
+            }
+        }
+
         var filter = DfaTable.TryBuild(insts, unanchored, MaxStates);
         if (filter == null || filter.AlwaysAccepts)
         {
             return null;
         }
 
-        return new DfaProgram(pike, filter);
+        return new DfaProgram(pike, filter, lineSafe);
     }
 
     /// <summary>
@@ -73,6 +90,40 @@ internal sealed class DfaProgram : ByteProgram
 
     /// <summary>Whether any match is possible in these bytes. Exact for this instruction subset.</summary>
     public bool MayMatch(ReadOnlySpan<byte> bytes) => _filter.MayMatch(bytes);
+
+    /// <summary>
+    /// Line starts where a match can end, in order. The filter is exact, so each returned
+    /// line holds a real match; <paramref name="limit"/> stops the scan after that many.
+    /// </summary>
+    public void CollectMatchLines(ReadOnlySpan<byte> text, List<int> starts, int limit)
+    {
+        var state = 0;
+        var lineStart = 0;
+        var last = -1;
+        for (var i = 0; i < text.Length; i++)
+        {
+            state = _filter.Step(state, text[i], out var accept);
+            if (accept && lineStart != last)
+            {
+                starts.Add(lineStart);
+                last = lineStart;
+                if (starts.Count >= limit)
+                {
+                    return;
+                }
+            }
+
+            if (text[i] == (byte)'\n')
+            {
+                lineStart = i + 1;
+            }
+        }
+
+        if (starts.Count < limit && _filter.AcceptsAtEnd(state) && lineStart != last)
+        {
+            starts.Add(lineStart);
+        }
+    }
 
     public override void Collect(ReadOnlySpan<byte> text, bool allowNewline, bool stopAtFirst, List<ByteMatch> hits)
     {
@@ -134,6 +185,19 @@ internal sealed class DfaTable
 
         return _endAccept[state];
     }
+
+    /// <summary>
+    /// One transition, reporting whether a match ends before this byte. Accept is exact:
+    /// the current state reaches a Match pc once the anchor context of <paramref name="value"/> is applied.
+    /// </summary>
+    public int Step(int state, byte value, out bool accept)
+    {
+        var entry = _trans[(state << 8) | value];
+        accept = (entry & AcceptBit) != 0;
+        return entry & StateMask;
+    }
+
+    public bool AcceptsAtEnd(int state) => _endAccept[state];
 
     public static DfaTable? TryBuild(PikeProgram.Inst[] insts, int start, int maxStates)
     {
