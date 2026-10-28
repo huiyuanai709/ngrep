@@ -10,8 +10,12 @@ using Ngrep.Text;
 //   root/large — large files only
 //   a sibling tiny tree — walk/ignore, created after the paired timings
 // In-process rows are Searcher only. Process rows warm once, then time once.
+// pipeline_parts_* splits a literal miss into walk, open+read+close, and the SIMD scan floor.
 // Optional args[1] is an ngrep binary (Native AOT) timed as a subprocess.
 var files = args.Length > 0 && int.TryParse(args[0], out var parsed) ? parsed : 2500;
+// "quick" builds the corpora, prints the literal rows, and stops: for A/B runs of the
+// scheduler without waiting on the index, tiny-tree, and process rows.
+var quick = args.Contains("quick");
 var ngrepBin = args.Length > 1 && File.Exists(args[1]) ? Path.GetFullPath(args[1]) : null;
 var smallBytes = 32 * 1024;
 var largeCount = 8;
@@ -28,9 +32,12 @@ try
     WriteLarge(largeRoot, largeCount, largeBytes);
     WriteLarge(oneBig, 1, 31 * 1024 * 1024);
 
-    ScannerThroughput();
-    var miss = await Time(root, "unlikely-token-zz", regex: false);
-    var confirm = await Time(root, "NEEDLE", regex: false);
+    var throughput = ScannerThroughput();
+    var miss = await Time(root, "unlikely-token-zz", regex: false, runs: 3);
+    var confirm = await Time(root, "NEEDLE", regex: false, runs: 3);
+    // The CLI passes an Events.Batch, so it runs the emitting scheduler, not FanOut.
+    var missStream = await Time(root, "unlikely-token-zz", regex: false, stream: true, runs: 3);
+    var confirmStream = await Time(root, "NEEDLE", regex: false, stream: true, runs: 3);
     var regex = await Time(root, "NEEDLE[0-9]", regex: true);
     var listed = await Time(largeRoot, "EARLY", regex: false, filesWithMatches: true);
     var largeMiss = await Time(largeRoot, "unlikely-token-zz", regex: false);
@@ -46,6 +53,8 @@ try
     Console.WriteLine($"small_files={files} bytes_each={smallBytes} total_mib={files * (long)smallBytes / (1024 * 1024)}");
     Print("literal_miss", miss);
     Print("literal_confirm", confirm);
+    Print("literal_miss_stream", missStream);
+    Print("literal_confirm_stream", confirmStream);
     Print("regex_prefilter", regex);
     Console.WriteLine($"large_files={largeCount} bytes_each={largeBytes}");
     Print("large_miss", largeMiss);
@@ -56,6 +65,16 @@ try
     Print("single_file_scan", singleFile);
     Print("large_list_miss", largeListMiss);
     Print("large_early_confirm", largeEarlyConfirm);
+
+    // The same two floor rows on the trees the paired runs use, so a literal miss splits
+    // into walk, open+read, and the confirm rather than one number against rg.
+    PrintParts("root", TimePipelineParts(root), miss, throughput.MissGbps);
+    PrintParts("large", TimePipelineParts(largeRoot), largeMiss, throughput.MissGbps);
+
+    if (quick)
+    {
+        return;
+    }
 
     var rg = Which("rg", "/exec-daemon/rg");
     var grep = Which("grep");
@@ -178,7 +197,7 @@ static void WriteSmall(string root, int files, int bytesEach)
     }
 }
 
-static void ScannerThroughput()
+static (double MissGbps, double BclGbps) ScannerThroughput()
 {
     var data = new byte[32 << 20];
     var line = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx const token = 1;\n"u8;
@@ -200,7 +219,8 @@ static void ScannerThroughput()
 
     clock.Stop();
     var bytes = (double)data.Length * iters;
-    Console.WriteLine($"isa={SimdLiteralScanner.Active} scanner_miss_gbps={bytes / clock.Elapsed.TotalSeconds / 1e9:F2} found={found}");
+    var scannerGbps = bytes / clock.Elapsed.TotalSeconds / 1e9;
+    Console.WriteLine($"isa={SimdLiteralScanner.Active} scanner_miss_gbps={scannerGbps:F2} found={found}");
 
     clock.Restart();
     for (var i = 0; i < iters; i++)
@@ -209,7 +229,8 @@ static void ScannerThroughput()
     }
 
     clock.Stop();
-    Console.WriteLine($"bcl_indexof_gbps={bytes / clock.Elapsed.TotalSeconds / 1e9:F2} found={found}");
+    var bclGbps = bytes / clock.Elapsed.TotalSeconds / 1e9;
+    Console.WriteLine($"bcl_indexof_gbps={bclGbps:F2} found={found}");
 
     if (Ngrep.Search.ByteAutomaton.TryCompile("[abc]{8}", new Ngrep.Search.ByteAutomaton.Options(false, false), out var classProgram))
     {
@@ -240,6 +261,8 @@ static void ScannerThroughput()
         clock.Stop();
         Console.WriteLine($"wide_class_gbps={bytes / clock.Elapsed.TotalSeconds / 1e9:F2} hits={hits.Count} program={wideProgram.GetType().Name}");
     }
+
+    return (scannerGbps, bclGbps);
 }
 
 static void WriteLarge(string root, int count, int bytesEach)
@@ -262,9 +285,9 @@ static void WriteLarge(string root, int count, int bytesEach)
     }
 }
 
-static async Task<(double Ms, int Files, int Matches)> Time(string root, string pattern, bool regex, bool filesWithMatches = false, int workers = 0, int runs = 1)
+static async Task<(double Ms, int Files, int Matches)> Time(string root, string pattern, bool regex, bool filesWithMatches = false, int workers = 0, int runs = 1, bool stream = false)
 {
-    var query = Query(root, pattern, regex, filesWithMatches, workers);
+    var query = Query(root, pattern, regex, filesWithMatches, workers, stream);
     await Searcher.Search(query);
     var best = (Ms: double.MaxValue, Files: 0, Matches: 0);
     for (var run = 0; run < runs; run++)
@@ -274,14 +297,14 @@ static async Task<(double Ms, int Files, int Matches)> Time(string root, string 
         clock.Stop();
         if (clock.Elapsed.TotalMilliseconds < best.Ms)
         {
-            best = (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.Matches.Count);
+            best = (clock.Elapsed.TotalMilliseconds, outcome.FilesSearched, outcome.MatchCount);
         }
     }
 
     return best;
 }
 
-static SearchQuery Query(string root, string pattern, bool regex, bool filesWithMatches, int workers) => new()
+static SearchQuery Query(string root, string pattern, bool regex, bool filesWithMatches, int workers, bool stream) => new()
 {
     Pattern = pattern,
     Path = root,
@@ -291,6 +314,7 @@ static SearchQuery Query(string root, string pattern, bool regex, bool filesWith
     IncludeHidden = true,
     Report = filesWithMatches ? ReportMode.FilesWithMatches : ReportMode.Matches,
     MaxDegreeOfParallelism = workers > 0 ? workers : Environment.ProcessorCount,
+    Events = stream ? new SearchEvents { Batch = static _ => { } } : null,
 };
 
 // A named file keeps the ignore policy on, which is the path that used to enumerate
@@ -611,6 +635,83 @@ static double TimeWalk(string root, bool gitignore)
     Console.WriteLine($"tiny_walk_files={n} ignored={stats.SkippedIgnored}");
     return clock.Elapsed.TotalMilliseconds;
 }
+
+// The walk row produces the paths, then the read rows open, read, and close them with no
+// confirm at all. Policy matches the paired literal_miss case: --no-ignore --hidden.
+static (double WalkMs, double ReadMs, double Read1Ms, int Files, long Bytes) TimePipelineParts(string root)
+{
+    var indexDirectory = IndexPaths.DefaultFor(root);
+    var paths = new List<string>();
+    var walk = double.MaxValue;
+    for (var run = 0; run < 3; run++)
+    {
+        paths.Clear();
+        var clock = Stopwatch.StartNew();
+        foreach (var file in TreeWalker.Enumerate(root, indexDirectory, new WalkStats(), IgnorePolicy.None, includeHidden: true))
+        {
+            paths.Add(file.FullPath);
+        }
+
+        clock.Stop();
+        walk = Math.Min(walk, clock.Elapsed.TotalMilliseconds);
+    }
+
+    // Sizes come from a stat outside the timed rows; they only scale the scan floor.
+    var bytes = 0L;
+    foreach (var path in paths)
+    {
+        bytes += new FileInfo(path).Length;
+    }
+
+    return (walk, ReadOnly(paths, Environment.ProcessorCount), ReadOnly(paths, 1), paths.Count, bytes);
+}
+
+// Open, read, and close over a list that is already walked: the floor a search over these
+// files cannot beat, at the same pool width the searcher uses. The read keeps the same
+// 8 KiB NUL probe as a search, so it is not part of the residual.
+static double ReadOnly(List<string> paths, int workers)
+{
+    var best = double.MaxValue;
+    for (var run = 0; run < 3; run++)
+    {
+        var clock = Stopwatch.StartNew();
+        if (workers <= 1)
+        {
+            foreach (var path in paths)
+            {
+                using var bytes = TextFiles.Read(path, stop: null, searchBinary: false, CancellationToken.None);
+            }
+        }
+        else
+        {
+            Parallel.ForEach(
+                paths,
+                new ParallelOptions { MaxDegreeOfParallelism = workers },
+                static path =>
+                {
+                    using var bytes = TextFiles.Read(path, stop: null, searchBinary: false, CancellationToken.None);
+                });
+        }
+
+        clock.Stop();
+        best = Math.Min(best, clock.Elapsed.TotalMilliseconds);
+    }
+
+    return best;
+}
+
+// Walk, read, and scan overlap in the real pipeline: the walk feeds readers while the
+// confirm runs on each chunk inside the read loop. So read_ms + scan_floor_ms is a serial
+// upper bound, and residual_ms is what dispatch, allocation, and the write path add on top.
+static void PrintParts(string name, (double WalkMs, double ReadMs, double Read1Ms, int Files, long Bytes) parts, (double Ms, int Files, int Matches) full, double gbps)
+{
+    var scanFloor = ScanFloorMs(parts.Bytes, gbps);
+    var serialFloor = parts.ReadMs + scanFloor;
+    Console.WriteLine(
+        $"pipeline_parts_{name} bytes={parts.Bytes} files={parts.Files} walk_ms={parts.WalkMs:F1} read_ms={parts.ReadMs:F1} read_1w_ms={parts.Read1Ms:F1} scan_floor_ms={scanFloor:F1} serial_floor_ms={serialFloor:F1} full_ms={full.Ms:F1} residual_ms={full.Ms - serialFloor:F1}");
+}
+
+static double ScanFloorMs(long bytes, double gbps) => gbps <= 0 ? 0 : bytes / (gbps * 1e9) * 1000.0;
 
 static SearchQuery TinyQuery(string root, string pattern, bool ignore, bool quiet, bool list, int workers = 0) => new()
 {
