@@ -13,8 +13,9 @@ internal static class Program
         var min = Math.Max(workers, Environment.ProcessorCount * 2);
         ThreadPool.SetMinThreads(min, Math.Max(io, Environment.ProcessorCount));
 
-        // Set the encoding before buffering: the setter rebuilds Console.Out on a
-        // terminal. Stdout is installed here, not in NgrepCli.Run, so a host that
+        // Set the encoding before installing stdout: the setter rebuilds Console.Out
+        // on a terminal. Install flushes a terminal on each write and keeps a 64 KiB
+        // block for a pipe or file. It runs here, not in NgrepCli.Run, so a host that
         // calls Run directly keeps its own Console.Out (tests capture a StringWriter).
         Console.OutputEncoding = Encoding.UTF8;
         Stdout.Install();

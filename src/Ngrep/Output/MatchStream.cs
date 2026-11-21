@@ -15,9 +15,11 @@ internal static partial class MachineOutput
         private readonly OutputFormat _format;
         private readonly SearchPresentation _presentation;
         private readonly bool _holdAutoHeading;
-        // Text records for one file are buffered here and written in bulk. Flushed at a
-        // bounded size so a file with many hits does not hold its whole output in memory.
+        // Text records for one file are buffered here and written in bulk. A pipe flushes
+        // that buffer at a bounded size so a file with many hits does not stay in memory.
+        // A terminal flushes each line so the hit is visible before the file ends.
         private readonly StringBuilder _sink = new(1 << 16);
+        private readonly bool _flushEachLine;
         private readonly System.Buffers.ArrayBufferWriter<byte> _raw = new(1 << 16);
         private const int SinkFlush = 1 << 16;
         private const int RawFlush = 1 << 16;
@@ -38,6 +40,7 @@ internal static partial class MachineOutput
             _presentation = presentation;
             _holdAutoHeading = holdAutoHeading && format == OutputFormat.Text && presentation.Report == ReportMode.Matches;
             _useHeading = presentation.Heading;
+            _flushEachLine = Stdout.Active.AutoFlush;
         }
 
         public void File(SearchBatch batch)
@@ -314,7 +317,7 @@ internal static partial class MachineOutput
                     lastWrittenLine = match.Line;
                     EnsureHeading(match.Path);
                     WriteMatchLine(match, MatchBody(match, lines, _presentation, _presentation.OnlyMatching), _presentation, includePath: _presentation.WithFilename && !_useHeading, colorizeBody: _presentation.Replacer == null, _sink);
-                    MaybeFlushSink();
+                    AfterLine();
                 }
 
                 FlushSink();
@@ -347,7 +350,7 @@ internal static partial class MachineOutput
                 if (match.Before == null && match.After == null)
                 {
                     WriteMatchLine(match, MatchBody(match, lines, _presentation, onlyMatching: false), _presentation, includePath: _presentation.WithFilename && !_useHeading, colorizeBody: _presentation.Replacer == null, _sink);
-                    MaybeFlushSink();
+                    AfterLine();
                     continue;
                 }
 
@@ -356,6 +359,7 @@ internal static partial class MachineOutput
                 if (printed && upcoming > lastLine + 1)
                 {
                     _sink.Append("--").Append(Console.Out.NewLine);
+                    AfterLine();
                 }
 
                 foreach (var line in before)
@@ -368,6 +372,7 @@ internal static partial class MachineOutput
                     WriteContextLine(match.Path, line.Line, line.Text, _presentation, includePath: _presentation.WithFilename && !_useHeading, _sink);
                     lastLine = line.Line;
                     printed = true;
+                    AfterLine();
                 }
 
                 WriteMatchLine(match, MatchBody(match, lines, _presentation, onlyMatching: false), _presentation, includePath: _presentation.WithFilename && !_useHeading, colorizeBody: _presentation.Replacer == null, _sink);
@@ -377,6 +382,7 @@ internal static partial class MachineOutput
                 }
 
                 printed = true;
+                AfterLine();
                 foreach (var line in match.After ?? [])
                 {
                     if (line.Line <= lastLine || fileMatches.Contains(line.Line))
@@ -386,12 +392,25 @@ internal static partial class MachineOutput
 
                     WriteContextLine(match.Path, line.Line, line.Text, _presentation, includePath: _presentation.WithFilename && !_useHeading, _sink);
                     lastLine = line.Line;
+                    AfterLine();
                 }
-
-                MaybeFlushSink();
             }
 
             FlushSink();
+        }
+
+        /// <summary>
+        /// A terminal hands the line to the writer now. A pipe keeps appending until the block fills.
+        /// </summary>
+        private void AfterLine()
+        {
+            if (_flushEachLine)
+            {
+                FlushSink();
+                return;
+            }
+
+            MaybeFlushSink();
         }
 
         /// <summary>Writes buffered records once they reach a bounded size, keeping order.</summary>
@@ -442,7 +461,7 @@ internal static partial class MachineOutput
                     _presentation.LineNumbers ? row.Line : null,
                     _presentation.Column ? row.Column : null,
                     _presentation.NullPaths);
-                if (_raw.WrittenCount >= RawFlush)
+                if (_flushEachLine || _raw.WrittenCount >= RawFlush)
                 {
                     FlushRaw();
                 }
